@@ -1,0 +1,29 @@
+/target/
+/android/libs/
+/.android-env
+/.tools/
+/android/assets/*.bin
+/android/voice-assets/*.bin
+/bridge/node_modules/
+/.space/
+
+# Private local workspace context; publish source, not coordinator/session history.
+/memory/
+/design/
+/AGENTS.md
+/SPACE.md
+
+# Local credentials, recordings, logs and interpreter caches.
+.env
+.env.*
+*.key
+*.pem
+*.p12
+*.jks
+*.keystore
+*.wav
+*.pcm
+*.log
+__pycache__/
+*.py[cod]
+.DS_Store

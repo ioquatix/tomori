@@ -1,0 +1,13 @@
+{
+  "name": "base-agent-swarm-opencode-bridge",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node server.mjs",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "@opencode/client": "2.1.4",
+    "sherpa-onnx-node": "1.13.8"
+  }
+}

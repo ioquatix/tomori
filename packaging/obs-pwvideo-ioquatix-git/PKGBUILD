@@ -1,0 +1,32 @@
+# Local package for the ioquatix fork while the upstream PR is under review.
+pkgname=obs-pwvideo-ioquatix-git
+pkgver=0.2.4.r201.g6905b40
+pkgrel=1
+pkgdesc='OBS PipeWire Video plugin with opt-in Video/Source discovery'
+arch=('x86_64')
+url='https://github.com/ioquatix/obs-pwvideo'
+license=('GPL-2.0-or-later')
+depends=('libpipewire' 'obs-studio' 'glibc')
+makedepends=('git' 'cmake' 'python')
+provides=('obs-pwvideo')
+conflicts=('obs-pwvideo')
+source=('obs-pwvideo::git+https://github.com/ioquatix/obs-pwvideo.git#branch=discover-video-source-nodes')
+sha256sums=('SKIP')
+
+pkgver() {
+  cd "$srcdir/obs-pwvideo"
+  local version
+  version=$(python -c 'import json; print(json.load(open("buildspec.json"))["version"])')
+  printf '%s.r%s.g%s' "$version" "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+}
+
+build() {
+  cmake -S "$srcdir/obs-pwvideo" -B "$srcdir/build" \
+    -DCMAKE_BUILD_TYPE=None -DCMAKE_INSTALL_PREFIX=/usr \
+    -DCMAKE_C_FLAGS="$CFLAGS -DNDEBUG"
+  cmake --build "$srcdir/build"
+}
+
+package() {
+  DESTDIR="$pkgdir" cmake --install "$srcdir/build"
+}
