@@ -11,8 +11,8 @@ const TICK_MS = 50;
 const MAX_PENDING = BYTES_PER_TICK * 3;
 const HEADER_BYTES = 44;
 const SOURCES = [
-  { path: "/spectator/microphone.wav", node: "base-swarm-quest-microphone", sink: "base-swarm-quest-microphone-sink", description: "Base-Swarm-Quest-Microphone" },
-  { path: "/spectator/agent.wav", node: "base-swarm-assistant-voice", sink: "base-swarm-assistant-voice-sink", description: "Base-Swarm-Assistant-Voice" },
+  { path: "/spectator/microphone.wav", node: "tomori-quest-microphone", sink: "tomori-quest-microphone-sink", description: "Tomori-Quest-Microphone" },
+  { path: "/spectator/agent.wav", node: "tomori-assistant-voice", sink: "tomori-assistant-voice-sink", description: "Tomori-Assistant-Voice" },
 ];
 
 // The bridge produces the fixed 44-byte PCM WAV header in audio.mjs. Incoming
@@ -172,12 +172,12 @@ export function ownedModule(list, module) {
     const [id, type, args = ""] = line.split("\t");
     const fields = args.split(/\s+/);
     return Number(id) === module.id && type === module.type &&
-      fields.includes(`${module.key}=${module.node}`) && fields.includes(`base.swarm.instance=${module.instance}`);
+      fields.includes(`${module.key}=${module.node}`) && fields.includes(`tomori.instance=${module.instance}`);
   });
 }
 
-export async function run({ port = Number(process.env.BASE_SWARM_BRIDGE_PORT || 8765) } = {}) {
-  if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("Invalid BASE_SWARM_BRIDGE_PORT");
+export async function run({ port = Number(process.env.TOMORI_BRIDGE_PORT || 8765) } = {}) {
+  if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("Invalid TOMORI_BRIDGE_PORT");
   const feeds = [];
   const modules = [];
   const loading = [];
@@ -224,7 +224,7 @@ export async function run({ port = Number(process.env.BASE_SWARM_BRIDGE_PORT || 
     for (const source of SOURCES) {
       const create = pactl("load-module", "module-null-sink", `sink_name=${source.sink}`,
         `rate=${SAMPLE_RATE}`, "channels=1",
-        `sink_properties=device.description=${source.description}-Internal node.virtual=true priority.session=1 base.swarm.instance=${instance}`)
+        `sink_properties=device.description=${source.description}-Internal node.virtual=true priority.session=1 tomori.instance=${instance}`)
         .then(output => {
           const id = Number(output);
           if (!Number.isSafeInteger(id) || id < 0 || !/^\d+$/.test(output)) throw new Error(`Invalid PulseAudio module ID: ${output}`);
@@ -239,7 +239,7 @@ export async function run({ port = Number(process.env.BASE_SWARM_BRIDGE_PORT || 
       if (!ownedDevice(sinks, source.sink, id)) throw new Error(`Created module ${id} does not own ${source.sink}`);
       const createInput = pactl("load-module", "module-remap-source", `master=${source.sink}.monitor`,
         `source_name=${source.node}`, `rate=${SAMPLE_RATE}`, "channels=1", "channel_map=mono", "master_channel_map=mono",
-        `source_properties=device.description=${source.description} node.virtual=true priority.session=1 base.swarm.instance=${instance}`)
+        `source_properties=device.description=${source.description} node.virtual=true priority.session=1 tomori.instance=${instance}`)
         .then(output => {
           const inputId = Number(output);
           if (!Number.isSafeInteger(inputId) || inputId < 0 || !/^\d+$/.test(output)) throw new Error(`Invalid PulseAudio module ID: ${output}`);
@@ -256,7 +256,7 @@ export async function run({ port = Number(process.env.BASE_SWARM_BRIDGE_PORT || 
       feeds.push(feed);
       feed.start();
     }
-    console.log("PipeWire audio sources: Base-Swarm-Quest-Microphone and Base-Swarm-Assistant-Voice; Ctrl-C to stop.");
+    console.log("PipeWire audio sources: Tomori-Quest-Microphone and Tomori-Assistant-Voice; Ctrl-C to stop.");
   } catch (error) {
     await stop(error.message);
   }

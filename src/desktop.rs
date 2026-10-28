@@ -19,7 +19,7 @@ use winit::{
 };
 
 const TITLE: &str =
-    "base-agent-swarm | LMB attract · RMB orbit · wheel zoom · R reset · Space pause";
+    "Tomori | LMB attract · RMB orbit · wheel zoom · E environment · R reset · Space pause";
 const SPECTATOR_WIDTH: u32 = 1920;
 const SPECTATOR_HEIGHT: u32 = 1080;
 
@@ -64,7 +64,7 @@ impl ApplicationHandler for App {
         let result = (|| {
             let mut attributes = Window::default_attributes()
                 .with_title(if self.spectator {
-                    "base-agent-swarm | Quest spectator (OBS)"
+                    "Tomori | Quest spectator (OBS)"
                 } else {
                     TITLE
                 })
@@ -149,10 +149,16 @@ impl ApplicationHandler for App {
                     PhysicalKey::Code(KeyCode::KeyR) if state.spectator.is_none() => {
                         state.swarm = Swarm::new()
                     }
+                    PhysicalKey::Code(KeyCode::KeyE) if state.spectator.is_none() => {
+                        state
+                            .renderer
+                            .set_environment(state.renderer.environment().next());
+                        log::info!("Environment: {:?}", state.renderer.environment());
+                    }
                     PhysicalKey::Code(KeyCode::Space) if state.spectator.is_none() => {
                         state.paused = !state.paused;
                         state.window.set_title(if state.paused {
-                            "base-agent-swarm [paused] — Space to resume"
+                            "Tomori [paused] — Space to resume"
                         } else {
                             TITLE
                         });

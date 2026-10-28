@@ -2,24 +2,59 @@
 
 A conversational spatial workspace for people and agents, currently a native
 **Rust + OpenXR + wgpu/Vulkan** prototype for **Meta Quest 3**.
-128 cyan/violet agents flock above a stationary floor grid. Real stereo views
-use the headset's predicted poses and asymmetric eye projections. Voice-to-text
+128 agents inhabit a selectable moonlit Sky environment or minimal floor grid.
+Real stereo views use the headset's predicted poses and asymmetric eye projections. Voice-to-text
 and speech synthesis run locally on the PC; the Quest captures audio and renders
 the interactive scene. A PC bridge is required for voice and OpenCode chat.
 
 Tomori is the name of both the system and its conversational coordinator; see
-[naming.md](naming.md). Runtime package names still use `base-agent-swarm` for
-compatibility. The current prototype is single-user and USB/loopback-connected;
-multi-user workspaces, Bonjour discovery and the Japanese-inspired environment
-are future directions, not implemented features. Private workspace memory and
-session state are not included in this public source repository.
+[naming.md](naming.md). The Rust package and executable are named `tomori`.
+The current prototype is single-user and USB/loopback-connected;
+multi-user workspaces and Bonjour discovery are future directions, not
+implemented features. Sky is an early environment blockout, not finished artwork.
+Private workspace memory and session state are not included in this public
+source repository.
 
 - **Right trigger:** attract the swarm to the right controller (orange cube).
 - **A:** open a session / allow a pending tool once; otherwise reset the swarm.
 - **Hold X (left controller):** see a live transcription draft; release to send.
 - **Squeeze the left grip:** toggle your live audience microphone.
+- **Squeeze the right grip:** switch between Sky and Minimal environments.
 - **Hold Meta button:** Quest's system recenter brings the swarm in front of you.
   A short press opens the system menu. No artificial camera movement.
+
+## Environments
+
+**Sky** is the default: a fixed moonlit night, sparse stars, static cloud banks,
+a stable platform and an open shrine blockout with warm lanterns. The concrete
+renderer lives in [`crates/environment-sky`](crates/environment-sky/README.md),
+separate from sessions, worker simulation and application input.
+
+- **Quest / desktop XR:** squeeze and release the right grip to switch presets.
+- **Desktop window:** press **E** to switch presets; or launch with
+  `TOMORI_ENVIRONMENT=minimal cargo run` for the original grid.
+- **Spectator:** follows the headset's selection; older headset builds without
+  an environment field retain Minimal. Update the PC bridge for new senders.
+
+Switching does not reset agents, conversations or worker positions. Selection
+is not persisted across launches. Sky uses the same scene/recenter transform as
+the workspace; it does not move the camera. Clouds use a bounded low-resolution
+volumetric density pass with translucent edges and approximate moonlighting;
+lanterns have brighter emissive faces and cast warm, occluded illumination onto
+the nearby static scenery through a build-time lightmap, not runtime point-light
+shadow maps. The same lightmap adds local ambient occlusion at contacts.
+The shrine and platform cast/receive softly filtered moon shadows from a cached
+static shadow map. Agent/status visuals and labels are not shadowed.
+There is no day/night cycle, scenery collision or new locomotion system.
+
+The scene has been exercised on Quest 3 and tested offscreen in Vulkan; the
+on-device frame-time budget still needs measurement. To run
+the stereo/switch/recenter regression and optionally save a preview sheet:
+
+```sh
+TOMORI_SKY_PREVIEW=/tmp/opencode/tomori-sky.png cargo test --locked \
+  sky_environment_renders_stereo_switches_and_preserves_recenter -- --ignored
+```
 
 ## Chat with existing OpenCode sessions in VR
 
@@ -177,7 +212,7 @@ USB loopback connection to the Quest's speakers. The model stays on the PC;
 no speech synthesis cloud service is used. The default is `jf_alpha` (ID 37),
 a Japanese-trained voice speaking English via the English text frontend. This
 is an experiment, not a clone of any specific voice; English pronunciation may
-be imperfect. Change the voice ID (0–53) by setting `BASE_SWARM_TTS_VOICE` when
+be imperfect. Change the voice ID (0–53) by setting `TOMORI_TTS_VOICE` when
 starting the bridge. Other Japanese-trained voices include 38, 39, and 40;
 the prior Michael voice is 16 in this model.
 
@@ -240,7 +275,7 @@ restarting the bridge.
 ### Experimental direct PipeWire video (Linux)
 
 Instead of capturing a window, run `cargo run -- --spectator-pipewire`. It
-publishes `Base-Agent-Swarm-Spectator` (`base-agent-swarm-spectator`) **without
+publishes `Tomori-Spectator` (`tomori-spectator`) **without
 creating a window or display surface**. Press **Ctrl-C** to stop it. For an
 optional window showing the same direct output, use
 `cargo run -- --spectator-pipewire-preview` instead; Escape closes that window
@@ -268,7 +303,7 @@ check performance and latency in the real OBS preview.
 The built-in OBS PipeWire screen capture is not the same as a generic PipeWire
 video input. The [ioquatix fork of `obs-pwvideo`](https://github.com/ioquatix/obs-pwvideo/tree/discover-video-source-nodes)
 adds an opt-in **Show video devices and other sources** checkbox to the PipeWire
-Video source; enable it to select **Base-Agent-Swarm-Spectator**. The change is
+Video source; enable it to select **Tomori-Spectator**. The change is
 under review in [upstream PR #8](https://github.com/hoshinolina/obs-pwvideo/pull/8).
 To build and install the fork as a Pacman-managed package on Arch:
 
@@ -284,12 +319,12 @@ it is not itself an AUR package.
 
 Alternatively, the [AUR `obs-pwvideo` package](https://aur.archlinux.org/packages/obs-pwvideo)
 works with this stream **when the OBS source already has its target saved** as
-`base-agent-swarm-spectator`. The plugin does not discover `Video/Source` nodes
+`tomori-spectator`. The plugin does not discover `Video/Source` nodes
 in its picker, although it can connect to a saved target of that class. Avoid
 changing the source's target to “No autoconnect”, which clears it. For a new
 source, either manually link the PipeWire ports (`pw-link` or a graph editor),
 or, with OBS closed and the scene collection backed up, set the source's
-`settings.target` to `base-agent-swarm-spectator` in its scene collection JSON.
+`settings.target` to `tomori-spectator` in its scene collection JSON.
 Check that the `id` is `pipewire-video-source` and preserve all other settings.
 An isolated libobs test with the unmodified AUR package and a saved target
 received frames from the earlier 1080p spectator; check the real OBS preview too.
@@ -329,7 +364,7 @@ the audio helper in a separate terminal:
 node bridge/pipewire-audio.mjs
 ```
 
-It exposes **Base-Swarm-Quest-Microphone** and **Base-Swarm-Assistant-Voice** as
+It exposes **Tomori-Quest-Microphone** and **Tomori-Assistant-Voice** as
 two audio inputs. In OBS, add an **Audio Input Capture (PulseAudio)** source for
 each and choose the matching device. Start the helper before adding or selecting
 the OBS sources; leave the existing OBS scene unchanged until you are ready to
@@ -392,7 +427,7 @@ rolling audio window. Long prompts keep their earlier finalized words without
 buffering all the audio. The live draft is refreshed approximately every two
 seconds of audio. The initial model load may take longer; wait for `REC` before
 speaking. The model and CUDA runtime remain on the PC; no external transcription
-service is used. Override `BASE_SWARM_ASR_DEVICE=cpu` on bridge startup if needed.
+service is used. Override `TOMORI_ASR_DEVICE=cpu` on bridge startup if needed.
 
 Microphone capture is Android AAudio, 16 kHz mono. Push-to-talk audio is sent to
 the PC for recognition **even when the audience microphone is off**; the left
@@ -437,8 +472,8 @@ The Quest APK does not contain a transcription model. PC transcription setup
 fetches MIT-licensed `Systran/faster-whisper-small.en` at a pinned revision and
 verifies the model SHA-256. The prior Quest model files are left untouched.
 `cargo-apk` creates a local debug signing key if needed. Build output:
-`target/debug/apk/base-agent-swarm.apk` (package `dev.base.agentswarm`).
-Launch from **Library → Unknown Sources → base-agent-swarm** if not auto-started.
+`target/debug/apk/tomori.apk` (package `io.github.ioquatix.tomori`).
+Launch from **Library → Unknown Sources → Tomori** if not auto-started.
 
 ```sh
 bash scripts/android.sh devices

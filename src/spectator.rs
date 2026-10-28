@@ -14,6 +14,9 @@ pub const VIDEO_INTERVAL: Duration = Duration::from_millis(50);
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Frame {
     pub sequence: u64,
+    /// Absent in older headset builds: retain their original Minimal scenery.
+    #[serde(default)]
+    pub environment: crate::environment::Environment,
     pub projection: [f32; 16],
     pub scene_to_space: [f32; 16],
     pub head: [f32; 16],
@@ -117,7 +120,7 @@ pub fn publish_frames() -> SyncSender<Frame> {
 #[cfg(not(target_os = "android"))]
 pub fn receive_frames() -> Receiver<Frame> {
     let (sender, receiver) = mpsc::sync_channel(2);
-    let port = std::env::var("BASE_SWARM_BRIDGE_PORT")
+    let port = std::env::var("TOMORI_BRIDGE_PORT")
         .ok()
         .and_then(|value| value.parse::<u16>().ok())
         .filter(|port| *port != 0)
@@ -151,6 +154,25 @@ pub fn receive_frames() -> Receiver<Frame> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn environment_selection_is_shared_and_legacy_frames_remain_minimal() {
+        let legacy = serde_json::json!({
+            "sequence": 1, "projection": ([1.0; 16].to_vec()), "scene_to_space": ([1.0; 16].to_vec()),
+            "head": ([1.0; 16].to_vec()), "view_aspect": 1.0, "agents": vec![[0.0; 3]; AGENTS],
+            "controller": null, "attracting": false, "caption": "", "recording_ms": null
+        });
+        let mut frame: Frame = serde_json::from_value(legacy).unwrap();
+        assert_eq!(frame.environment, crate::environment::Environment::Minimal);
+        frame.environment = crate::environment::Environment::Sky;
+        let mut encoded = serde_json::to_value(&frame).unwrap();
+        assert_eq!(encoded["environment"], "sky");
+        let decoded: Frame = serde_json::from_value(encoded.clone()).unwrap();
+        assert_eq!(decoded.environment, frame.environment);
+        assert!(decoded.valid());
+        encoded["environment"] = "unknown".into();
+        assert!(serde_json::from_value::<Frame>(encoded).is_err());
+    }
 
     #[test]
     fn terminal_motion_and_128_stations_roundtrip_without_spectator_reanimation() {
@@ -235,6 +257,7 @@ mod tests {
     fn validates_scene_and_rejects_nonfinite_or_incomplete_frames() {
         let mut frame = Frame {
             sequence: 1,
+            environment: Default::default(),
             projection: [1.0; 16],
             scene_to_space: [1.0; 16],
             head: [1.0; 16],
@@ -269,6 +292,7 @@ mod tests {
     fn controller_poses_are_optional_for_older_senders_and_validated() {
         let frame = Frame {
             sequence: 1,
+            environment: Default::default(),
             projection: [1.0; 16],
             scene_to_space: [1.0; 16],
             head: [1.0; 16],

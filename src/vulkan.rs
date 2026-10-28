@@ -27,7 +27,7 @@ impl Gpu {
         let extensions = wgpu_hal::vulkan::Instance::desired_extensions(&entry, API, flags)?;
         let extension_ptrs: Vec<_> = extensions.iter().map(|e| e.as_ptr()).collect();
         let app_info = vk::ApplicationInfo::default()
-            .application_name(c"base-agent-swarm")
+            .application_name(c"tomori")
             .api_version(API);
         let info = vk::InstanceCreateInfo::default()
             .application_info(&app_info)

@@ -1,6 +1,7 @@
 use crate::{
     controller::{Model as ControllerModel, Pose},
     controller_graphics::Controllers,
+    environment::Environment,
     hands::Hand,
     interaction::Mode,
     swarm::{AGENT_COUNT, CENTER, Swarm},
@@ -52,6 +53,8 @@ fn oriented_shader() -> String {
 }
 
 pub struct Renderer {
+    environment: Environment,
+    sky: environment_sky::Sky,
     pipeline: wgpu::RenderPipeline,
     vertices: wgpu::Buffer,
     instances: wgpu::Buffer,
@@ -176,6 +179,8 @@ impl Renderer {
         let workspace =
             crate::workspace_graphics::WorkspaceGraphics::new(device, format, &camera_layout);
         Self {
+            environment: Environment::initial(),
+            sky: environment_sky::Sky::new(device, queue, format, width, height),
             pipeline,
             vertices,
             instances,
@@ -215,6 +220,17 @@ impl Renderer {
     #[cfg(any(not(target_os = "android"), test))]
     pub fn resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
         self.depth = Self::depth_views(device, width, height);
+        self.sky.resize(device, width, height);
+    }
+
+    pub fn environment(&self) -> Environment {
+        self.environment
+    }
+
+    /// Does not modify simulation, worker placement, input or conversation state.
+    /// The next `update` rebuilds only the presentation instances.
+    pub fn set_environment(&mut self, environment: Environment) {
+        self.environment = environment;
     }
 
     pub fn update(
@@ -233,27 +249,10 @@ impl Renderer {
             -0.4
         };
         swarm_instances(swarm, &mut self.scene);
-        // A stationary floor grid provides a comfortable world-space reference.
-        for n in -10..=10 {
-            let f = n as f32 * 0.5;
-            let color = if n == 0 {
-                [0.08, 0.22, 0.3]
-            } else {
-                [0.025, 0.065, 0.09]
-            };
-            self.scene.push(Instance {
-                position: [f, 0.0, -2.5],
-                scale: [0.008, 0.004, 10.0],
-                color,
-                ..Default::default()
-            });
-            self.scene.push(Instance {
-                position: [0.0, 0.0, f - 2.5],
-                scale: [10.0, 0.004, 0.008],
-                color,
-                ..Default::default()
-            });
+        if self.environment == Environment::Minimal {
+            minimal_floor(&mut self.scene);
         }
+        // Keep the coordinator's orientation ring in both environments.
         for n in 0..40 {
             let angle = n as f32 * std::f32::consts::TAU / 40.0;
             self.scene.push(Instance {
@@ -357,12 +356,17 @@ impl Renderer {
             label: Some("swarm frame"),
         });
         for eye in 0..targets.len() {
+            let scene_to_clip = matrices[eye] * scene_to_space;
+            if self.environment == Environment::Sky {
+                self.sky.prepare_eye(queue, eye, scene_to_clip);
+                self.sky.encode_clouds(&mut encoder, eye);
+            }
             // Separate buffers are important: two writes to one buffer before
             // submission would make both eyes use the right-eye transform.
             queue.write_buffer(
                 &self.cameras[eye],
                 0,
-                bytemuck::cast_slice(&(matrices[eye] * scene_to_space).to_cols_array()),
+                bytemuck::cast_slice(&scene_to_clip.to_cols_array()),
             );
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("eye"),
@@ -392,12 +396,18 @@ impl Renderer {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
+            if self.environment == Environment::Sky {
+                self.sky.draw(&mut pass, eye);
+            }
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &self.camera_bindings[eye], &[]);
             pass.set_vertex_buffer(0, self.vertices.slice(..));
             pass.set_vertex_buffer(1, self.instances.slice(..));
             pass.draw(0..self.vertex_count, 0..self.scene.len() as u32);
             self.controllers.draw(&mut pass);
+            if self.environment == Environment::Sky {
+                self.sky.draw_clouds(&mut pass, eye);
+            }
             self.workspace.draw(
                 &mut pass,
                 &self.camera_bindings[eye],
@@ -411,6 +421,30 @@ impl Renderer {
             }
         }
         queue.submit([encoder.finish()])
+    }
+}
+
+fn minimal_floor(scene: &mut Vec<Instance>) {
+    // Original stationary grid retained as a regression/comfort baseline.
+    for n in -10..=10 {
+        let f = n as f32 * 0.5;
+        let color = if n == 0 {
+            [0.08, 0.22, 0.3]
+        } else {
+            [0.025, 0.065, 0.09]
+        };
+        scene.push(Instance {
+            position: [f, 0.0, -2.5],
+            scale: [0.008, 0.004, 10.0],
+            color,
+            ..Default::default()
+        });
+        scene.push(Instance {
+            position: [0.0, 0.0, f - 2.5],
+            scale: [10.0, 0.004, 0.008],
+            color,
+            ..Default::default()
+        });
     }
 }
 
@@ -539,6 +573,191 @@ fn cube() -> Vec<Vertex> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "requires a Vulkan adapter"]
+    fn sky_environment_renders_stereo_switches_and_preserves_recenter() {
+        pollster::block_on(async {
+            const WIDTH: u32 = 768;
+            const HEIGHT: u32 = 512;
+            let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+                backends: wgpu::Backends::VULKAN,
+                ..wgpu::InstanceDescriptor::new_without_display_handle()
+            });
+            let adapter = instance.request_adapter(&Default::default()).await.unwrap();
+            let (device, queue) = adapter.request_device(&Default::default()).await.unwrap();
+            let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+            let textures: [_; 2] = std::array::from_fn(|_| {
+                device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some("Sky test eye"),
+                    size: wgpu::Extent3d {
+                        width: WIDTH,
+                        height: HEIGHT,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                    view_formats: &[],
+                })
+            });
+            let views = textures
+                .each_ref()
+                .map(|t| t.create_view(&Default::default()));
+            let mut renderer = Renderer::new(
+                &device,
+                &queue,
+                wgpu::TextureFormat::Rgba8UnormSrgb,
+                WIDTH,
+                HEIGHT,
+            );
+            let mut swarm = Swarm::new();
+            for _ in 0..240 {
+                swarm.set_visual(
+                    crate::interaction::Visual {
+                        mode: Mode::Ready,
+                        ..Default::default()
+                    },
+                    1.0 / 72.0,
+                );
+                swarm.step(1.0 / 72.0, None);
+            }
+            let positions: Vec<_> = swarm.agents.iter().map(|a| a.position).collect();
+            let projection = Mat4::perspective_rh(1.2, WIDTH as f32 / HEIGHT as f32, 0.05, 100.0);
+            let matrices = [-0.032, 0.032].map(|x| {
+                let eye = glam::Vec3::new(x, 1.6, 0.0);
+                projection
+                    * Mat4::look_at_rh(eye, eye + glam::Vec3::new(0.0, 0.15, -1.0), glam::Vec3::Y)
+            });
+            let capture = |renderer: &Renderer, matrices: [Mat4; 2], anchor: Mat4| {
+                renderer.render(&device, &queue, &views, &matrices, anchor, None);
+                let buffers: [_; 2] = std::array::from_fn(|_| {
+                    device.create_buffer(&wgpu::BufferDescriptor {
+                        label: Some("Sky test readback"),
+                        size: u64::from(WIDTH * HEIGHT * 4),
+                        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                        mapped_at_creation: false,
+                    })
+                });
+                let mut encoder = device.create_command_encoder(&Default::default());
+                for eye in 0..2 {
+                    encoder.copy_texture_to_buffer(
+                        textures[eye].as_image_copy(),
+                        wgpu::TexelCopyBufferInfo {
+                            buffer: &buffers[eye],
+                            layout: wgpu::TexelCopyBufferLayout {
+                                offset: 0,
+                                bytes_per_row: Some(WIDTH * 4),
+                                rows_per_image: Some(HEIGHT),
+                            },
+                        },
+                        wgpu::Extent3d {
+                            width: WIDTH,
+                            height: HEIGHT,
+                            depth_or_array_layers: 1,
+                        },
+                    );
+                }
+                queue.submit([encoder.finish()]);
+                buffers
+                    .iter()
+                    .map(|buffer| {
+                        let (tx, rx) = std::sync::mpsc::channel();
+                        buffer
+                            .slice(..)
+                            .map_async(wgpu::MapMode::Read, move |result| {
+                                tx.send(result).unwrap();
+                            });
+                        device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+                        rx.recv().unwrap().unwrap();
+                        let data = buffer.slice(..).get_mapped_range().unwrap().to_vec();
+                        buffer.unmap();
+                        data
+                    })
+                    .collect::<Vec<_>>()
+            };
+            renderer.set_environment(Environment::Minimal);
+            renderer.update(&queue, &swarm, None, false);
+            let minimal = capture(&renderer, matrices, Mat4::IDENTITY);
+            renderer.set_environment(Environment::Sky);
+            renderer.update(&queue, &swarm, None, false);
+            let sky = capture(&renderer, matrices, Mat4::IDENTITY);
+            assert_ne!(sky[0], minimal[0]);
+            assert_ne!(sky[0], sky[1], "scenery must have stereo parallax");
+            // Return to the original preset without touching the simulation.
+            renderer.set_environment(Environment::Minimal);
+            renderer.update(&queue, &swarm, None, false);
+            assert_eq!(minimal, capture(&renderer, matrices, Mat4::IDENTITY));
+            assert_eq!(
+                positions,
+                swarm.agents.iter().map(|a| a.position).collect::<Vec<_>>()
+            );
+            renderer.set_environment(Environment::Sky);
+            renderer.update(&queue, &swarm, None, false);
+            let anchor = Mat4::from_rotation_translation(
+                glam::Quat::from_rotation_y(0.35),
+                glam::Vec3::new(1.0, 0.0, -0.5),
+            );
+            let compensated = capture(&renderer, matrices.map(|m| m * anchor.inverse()), anchor);
+            for eye in 0..2 {
+                let changed = sky[eye]
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .zip(compensated[eye].as_chunks::<4>().0)
+                    .filter(|(a, b)| a != b)
+                    .count();
+                assert!(
+                    changed < 2000,
+                    "recenter changed {changed} pixels in eye {eye}"
+                );
+            }
+            // Distant sky follows orientation, not the viewer's translation.
+            let translated = capture(
+                &renderer,
+                matrices.map(|m| m * Mat4::from_translation(glam::Vec3::new(-0.4, 0.0, 0.0))),
+                Mat4::IDENTITY,
+            );
+            let top_bytes = (WIDTH * 100 * 4) as usize;
+            let sky_changes = sky[0][..top_bytes]
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .zip(translated[0][..top_bytes].as_chunks::<4>().0)
+                .filter(|(a, b)| a != b)
+                .count();
+            assert!(
+                sky_changes < 800,
+                "translation must not drag the sky: {sky_changes}"
+            );
+            let overview = projection
+                * Mat4::look_at_rh(
+                    glam::Vec3::new(6.0, 5.0, 8.0),
+                    glam::Vec3::new(0.0, 0.7, -2.5),
+                    glam::Vec3::Y,
+                );
+            let overview = capture(&renderer, [overview; 2], Mat4::IDENTITY);
+            if let Ok(path) = std::env::var("TOMORI_SKY_PREVIEW") {
+                let mut sheet = image::RgbaImage::new(WIDTH * 2, HEIGHT * 2);
+                for (i, bytes) in [&sky[0], &sky[1], &minimal[0], &overview[0]]
+                    .into_iter()
+                    .enumerate()
+                {
+                    let image = image::RgbaImage::from_raw(WIDTH, HEIGHT, bytes.clone()).unwrap();
+                    image::imageops::replace(
+                        &mut sheet,
+                        &image,
+                        (i % 2) as i64 * i64::from(WIDTH),
+                        (i / 2) as i64 * i64::from(HEIGHT),
+                    );
+                }
+                sheet.save(path).unwrap();
+            }
+            assert!(scope.pop().await.is_none());
+        });
+    }
 
     #[test]
     fn activity_geometry_is_bounded_and_ready_halo_is_persistent() {
@@ -697,7 +916,7 @@ mod tests {
                 );
                 images.push(image);
             }
-            if let Ok(path) = std::env::var("BASE_SWARM_SIGNAL_PREVIEW") {
+            if let Ok(path) = std::env::var("TOMORI_SIGNAL_PREVIEW") {
                 let mut sheet = image::RgbaImage::new(512 * 3, 384 * 2);
                 for (i, bytes) in images.into_iter().enumerate() {
                     let image = image::RgbaImage::from_raw(512, 384, bytes).unwrap();
@@ -1086,7 +1305,7 @@ mod tests {
                     "label transition in eye {eye}"
                 );
             }
-            let preview_path = std::env::var("BASE_SWARM_TERMINAL_PREVIEW").ok();
+            let preview_path = std::env::var("TOMORI_TERMINAL_PREVIEW").ok();
             let mut sheet = preview_path
                 .as_ref()
                 .map(|_| image::RgbaImage::new(768, 512));

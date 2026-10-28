@@ -9,9 +9,10 @@ import { AudioMixer } from "./audio.mjs";
 import { Asr } from "./asr.mjs";
 import { validControllerPoses, validHands } from "./controller-poses.mjs";
 import { validInteraction } from "./interaction.mjs";
+import { validEnvironment } from "./environment.mjs";
 import { bodyOf, SPECTATOR_JSON_LIMIT } from "./json-body.mjs";
 
-const port = Number(process.env.BASE_SWARM_BRIDGE_PORT || 8765);
+const port = Number(process.env.TOMORI_BRIDGE_PORT || 8765);
 const endpoint = await Service.ensure();
 const client = OpenCode.make({ baseUrl: endpoint.url, headers: Service.headers(endpoint) });
 const info = await client.server.info();
@@ -19,7 +20,7 @@ const bridge = new Bridge(client, { delegation: new Delegation(client, {
   storePath: fileURLToPath(new URL("../.space/presentations.json", import.meta.url)),
   visibilityPath: fileURLToPath(new URL("../.space/worker-visibility.json", import.meta.url)),
 }) });
-const tts = new Tts({ voice: Number(process.env.BASE_SWARM_TTS_VOICE || 37) });
+const tts = new Tts({ voice: Number(process.env.TOMORI_TTS_VOICE || 37) });
 let spectatorFrame = null;
 let spectatorFrameTime = 0;
 const audience = new AudioMixer();
@@ -85,6 +86,7 @@ createServer(async (request, response) => {
           !validControllerPoses(frame.controllers) ||
           !validHands(frame.hands) ||
           !validInteraction(frame.interaction) ||
+          !validEnvironment(frame.environment) ||
           !Number.isFinite(frame.view_aspect) || frame.view_aspect < 0.25 || frame.view_aspect > 4 ||
           typeof frame.caption !== "string" || frame.caption.length > 8192 ||
           !(frame.recording_ms === null || (Number.isSafeInteger(frame.recording_ms) && frame.recording_ms >= 0))) {

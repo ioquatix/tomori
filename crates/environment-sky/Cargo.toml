@@ -1,0 +1,22 @@
+[package]
+name = "environment-sky"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.93"
+description = "Tomori's moonlit sky environment renderer"
+repository = "https://github.com/ioquatix/tomori"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+bytemuck = { version = "1", features = ["derive"] }
+glam = "0.30"
+wgpu = { version = "30.0.1", default-features = false, features = ["std", "vulkan", "wgsl"] }
+
+[dev-dependencies]
+pollster = "0.4"
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+[build-dependencies]
+bytemuck = { version = "1", features = ["derive"] }
+glam = "0.30"

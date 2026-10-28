@@ -2715,7 +2715,7 @@ mod tests {
                     assert_eq!(near_image, capture(&graphics, matrix, false));
                 }
             }
-            if let Ok(path) = std::env::var("BASE_SWARM_SIGN_PREVIEW") {
+            if let Ok(path) = std::env::var("TOMORI_SIGN_PREVIEW") {
                 // Rows: yaw-/left, yaw-/right, yaw+/left, yaw+/right.
                 // Columns: old insertion order, overlap-aware painter order.
                 let mut sheet = image::RgbaImage::new(1024, 2048);
@@ -2765,7 +2765,7 @@ mod tests {
                 graphics.vertex_capacity * size_of::<Vertex>(),
                 MAX_VERTICES * size_of::<Vertex>()
             );
-            let preview_path = std::env::var("BASE_SWARM_DENSITY_PREVIEW").ok();
+            let preview_path = std::env::var("TOMORI_DENSITY_PREVIEW").ok();
             let mut sheet = preview_path
                 .as_ref()
                 .map(|_| image::RgbaImage::new(4096, 2048));

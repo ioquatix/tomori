@@ -49,9 +49,7 @@ impl Video {
             usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        log::info!(
-            "PipeWire prototype: base-agent-swarm-spectator, RGBA {WIDTH}x{HEIGHT} up to {FPS} fps"
-        );
+        log::info!("PipeWire prototype: tomori-spectator, RGBA {WIDTH}x{HEIGHT} up to {FPS} fps");
         Ok(Self {
             texture,
             view,
@@ -253,7 +251,7 @@ fn gstreamer_command() -> Command {
         .args([
             "!",
             "pipewiresink", "mode=provide", "use-bufferpool=false", "sync=false",
-            "stream-properties=props,media.class=Video/Source,media.type=Video,media.role=Production,node.name=base-agent-swarm-spectator,node.description=Base-Agent-Swarm-Spectator",
+            "stream-properties=props,media.class=Video/Source,media.type=Video,media.role=Production,node.name=tomori-spectator,node.description=Tomori-Spectator",
         ])
         .stdin(Stdio::piped())
         .stdout(Stdio::null());

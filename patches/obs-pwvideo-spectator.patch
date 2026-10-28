@@ -1,5 +1,5 @@
 diff --git a/src/plugin-main.c b/src/plugin-main.c
-index aab376b..83be879 100644
+index aab376b..96023aa 100644
 --- a/src/plugin-main.c
 +++ b/src/plugin-main.c
 @@ -142,8 +142,11 @@ static void on_registry_global_cb(void *user_data, uint32_t id, uint32_t permiss
@@ -7,11 +7,11 @@ index aab376b..83be879 100644
  	 */
  
 +	const char *name = spa_dict_lookup(props, PW_KEY_NODE_NAME);
-+	bool base_spectator = name && !strcmp(name, "base-agent-swarm-spectator") &&
++	bool tomori_spectator = name && !strcmp(name, "tomori-spectator") &&
 +		media_class && !strcmp(media_class, "Video/Source");
  	if ((!media_type || strcmp(media_type, "Video")) ||
 -	    (!media_class || strcmp(media_class, "Stream/Output/Video")) ||
-+	    (!base_spectator && (!media_class || strcmp(media_class, "Stream/Output/Video"))) ||
++	    (!tomori_spectator && (!media_class || strcmp(media_class, "Stream/Output/Video"))) ||
  	    (media_role && strcmp(media_role, "Production")))
  		return;
  

@@ -51,6 +51,7 @@ impl SpectatorView {
             self.frame = None;
         }
         if let Some(incoming) = &self.frame {
+            input.renderer.set_environment(incoming.environment);
             if input.swarm.agents.len() != incoming.agents.len() {
                 *input.swarm = Swarm::new();
             }

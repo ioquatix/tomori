@@ -12,5 +12,5 @@ if [[ ! -x .tools/asr-venv/bin/python || ! -s .tools/asr/faster-whisper-small.en
     echo "PC transcription not installed; run bash scripts/setup-pc-transcription.sh before recording." >&2
 fi
 export PATH="${ANDROID_HOME:-$HOME/Android/Sdk}/platform-tools:$PATH"
-adb reverse tcp:8765 "tcp:${BASE_SWARM_BRIDGE_PORT:-8765}"
+adb reverse tcp:8765 "tcp:${TOMORI_BRIDGE_PORT:-8765}"
 exec node bridge/server.mjs

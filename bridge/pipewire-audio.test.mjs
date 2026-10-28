@@ -58,10 +58,10 @@ test("only accepts the sink created by the helper's module", () => {
 
 test("cleanup rejects reused module IDs and modules from other instances", () => {
   const module = { id: 123, node: "test-node", key: "sink_name", type: "module-null-sink", instance: "a1b2" };
-  assert.equal(ownedModule("123\tmodule-null-sink\tsink_name=test-node base.swarm.instance=a1b2\t", module), true);
-  assert.equal(ownedModule("123\tmodule-null-sink\tsink_name=test-node base.swarm.instance=other\t", module), false);
-  assert.equal(ownedModule("123\tmodule-null-sink\tsink_name=someone-else base.swarm.instance=a1b2\t", module), false);
-  assert.equal(ownedModule("123\tmodule-remap-source\tsink_name=test-node base.swarm.instance=a1b2\t", module), false);
+  assert.equal(ownedModule("123\tmodule-null-sink\tsink_name=test-node tomori.instance=a1b2\t", module), true);
+  assert.equal(ownedModule("123\tmodule-null-sink\tsink_name=test-node tomori.instance=other\t", module), false);
+  assert.equal(ownedModule("123\tmodule-null-sink\tsink_name=someone-else tomori.instance=a1b2\t", module), false);
+  assert.equal(ownedModule("123\tmodule-remap-source\tsink_name=test-node tomori.instance=a1b2\t", module), false);
 });
 
 test("does not queue audio while the child input is backpressured", () => {

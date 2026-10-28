@@ -10,6 +10,7 @@ mod controller_graphics;
 mod delegation;
 #[cfg(not(target_os = "android"))]
 mod desktop;
+mod environment;
 mod graphics;
 mod hands;
 #[cfg(not(target_os = "android"))]
@@ -189,7 +190,7 @@ fn android_main(app: android_activity::AndroidApp) {
 
     android_logger::init_once(
         android_logger::Config::default()
-            .with_tag("base-agent-swarm")
+            .with_tag("tomori")
             .with_max_level(log::LevelFilter::Info),
     );
     std::panic::set_hook(Box::new(|info| log::error!("{info}")));
@@ -221,7 +222,7 @@ fn android_main(app: android_activity::AndroidApp) {
     pump.poll(Duration::ZERO);
     drop(voice); // release mic/recognizer before waiting for Activity destruction
     if let Err(error) = result {
-        log::error!("base-agent-swarm stopped: {error:#}");
+        log::error!("tomori stopped: {error:#}");
     }
     // NativeActivity must continue acknowledging lifecycle events until Destroy,
     // including when XR initialization failed or the runtime requested exit.

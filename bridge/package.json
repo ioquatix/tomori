@@ -1,5 +1,5 @@
 {
-  "name": "base-agent-swarm-opencode-bridge",
+  "name": "tomori-opencode-bridge",
   "private": true,
   "type": "module",
   "scripts": {

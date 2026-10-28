@@ -791,7 +791,7 @@ test("workspace CLI sends only explicit card operations to an existing fake loop
   t.after(() => new Promise(resolve => server.close(resolve)));
   const run = (args, input = "") => new Promise((resolve, reject) => {
     const process = spawn(globalThis.process.execPath, ["scripts/workspace.mjs", ...args], {
-      cwd: new URL("..", import.meta.url), env: { ...globalThis.process.env, BASE_SWARM_BRIDGE_PORT: String(server.address().port) },
+      cwd: new URL("..", import.meta.url), env: { ...globalThis.process.env, TOMORI_BRIDGE_PORT: String(server.address().port) },
       stdio: ["pipe", "pipe", "pipe"], timeout: 5000,
     });
     let stdout = "", stderr = "";

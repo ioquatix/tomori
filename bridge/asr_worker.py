@@ -80,12 +80,12 @@ def respond(message):
 
 
 def main():
-    model_path = os.environ.get("BASE_SWARM_ASR_MODEL", ".tools/asr/faster-whisper-small.en")
+    model_path = os.environ.get("TOMORI_ASR_MODEL", ".tools/asr/faster-whisper-small.en")
     try:
         has_cuda = ctranslate2.get_cuda_device_count() > 0
     except RuntimeError:
         has_cuda = False
-    device = os.environ.get("BASE_SWARM_ASR_DEVICE", "cuda" if has_cuda else "cpu")
+    device = os.environ.get("TOMORI_ASR_DEVICE", "cuda" if has_cuda else "cpu")
     compute = "float16" if device == "cuda" else "int8"
     model = WhisperModel(model_path, device=device, compute_type=compute, cpu_threads=4)
     # Warm up on the selected backend before reporting ready.

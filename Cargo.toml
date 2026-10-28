@@ -1,17 +1,22 @@
 [package]
-name = "base-agent-swarm"
+name = "tomori"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.93"
-description = "A tiny OpenXR/wgpu agent swarm for Meta Quest 3"
+description = "A conversational spatial workspace for people and agents, built with OpenXR and wgpu"
 repository = "https://github.com/ioquatix/tomori"
 license = "MIT OR Apache-2.0"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+[workspace]
+members = ["crates/environment-sky"]
+resolver = "3"
+
 [dependencies]
 anyhow = "1"
+environment-sky = { path = "crates/environment-sky" }
 ash = "0.38"
 bytemuck = { version = "1", features = ["derive"] }
 basisu = "0.1"
@@ -55,8 +60,8 @@ strip = "debuginfo"
 opt-level = 1
 
 [package.metadata.android]
-package = "dev.base.agentswarm"
-apk_name = "base-agent-swarm"
+package = "io.github.ioquatix.tomori"
+apk_name = "tomori"
 build_targets = ["aarch64-linux-android"]
 runtime_libs = "android/libs"
 assets = "assets"
@@ -113,7 +118,7 @@ actions = ["org.khronos.openxr.OpenXRRuntimeService"]
 actions = ["org.khronos.openxr.OpenXRApiLayerService"]
 
 [package.metadata.android.application]
-label = "base-agent-swarm"
+label = "Tomori"
 theme = "@android:style/Theme.DeviceDefault.NoActionBar.Fullscreen"
 extract_native_libs = true
 uses_cleartext_traffic = true

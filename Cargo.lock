@@ -199,37 +199,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
-name = "base-agent-swarm"
-version = "0.1.0"
-dependencies = [
- "android-activity",
- "android_logger",
- "anyhow",
- "ash",
- "basisu",
- "bytemuck",
- "env_logger",
- "font8x8",
- "glam",
- "gltf",
- "hound",
- "image",
- "jni 0.21.1",
- "libc",
- "log",
- "ndk",
- "openxr",
- "pollster",
- "serde",
- "serde_json",
- "ureq",
- "wgpu",
- "wgpu-hal",
- "whisper-rs",
- "winit",
-]
-
-[[package]]
 name = "base64"
 version = "0.22.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -656,6 +625,17 @@ dependencies = [
  "env_filter 2.0.0",
  "jiff",
  "log",
+]
+
+[[package]]
+name = "environment-sky"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "glam",
+ "image",
+ "pollster",
+ "wgpu",
 ]
 
 [[package]]
@@ -2446,6 +2426,38 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "baa693a8032d7e1cada7d0041e96126df243179ff061456783ac7f12bda4744c"
 dependencies = [
  "winnow",
+]
+
+[[package]]
+name = "tomori"
+version = "0.1.0"
+dependencies = [
+ "android-activity",
+ "android_logger",
+ "anyhow",
+ "ash",
+ "basisu",
+ "bytemuck",
+ "env_logger",
+ "environment-sky",
+ "font8x8",
+ "glam",
+ "gltf",
+ "hound",
+ "image",
+ "jni 0.21.1",
+ "libc",
+ "log",
+ "ndk",
+ "openxr",
+ "pollster",
+ "serde",
+ "serde_json",
+ "ureq",
+ "wgpu",
+ "wgpu-hal",
+ "whisper-rs",
+ "winit",
 ]
 
 [[package]]

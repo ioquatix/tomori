@@ -11,7 +11,7 @@ const usage = `Coordinator workspace cards and worker visibility (existing loopb
   node scripts/workspace.mjs remove --session ROOT --id CARD
 --table - reads JSON from stdin; table JSON: {"columns":["Name"],"rows":[["Value"]]}.
 --json FILE (or -) instead reads the complete presentation object.
-Set BASE_SWARM_BRIDGE_PORT to select the local bridge (default 8765).
+Set TOMORI_BRIDGE_PORT to select the local bridge (default 8765).
 Publication is explicit; supply only reviewed content, never secrets or hidden reasoning.
 Acknowledgement hides only the verified outcome, not the session; visible descendants keep ancestors visible.
 Records remain until restored (maximum 64 per root); superseded records no longer hide workers.`;
@@ -46,7 +46,7 @@ async function main() {
     ["acknowledge", "restore"].includes(command) ? ["--session", "--worker"] : command === "remove" ? ["--session", "--id"] :
     ["--session", "--source", "--message", "--title", "--text", "--id", "--table", "--json"];
   if (Object.keys(options).some(key => !allowed.includes(key))) throw new Error("Invalid arguments; use --help.");
-  const port = Number(process.env.BASE_SWARM_BRIDGE_PORT || 8765);
+  const port = Number(process.env.TOMORI_BRIDGE_PORT || 8765);
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("Invalid bridge port.");
   let path = `/session/${options["--session"]}`;
   const request = { method: "GET", signal: AbortSignal.timeout(command === "acknowledge" ? 35000 : 15000), redirect: "error" };

@@ -34,7 +34,7 @@ export class Asr {
     const py = readdirSync(lib).find(name => /^python3\./.test(name));
     if (!py) return Promise.reject(new Error("PC transcription environment is incomplete"));
     const site = join(lib, py, "site-packages/nvidia");
-    const env = { ...process.env, BASE_SWARM_ASR_MODEL: model,
+    const env = { ...process.env, TOMORI_ASR_MODEL: model,
       LD_LIBRARY_PATH: [join(site, "cublas/lib"), join(site, "cudnn/lib"), process.env.LD_LIBRARY_PATH || ""].join(":") };
     const worker = this.launch(python, [join(this.root, "bridge/asr_worker.py")], { cwd: this.root, env, stdio: ["pipe", "pipe", "pipe"] });
     this.worker = worker;
