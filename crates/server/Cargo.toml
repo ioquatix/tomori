@@ -1,0 +1,32 @@
+[package]
+name = "server"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.93"
+description = "The Tomori server: spaces, agent sessions and live audio over one duplex connection per client"
+repository = "https://github.com/ioquatix/tomori"
+license = "MIT"
+publish = false
+
+[[bin]]
+name = "tomori-server"
+path = "src/main.rs"
+
+[features]
+default = ["fake"]
+# A scripted in-memory backend for tests and for manual testing without an agent.
+fake = []
+
+[dependencies]
+async-channel = "2"
+backend = { path = "../backend" }
+base-http = "0.1.0"
+base-http-server = "0.1.0"
+base-scheduler = "0.3.0"
+base-scheduler-direct = "0.3.0"
+event-listener = "5"
+futures-lite = "2"
+futures-util = { version = "0.3", default-features = false, features = ["alloc", "async-await"] }
+log = "0.4"
+protocol = { path = "../protocol" }
+serde_json = "1"

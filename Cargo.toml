@@ -11,7 +11,7 @@ license = "MIT"
 crate-type = ["cdylib", "rlib"]
 
 [workspace]
-members = ["crates/environment-sky", "crates/protocol", "crates/backend", "bake"]
+members = ["crates/environment-sky", "crates/protocol", "crates/backend", "crates/server", "bake"]
 resolver = "3"
 
 [dependencies]
