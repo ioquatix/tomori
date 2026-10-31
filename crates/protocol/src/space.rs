@@ -136,6 +136,7 @@ pub enum WorkerState {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Worker {
     pub id: String,
+    /// The worker that delegated to this one, or `None` for a worker the space's own agent session started directly.
     pub parent: Option<String>,
     pub title: String,
     pub state: WorkerState,

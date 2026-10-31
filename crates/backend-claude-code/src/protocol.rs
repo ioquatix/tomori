@@ -522,7 +522,7 @@ impl State {
                 .unwrap_or(tool);
             self.workers.push(Worker {
                 id: id.into(),
-                parent: Some(parent.unwrap_or(&self.session).into()),
+                parent: parent.map(Into::into),
                 title: title.into(),
                 state: WorkerState::Running,
             });
@@ -1933,7 +1933,7 @@ mod tests {
         let Event::WorkersChanged { workers } = &events[0] else {
             panic!("{events:?}")
         };
-        assert_eq!(workers[0].parent.as_deref(), Some("session"));
+        assert_eq!(workers[0].parent, None);
         assert_eq!(workers[1].parent.as_deref(), Some("toolu_outer"));
 
         let events = handle(

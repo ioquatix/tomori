@@ -187,6 +187,7 @@ pub enum WorkerState {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Worker {
     pub id: String,
+    /// The worker that started this one, or `None` when the session itself started it.
     pub parent: Option<String>,
     pub title: String,
     pub state: WorkerState,
