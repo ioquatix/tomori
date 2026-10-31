@@ -2,220 +2,171 @@
 // Copyright, 2026, by Samuel Williams.
 
 use std::{
-    sync::{Arc, Mutex},
-    time::Duration,
+    sync::{
+        Arc, Condvar, Mutex,
+        atomic::{AtomicBool, AtomicUsize},
+    },
+    time::{Duration, Instant},
 };
 
-use super::{policy::Policy, *};
+use super::*;
 
+/// Words the scripted recognizer knows. Each is "spoken" as [`WORD`] samples of `BASE + index`; any other sample is silence.
+const VOCABULARY: &[&str] = &["run", "the", "tests", "please", "fail", "crash"];
 const BASE: i16 = 1000;
-const TICK: usize = RATE as usize / 100;
+/// 100 ms per word.
+const WORD: usize = RATE as usize / 10;
 
-/// Audio whose samples encode their own position in 10 ms ticks, so that the fake recognizer knows which part of the utterance it was given.
-fn audio(seconds: f32) -> Vec<i16> {
-    (0..(seconds * RATE as f32) as usize)
-        .map(|index| BASE + (index / TICK) as i16)
+/// Audio that [`Scripted`] hears as `words`.
+fn spoken(words: &[&str]) -> Vec<i16> {
+    words
+        .iter()
+        .flat_map(|word| {
+            let index = VOCABULARY.iter().position(|known| known == word).unwrap();
+            std::iter::repeat_n(BASE + index as i16, WORD)
+        })
         .collect()
 }
 
-/// A scripted recognizer: returns the script's words that lie within the window. Words ending within `unstable` seconds of the end of the window are misheard differently on each call, as Whisper does with cut-off speech, unless the window reaches the end of the script's audio.
-#[derive(Clone)]
-struct Scripted {
-    words: Vec<(&'static str, f32, f32)>,
-    unstable: f32,
-    calls: Arc<Mutex<Vec<Call>>>,
-    fail_on: Option<usize>,
+/// A gate that holds decoding until it is opened, and reports when a decode is waiting at it.
+#[derive(Default)]
+struct Gate {
+    state: Mutex<(bool, bool)>,
+    changed: Condvar,
 }
 
-#[derive(Clone, Debug)]
-struct Call {
-    start: f32,
-    length: f32,
-    prompt: Option<String>,
+impl Gate {
+    fn closed() -> Arc<Self> {
+        Arc::default()
+    }
+
+    fn pass(&self) {
+        let mut state = self.state.lock().unwrap();
+        state.1 = true;
+        self.changed.notify_all();
+        while !state.0 {
+            state = self.changed.wait(state).unwrap();
+        }
+    }
+
+    /// Wait until a decode is held at the gate.
+    fn wait_for_decode(&self) {
+        let mut state = self.state.lock().unwrap();
+        while !state.1 {
+            state = self.changed.wait(state).unwrap();
+        }
+    }
+
+    fn open(&self) {
+        self.state.lock().unwrap().0 = true;
+        self.changed.notify_all();
+    }
 }
+
+/// How the scripted recognizer behaves, shared by its streams.
+#[derive(Default)]
+struct Script {
+    /// Opening a stream fails.
+    refuse: bool,
+    /// Streams are never due, so audio is only decoded when the utterance finishes.
+    lazy: bool,
+    /// Decoding waits at this gate until it opens.
+    gate: Option<Arc<Gate>>,
+    /// Samples accepted by every stream.
+    accepted: AtomicUsize,
+    /// Set when the recognizer is dropped.
+    unloaded: AtomicBool,
+}
+
+/// A [`StreamingRecognizer`] that hears [`VOCABULARY`] words from their sample values, a whole word at a time. "fail" fails decoding; "crash" panics.
+#[derive(Clone, Default)]
+struct Scripted(Arc<Script>);
 
 impl Scripted {
-    fn new(words: Vec<(&'static str, f32, f32)>) -> Self {
-        Self {
-            words,
-            unstable: 0.5,
-            calls: Arc::default(),
-            fail_on: None,
-        }
-    }
-
-    fn calls(&self) -> Vec<Call> {
-        self.calls.lock().unwrap().clone()
+    fn new(script: Script) -> Self {
+        Self(Arc::new(script))
     }
 }
 
-impl Recognizer for Scripted {
-    fn decode(&mut self, window: &[i16], prompt: Option<&str>) -> Result<Vec<Word>, Error> {
-        let mut calls = self.calls.lock().unwrap();
-        let start = window
-            .iter()
-            .find(|&&sample| sample >= BASE)
-            .map_or(0.0, |&sample| f32::from(sample - BASE) / 100.0);
-        let length = window.len() as f32 / RATE as f32;
-        calls.push(Call {
-            start,
-            length,
-            prompt: prompt.map(str::to_owned),
-        });
-        if self.fail_on == Some(calls.len()) {
-            return Err(Error::Engine("engine failed".into()));
-        }
-        let end =
-            start + window.iter().filter(|&&sample| sample >= BASE).count() as f32 / RATE as f32;
-        Ok(self
-            .words
-            .iter()
-            .filter(|(_, word_start, word_end)| {
-                *word_start >= start - 0.005 && *word_end <= end + 0.005
-            })
-            .map(|&(text, word_start, word_end)| {
-                let total = self.words.last().map_or(0.0, |word| word.2 + 0.05);
-                let text = if word_end > end - self.unstable && end < total - 0.01 {
-                    format!(" {text}{}", "x".repeat(calls.len()))
-                } else {
-                    format!(" {text}")
-                };
-                Word {
-                    text,
-                    start: word_start - start,
-                    end: word_end - start,
-                }
-            })
-            .collect())
+impl Drop for Scripted {
+    fn drop(&mut self) {
+        self.0.unloaded.store(true, Ordering::SeqCst);
     }
 }
 
-/// Ten words, 0.4 s each with 0.1 s gaps, over five seconds.
-fn sentence() -> Vec<(&'static str, f32, f32)> {
-    [
-        "the", "quick", "brown", "fox", "jumps", "over", "the", "lazy", "dog", "today",
-    ]
-    .into_iter()
-    .enumerate()
-    .map(|(index, word)| (word, index as f32 * 0.5 + 0.05, index as f32 * 0.5 + 0.45))
-    .collect()
-}
-
-#[test]
-fn commits_agreed_words_and_finishes_with_only_the_tail() {
-    let mut recognizer = Scripted::new(sentence());
-    let mut policy = Policy::new(RecognizerConfig::default());
-    let samples = audio(5.0);
-    let mut partials = Vec::new();
-    for chunk in samples.chunks(320) {
-        policy.push(chunk);
-        if policy.due() {
-            policy.decode(&mut recognizer).unwrap();
-            partials.push(policy.transcript());
+impl StreamingRecognizer for Scripted {
+    fn open(&mut self) -> Result<Box<dyn RecognitionStream>, Error> {
+        if self.0.refuse {
+            return Err(Error::Unavailable("the model is missing".into()));
         }
+        Ok(Box::new(Stream {
+            script: Arc::clone(&self.0),
+            audio: Vec::new(),
+            decoded: 0,
+            words: Vec::new(),
+        }))
     }
-    // Partial transcripts arrive while speaking, and commit grows monotonically.
-    assert!(partials.len() >= 4);
-    assert!(partials.iter().any(|partial| !partial.committed.is_empty()));
-    for pair in partials.windows(2) {
-        assert!(pair[1].committed.starts_with(&pair[0].committed));
-    }
-    let committed_before_end = policy.transcript().committed;
-    let tail_start = policy.window_start() as f32 / RATE as f32;
-    assert!(tail_start > 2.0, "{tail_start}");
-
-    let text = policy.finish(&mut recognizer).unwrap();
-    assert_eq!(text, "the quick brown fox jumps over the lazy dog today");
-
-    // The final decode only covered the uncommitted tail, with the committed text as its prompt.
-    let last = recognizer.calls().pop().unwrap();
-    assert!((last.start - tail_start).abs() < 0.02, "{last:?}");
-    assert!(last.length < 5.0 - 2.0);
-    assert_eq!(last.prompt.as_deref(), Some(committed_before_end.as_str()));
 }
 
-#[test]
-fn unstable_words_are_tentative_until_two_hypotheses_agree() {
-    let mut recognizer = Scripted::new(sentence());
-    recognizer.unstable = 0.0;
-    let mut policy = Policy::new(RecognizerConfig::default());
-    let samples = audio(5.0);
-    policy.push(&samples[..RATE as usize]);
-    policy.decode(&mut recognizer).unwrap();
-    // The first hypothesis has nothing to agree with.
-    assert_eq!(
-        policy.transcript(),
-        Transcript {
-            committed: String::new(),
-            tentative: "the quick".into()
-        }
-    );
-    policy.push(&samples[RATE as usize..RATE as usize * 2]);
-    policy.decode(&mut recognizer).unwrap();
-    assert_eq!(
-        policy.transcript(),
-        Transcript {
-            committed: "the quick".into(),
-            tentative: "brown fox".into()
-        }
-    );
+struct Stream {
+    script: Arc<Script>,
+    audio: Vec<i16>,
+    decoded: usize,
+    words: Vec<&'static str>,
 }
 
-#[test]
-fn forces_a_commit_when_a_full_window_never_agrees() {
-    let mut recognizer = Scripted::new(sentence());
-    // Every word is misheard differently on each call.
-    recognizer.unstable = 100.0;
-    let config = RecognizerConfig {
-        maximum_window: Duration::from_secs(3),
-        force_margin: Duration::from_secs(1),
-        ..RecognizerConfig::default()
-    };
-    let mut policy = Policy::new(config);
-    for chunk in audio(5.0).chunks(320) {
-        policy.push(chunk);
-        if policy.due() {
-            policy.decode(&mut recognizer).unwrap();
+impl Stream {
+    fn decode_words(&mut self) -> Result<(), Error> {
+        if let Some(gate) = &self.script.gate {
+            gate.pass();
         }
-    }
-    assert!(!policy.transcript().committed.is_empty());
-    assert!(policy.window_start() > 0);
-}
-
-#[test]
-fn fails_rather_than_discarding_speech_without_a_safe_boundary() {
-    // One long word fills the window, so no word ends before the margin.
-    let mut recognizer = Scripted::new(vec![("aaaah", 0.0, 4.0)]);
-    recognizer.unstable = 100.0;
-    let config = RecognizerConfig {
-        maximum_window: Duration::from_secs(3),
-        force_margin: Duration::from_secs(1),
-        ..RecognizerConfig::default()
-    };
-    let mut policy = Policy::new(config);
-    let mut result = Ok(());
-    for chunk in audio(4.0).chunks(320) {
-        policy.push(chunk);
-        if policy.due() {
-            result = policy.decode(&mut recognizer);
-            if result.is_err() {
-                break;
+        while self.audio.len() - self.decoded >= WORD {
+            let value = self.audio[self.decoded];
+            self.decoded += WORD;
+            let word = usize::try_from(value - BASE)
+                .ok()
+                .and_then(|index| VOCABULARY.get(index));
+            match word {
+                Some(&"fail") => return Err(Error::Engine("engine failed".into())),
+                Some(&"crash") => panic!("the recognizer crashed"),
+                Some(&word) => self.words.push(word),
+                None => {}
             }
         }
+        Ok(())
     }
-    assert_eq!(result, Err(Error::Overflow));
 }
 
-#[test]
-fn silence_is_not_sent_to_the_recognizer() {
-    let mut recognizer = Scripted::new(sentence());
-    let mut policy = Policy::new(RecognizerConfig::default());
-    policy.push(&vec![0; RATE as usize * 3]);
-    while policy.due() {
-        policy.decode(&mut recognizer).unwrap();
+impl RecognitionStream for Stream {
+    fn accept(&mut self, samples: &[i16]) {
+        self.script
+            .accepted
+            .fetch_add(samples.len(), Ordering::SeqCst);
+        self.audio.extend_from_slice(samples);
     }
-    assert_eq!(policy.finish(&mut recognizer).unwrap(), "");
-    assert!(recognizer.calls().is_empty());
+
+    fn due(&self) -> bool {
+        !self.script.lazy && self.audio.len() - self.decoded >= WORD
+    }
+
+    fn decode(&mut self) -> Result<(), Error> {
+        self.decode_words()
+    }
+
+    fn transcript(&self) -> Transcript {
+        match self.words.split_last() {
+            Some((last, rest)) => Transcript {
+                committed: rest.join(" "),
+                tentative: (*last).to_owned(),
+            },
+            None => Transcript::default(),
+        }
+    }
+
+    fn finish(&mut self) -> Result<String, Error> {
+        self.decode_words()?;
+        Ok(self.words.join(" "))
+    }
 }
 
 fn collect(recognition: &mut Recognition, id: u64) -> (Utterance, mpsc::Receiver<TranscriptEvent>) {
@@ -226,115 +177,227 @@ fn collect(recognition: &mut Recognition, id: u64) -> (Utterance, mpsc::Receiver
     (utterance, receiver)
 }
 
+fn speak(utterance: &mut Utterance, words: &[&str]) {
+    for frame in spoken(words).chunks(320) {
+        utterance.push(frame);
+    }
+}
+
+fn next(receiver: &mpsc::Receiver<TranscriptEvent>) -> TranscriptEvent {
+    receiver
+        .recv_timeout(Duration::from_secs(5))
+        .expect("an event")
+}
+
+/// The partials up to the last event, and the last event.
 fn final_event(receiver: &mpsc::Receiver<TranscriptEvent>) -> (Vec<Transcript>, TranscriptEvent) {
     let mut partials = Vec::new();
     loop {
-        match receiver
-            .recv_timeout(Duration::from_secs(5))
-            .expect("an event")
-        {
+        match next(receiver) {
             TranscriptEvent::Partial(transcript) => partials.push(transcript),
             other => return (partials, other),
         }
     }
 }
 
+fn assert_finished(receiver: &mpsc::Receiver<TranscriptEvent>) {
+    assert!(receiver.recv_timeout(Duration::from_millis(100)).is_err());
+}
+
 #[test]
-fn service_sends_partials_during_the_utterance_and_a_final_after_it() {
-    let recognizer = Scripted::new(sentence());
-    let mut recognition = Recognition::spawn(recognizer.clone(), RecognizerConfig::default());
+fn sends_partials_during_the_utterance_and_a_final_after_it() {
+    let mut recognition = Recognition::spawn(Scripted::default());
     let (mut utterance, receiver) = collect(&mut recognition, 1);
-    let samples = audio(5.0);
-    let (first, rest) = samples.split_at(RATE as usize * 3);
-    for chunk in first.chunks(320) {
-        utterance.push(chunk);
-    }
+    speak(&mut utterance, &["run", "the"]);
     // A partial arrives before the utterance ends.
-    match receiver.recv_timeout(Duration::from_secs(5)).unwrap() {
+    match next(&receiver) {
         TranscriptEvent::Partial(transcript) => assert!(!transcript.tentative.is_empty()),
         other => panic!("unexpected {other:?}"),
     }
-    for chunk in rest.chunks(320) {
-        utterance.push(chunk);
-    }
+    speak(&mut utterance, &["tests"]);
     utterance.end();
     let (_, last) = final_event(&receiver);
-    assert_eq!(
-        last,
-        TranscriptEvent::Final("the quick brown fox jumps over the lazy dog today".into())
-    );
-    assert!(receiver.recv_timeout(Duration::from_millis(100)).is_err());
+    assert_eq!(last, TranscriptEvent::Final("run the tests".into()));
+    assert_finished(&receiver);
 }
 
 #[test]
-fn service_reports_recognizer_failure_for_the_utterance() {
-    let mut recognizer = Scripted::new(sentence());
-    // Audio pushed before the engine runs is coalesced, so the first decode may be the final one.
-    recognizer.fail_on = Some(1);
-    // Utterances shorter than the script end mid-script; their last words are not cut off.
-    recognizer.unstable = 0.0;
-    let mut recognition = Recognition::spawn(recognizer, RecognizerConfig::default());
+fn an_utterance_that_cannot_start_fails() {
+    let mut recognition = Recognition::spawn(Scripted::new(Script {
+        refuse: true,
+        ..Script::default()
+    }));
     let (mut utterance, receiver) = collect(&mut recognition, 1);
-    for chunk in audio(5.0).chunks(320) {
-        utterance.push(chunk);
-    }
+    speak(&mut utterance, &["run"]);
     utterance.end();
-    let (_, last) = final_event(&receiver);
     assert_eq!(
-        last,
+        next(&receiver),
+        TranscriptEvent::Failed(Error::Unavailable("the model is missing".into()))
+    );
+    assert_finished(&receiver);
+}
+
+#[test]
+fn a_decode_failure_fails_only_its_own_utterance() {
+    let mut recognition = Recognition::spawn(Scripted::default());
+    let (mut failing, failing_events) = collect(&mut recognition, 1);
+    let (mut other, other_events) = collect(&mut recognition, 2);
+    speak(&mut other, &["run", "the"]);
+    speak(&mut failing, &["please", "fail", "please"]);
+    assert_eq!(
+        final_event(&failing_events).1,
         TranscriptEvent::Failed(Error::Engine("engine failed".into()))
     );
-    // The utterance is finished: nothing else is delivered.
-    assert!(receiver.recv_timeout(Duration::from_millis(100)).is_err());
-
-    // The next utterance uses the restarted recognizer.
-    let (mut utterance, receiver) = collect(&mut recognition, 2);
-    for chunk in audio(2.0).chunks(320) {
-        utterance.push(chunk);
-    }
-    utterance.end();
-    let (_, last) = final_event(&receiver);
-    assert_eq!(last, TranscriptEvent::Final("the quick brown fox".into()));
+    // The failed utterance is finished: nothing else is delivered, even after it ends.
+    failing.end();
+    assert_finished(&failing_events);
+    speak(&mut other, &["tests"]);
+    other.end();
+    assert_eq!(
+        final_event(&other_events).1,
+        TranscriptEvent::Final("run the tests".into())
+    );
 }
 
 #[test]
-fn service_handles_concurrent_and_cancelled_utterances() {
-    let mut recognizer = Scripted::new(sentence());
-    recognizer.unstable = 0.0;
-    let mut recognition = Recognition::spawn(recognizer, RecognizerConfig::default());
-    let (mut first, first_events) = collect(&mut recognition, 1);
-    let (mut second, second_events) = collect(&mut recognition, 2);
-    let (mut third, third_events) = collect(&mut recognition, 3);
-    let long = audio(5.0);
-    let short = audio(1.5);
-    for (index, chunk) in long.chunks(320).enumerate() {
-        first.push(chunk);
-        third.push(chunk);
-        if let Some(chunk) = short.chunks(320).nth(index) {
-            second.push(chunk);
-        }
-    }
-    third.cancel();
-    second.end();
-    first.end();
+fn a_finish_failure_fails_only_its_own_utterance() {
+    let mut recognition = Recognition::spawn(Scripted::new(Script {
+        lazy: true,
+        ..Script::default()
+    }));
+    let (mut failing, failing_events) = collect(&mut recognition, 1);
+    let (mut other, other_events) = collect(&mut recognition, 2);
+    speak(&mut failing, &["please", "fail"]);
+    speak(&mut other, &["run", "the", "tests"]);
+    failing.end();
+    other.end();
     assert_eq!(
-        final_event(&second_events).1,
-        TranscriptEvent::Final("the quick brown".into())
+        final_event(&failing_events).1,
+        TranscriptEvent::Failed(Error::Engine("engine failed".into()))
     );
     assert_eq!(
-        final_event(&first_events).1,
-        TranscriptEvent::Final("the quick brown fox jumps over the lazy dog today".into())
+        final_event(&other_events).1,
+        TranscriptEvent::Final("run the tests".into())
+    );
+}
+
+#[test]
+fn a_cancelled_utterance_never_reports_a_result() {
+    let mut recognition = Recognition::spawn(Scripted::default());
+    let (mut cancelled, cancelled_events) = collect(&mut recognition, 1);
+    let (mut other, other_events) = collect(&mut recognition, 2);
+    speak(&mut cancelled, &["run", "the"]);
+    speak(&mut other, &["run"]);
+    cancelled.cancel();
+    other.end();
+    assert_eq!(
+        final_event(&other_events).1,
+        TranscriptEvent::Final("run".into())
     );
     // A cancelled utterance may have produced partials, but never a result.
-    while let Ok(event) = third_events.recv_timeout(Duration::from_millis(100)) {
+    while let Ok(event) = cancelled_events.recv_timeout(Duration::from_millis(100)) {
         assert!(matches!(event, TranscriptEvent::Partial(_)), "{event:?}");
     }
 }
 
 #[test]
-fn service_resamples_to_sixteen_kilohertz() {
-    let recognizer = Scripted::new(sentence());
-    let mut recognition = Recognition::spawn(recognizer.clone(), RecognizerConfig::default());
+fn finishing_takes_priority_over_partials() {
+    let gate = Gate::closed();
+    let mut recognition = Recognition::spawn(Scripted::new(Script {
+        gate: Some(Arc::clone(&gate)),
+        ..Script::default()
+    }));
+    let order = Arc::new(Mutex::new(Vec::new()));
+    let record = |name: &'static str| {
+        let order = Arc::clone(&order);
+        move |event: TranscriptEvent| order.lock().unwrap().push((name, event))
+    };
+    let mut long = recognition.begin(1, RATE, record("long"));
+    speak(&mut long, &["run"]);
+    // The long utterance's first decode is held while more of it arrives and a short utterance is spoken and ended.
+    gate.wait_for_decode();
+    speak(&mut long, &["the", "tests", "please"]);
+    let mut short = recognition.begin(2, RATE, record("short"));
+    speak(&mut short, &["run", "the"]);
+    short.end();
+    gate.open();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while order.lock().unwrap().len() < 3 {
+        assert!(Instant::now() < deadline, "{:?}", order.lock().unwrap());
+        thread::sleep(Duration::from_millis(10));
+    }
+    long.end();
+    let order = order.lock().unwrap();
+    // The decode that was held reports its partial; then the short utterance finishes before the long one decodes again.
+    assert!(
+        matches!(&order[0], ("long", TranscriptEvent::Partial(_))),
+        "{order:?}"
+    );
+    assert_eq!(
+        order[1],
+        ("short", TranscriptEvent::Final("run the".into())),
+        "{order:?}"
+    );
+}
+
+#[test]
+fn an_utterance_that_falls_behind_fails() {
+    let gate = Gate::closed();
+    let mut recognition = Recognition::spawn(Scripted::new(Script {
+        gate: Some(Arc::clone(&gate)),
+        ..Script::default()
+    }));
+    let (mut utterance, receiver) = collect(&mut recognition, 1);
+    speak(&mut utterance, &["run"]);
+    gate.wait_for_decode();
+    // Recognition is stuck, and more than the backlog arrives meanwhile.
+    let words = vec!["the"; BACKLOG / WORD + 10];
+    speak(&mut utterance, &words);
+    gate.open();
+    assert_eq!(
+        final_event(&receiver).1,
+        TranscriptEvent::Failed(Error::Behind)
+    );
+    utterance.end();
+    assert_finished(&receiver);
+}
+
+#[test]
+fn an_utterance_that_keeps_up_may_be_longer_than_the_backlog() {
+    let mut recognition = Recognition::spawn(Scripted::default());
+    let (mut utterance, receiver) = collect(&mut recognition, 1);
+    let second = vec!["the"; RATE as usize / WORD];
+    let seconds = BACKLOG / RATE as usize + 3;
+    for count in 1..=seconds {
+        speak(&mut utterance, &second);
+        // Wait until this second has been decoded.
+        loop {
+            match next(&receiver) {
+                TranscriptEvent::Partial(transcript)
+                    if transcript.committed.split_whitespace().count() + 1
+                        == count * second.len() =>
+                {
+                    break;
+                }
+                TranscriptEvent::Partial(_) => {}
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+    }
+    utterance.end();
+    match final_event(&receiver).1 {
+        TranscriptEvent::Final(text) => {
+            assert_eq!(text.split_whitespace().count(), seconds * second.len())
+        }
+        other => panic!("unexpected {other:?}"),
+    }
+}
+
+#[test]
+fn resamples_to_sixteen_kilohertz() {
+    let recognizer = Scripted::default();
+    let script = Arc::clone(&recognizer.0);
+    let mut recognition = Recognition::spawn(recognizer);
     let (sender, receiver) = mpsc::channel();
     let mut utterance = recognition.begin(1, 48_000, move |event| {
         let _ = sender.send(event);
@@ -352,6 +415,52 @@ fn service_resamples_to_sixteen_kilohertz() {
         final_event(&receiver).1,
         TranscriptEvent::Final(String::new())
     );
-    drop(recognition);
-    assert!(recognizer.calls().is_empty());
+    let accepted = script.accepted.load(Ordering::SeqCst);
+    assert!(
+        accepted.abs_diff(RATE as usize * 2) < 100,
+        "{accepted} samples"
+    );
+}
+
+#[test]
+fn a_panic_disables_recognition_and_fails_every_utterance() {
+    let mut recognition = Recognition::spawn(Scripted::default());
+    let (mut waiting, waiting_events) = collect(&mut recognition, 1);
+    speak(&mut waiting, &["run"]);
+    assert!(matches!(next(&waiting_events), TranscriptEvent::Partial(_)));
+    let (mut crashing, crashing_events) = collect(&mut recognition, 2);
+    speak(&mut crashing, &["crash"]);
+    let stopped = TranscriptEvent::Failed(Error::Stopped(UNAVAILABLE.into()));
+    assert_eq!(final_event(&crashing_events).1, stopped);
+    // The utterance that was waiting fails too, rather than waiting forever.
+    assert_eq!(final_event(&waiting_events).1, stopped);
+    // Later utterances fail at once.
+    let (mut later, later_events) = collect(&mut recognition, 3);
+    speak(&mut later, &["run"]);
+    later.end();
+    assert_eq!(next(&later_events), stopped);
+}
+
+#[test]
+fn stopping_fails_open_utterances_unloads_the_recognizer_and_exits() {
+    let recognizer = Scripted::default();
+    let script = Arc::clone(&recognizer.0);
+    let mut recognition = Recognition::spawn(recognizer);
+    let (mut utterance, receiver) = collect(&mut recognition, 1);
+    speak(&mut utterance, &["run"]);
+    assert!(matches!(next(&receiver), TranscriptEvent::Partial(_)));
+    let stopper = recognition.stopper();
+    stopper.stop();
+    assert_eq!(
+        next(&receiver),
+        TranscriptEvent::Failed(Error::Stopped("the server is shutting down".into()))
+    );
+    assert!(stopper.wait(Instant::now() + Duration::from_secs(5)));
+    assert!(script.unloaded.load(Ordering::SeqCst));
+    // A later utterance's sink is dropped without an event, which the server reports as a failure.
+    let (_later, later_events) = collect(&mut recognition, 2);
+    assert_eq!(
+        later_events.recv_timeout(Duration::from_secs(5)),
+        Err(mpsc::RecvTimeoutError::Disconnected)
+    );
 }

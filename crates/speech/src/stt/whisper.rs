@@ -1,9 +1,9 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-//! Whisper recognition in-process through sherpa-onnx, for comparison with the streaming recognizer.
+//! Whole-clip Whisper recognition in-process through sherpa-onnx, used only by the recognition benchmark to compare accuracy and latency with the streaming recognizer.
 //!
-//! The Whisper models that sherpa-onnx publishes are exported without cross-attention outputs, so they report no word times. Local-agreement commit needs word times to drop committed audio, so [`WhisperRecognizer`] transcribes whole windows and does not implement [`super::Recognizer`].
+//! Whisper cannot stream: it decodes a complete clip, so the server does not use it.
 
 use std::path::{Path, PathBuf};
 

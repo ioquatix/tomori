@@ -3,56 +3,51 @@
 
 //! Streaming speech recognition for push-to-talk utterances.
 //!
-//! [`Recognition`] owns one recognizer on a dedicated thread. Each utterance is driven through an [`Utterance`] handle: audio is pushed while the participant is still speaking, decoded incrementally, and reported through the utterance's event sink as [`TranscriptEvent::Partial`] results, followed by exactly one [`TranscriptEvent::Final`] or [`TranscriptEvent::Failed`]. See `design/speech.md`.
+//! [`Recognition`] owns one [`StreamingRecognizer`] on a dedicated thread. Each utterance is driven through an [`Utterance`] handle: audio is pushed while the participant is still speaking, decoded once as it arrives, and reported through the utterance's event sink as [`TranscriptEvent::Partial`] results, followed by exactly one [`TranscriptEvent::Final`] or [`TranscriptEvent::Failed`]. The server uses the [`TransducerRecognizer`]. See `design/speech.md`.
 //!
-//! The recognizer is either a [`StreamingRecognizer`], which keeps per-utterance state and decodes each piece of audio once as it arrives, or a window [`Recognizer`], which is decoded repeatedly over the uncommitted audio with local-agreement commit. The server uses the streaming [`TransducerRecognizer`].
+//! Utterances from several participants may be active at once; they share the recognizer and are decoded in turn. Finishing utterances take priority over partial decodes. An utterance whose audio waits for more than [`BACKLOG`] samples to be decoded fails with [`Error::Behind`].
 //!
-//! Utterances from several participants may be active at once; they share the recognizer and are decoded in turn. Finishing utterances take priority over partial decodes.
+//! A panic in the recognizer disables recognition until the process restarts: it is logged once, and every open and later utterance fails with [`Error::Stopped`].
 
-mod policy;
 mod resample;
 mod transducer;
 mod whisper;
 
 use std::{
     collections::VecDeque,
-    sync::mpsc::{self, Receiver, Sender, TryRecvError},
+    panic::{self, AssertUnwindSafe},
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+        mpsc::{self, Receiver, Sender, TryRecvError},
+    },
     thread::{self, JoinHandle},
-    time::Duration,
 };
 
 use protocol::AudioFrame;
 
-pub use policy::Transcript;
 pub use resample::Resampler;
 pub use transducer::{TransducerConfig, TransducerRecognizer};
 pub use whisper::{WhisperConfig, WhisperRecognizer};
 
-use crate::Error;
-use policy::Policy;
+use crate::{
+    Error, Stopper,
+    stop::{Exited, panic_message},
+};
 
 /// The sample rate that recognizers receive.
 pub const RATE: u32 = 16_000;
 
-/// A recognized word with times in seconds from the start of the decoded window.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Word {
-    /// The word as the engine produced it, possibly with leading space and punctuation.
-    pub text: String,
-    pub start: f32,
-    pub end: f32,
-}
+/// The most audio, in samples at [`RATE`], that one utterance may have waiting to be decoded: 5 seconds.
+///
+/// The streaming transducer holds back about a second of audio for its chunk and look-ahead, and on the reference Mac decodes at well under real time even when the machine is heavily loaded; see `readme.md`. An utterance more than 5 seconds behind shows partial words that are already stale and would deliver its transcript late by as much, so it fails visibly instead, and the audio waiting for one utterance stays bounded at 160 KB.
+pub const BACKLOG: usize = RATE as usize * 5;
 
-/// A window speech recognition engine, which decodes a whole window of audio at once and reports word times. [`Recognition::spawn`] decodes it incrementally with local-agreement commit.
-pub trait Recognizer: Send {
-    /// Decode `audio` (16 kHz mono) into words. `prompt` is the preceding committed text of the same utterance, for context.
-    fn decode(&mut self, audio: &[i16], prompt: Option<&str>) -> Result<Vec<Word>, Error>;
-}
-
-impl<R: Recognizer + ?Sized> Recognizer for Box<R> {
-    fn decode(&mut self, audio: &[i16], prompt: Option<&str>) -> Result<Vec<Word>, Error> {
-        (**self).decode(audio, prompt)
-    }
+/// The transcript so far: committed words that will not change, and the latest tentative words after them.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Transcript {
+    pub committed: String,
+    pub tentative: String,
 }
 
 /// A streaming speech recognition engine, which decodes audio as it arrives and keeps each utterance's state between pieces of audio, so nothing is decoded twice.
@@ -81,36 +76,6 @@ pub trait RecognitionStream: Send {
     fn finish(&mut self) -> Result<String, Error>;
 }
 
-/// Tuning for incremental decoding of a window [`Recognizer`].
-#[derive(Clone, Debug)]
-pub struct RecognizerConfig {
-    /// Decode again after this much new audio.
-    pub refresh: Duration,
-    /// Shorter windows are not decoded until the utterance ends.
-    pub minimum_audio: Duration,
-    /// The longest uncommitted window. Whisper decodes at most 30 seconds.
-    pub maximum_window: Duration,
-    /// When a full window has no agreement, commit words ending at least this long before the end of the window.
-    pub force_margin: Duration,
-    /// Root-mean-square level (0 to 1) below which every 100 ms frame counts as silence.
-    pub silence_threshold: f32,
-    /// The number of committed words passed to the recognizer as context.
-    pub prompt_words: usize,
-}
-
-impl Default for RecognizerConfig {
-    fn default() -> Self {
-        Self {
-            refresh: Duration::from_secs(1),
-            minimum_audio: Duration::from_millis(330),
-            maximum_window: Duration::from_secs(24),
-            force_margin: Duration::from_secs(4),
-            silence_threshold: 0.003,
-            prompt_words: 40,
-        }
-    }
-}
-
 /// Progress of one utterance.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TranscriptEvent {
@@ -125,11 +90,30 @@ pub enum TranscriptEvent {
 type Sink = Box<dyn FnMut(TranscriptEvent) + Send>;
 
 enum Command {
-    Begin { key: u64, id: u64, sink: Sink },
-    Audio { key: u64, samples: Vec<i16> },
-    End { key: u64 },
-    Cancel { key: u64 },
+    Begin {
+        key: u64,
+        id: u64,
+        sink: Sink,
+        backlog: Arc<AtomicUsize>,
+    },
+    Audio {
+        key: u64,
+        samples: Vec<i16>,
+    },
+    /// The utterance's audio waiting to be decoded passed [`BACKLOG`].
+    Behind {
+        key: u64,
+    },
+    End {
+        key: u64,
+    },
+    Cancel {
+        key: u64,
+    },
+    /// Finish utterances that have ended, discard the rest, then exit.
     Shutdown,
+    /// Fail every utterance and exit at once.
+    Stop,
 }
 
 /// The recognition service: one recognizer thread shared by all utterances.
@@ -137,32 +121,28 @@ pub struct Recognition {
     commands: Sender<Command>,
     next: u64,
     thread: Option<JoinHandle<()>>,
+    exited: Exited,
 }
 
 impl Recognition {
-    /// Recognize with a window `recognizer`, decoded incrementally with local-agreement commit as `config` describes.
-    pub fn spawn(recognizer: impl Recognizer + 'static, config: RecognizerConfig) -> Self {
-        Self::with_decoder(Decoder::Window {
-            recognizer: Box::new(recognizer),
-            config,
-        })
-    }
-
-    /// Recognize with a streaming `recognizer`, which decodes each piece of audio once as it arrives.
-    pub fn spawn_streaming(recognizer: impl StreamingRecognizer + 'static) -> Self {
-        Self::with_decoder(Decoder::Streaming(Box::new(recognizer)))
-    }
-
-    fn with_decoder(decoder: Decoder) -> Self {
+    /// Recognize with `recognizer`, which decodes each piece of audio once as it arrives.
+    pub fn spawn(recognizer: impl StreamingRecognizer + 'static) -> Self {
         let (commands, receiver) = mpsc::channel();
+        let exited = Exited::default();
+        let guard = exited.guard();
         let thread = thread::Builder::new()
             .name("speech-recognition".into())
-            .spawn(move || Engine::new(decoder, receiver).run())
+            .spawn(move || {
+                // Dropped last, once the recognizer has been unloaded.
+                let _guard = guard;
+                Engine::new(Box::new(recognizer), receiver).run();
+            })
             .expect("spawn the recognition thread");
         Self {
             commands,
             next: 0,
             thread: Some(thread),
+            exited,
         }
     }
 
@@ -175,17 +155,32 @@ impl Recognition {
     ) -> Utterance {
         self.next += 1;
         let key = self.next;
+        let backlog = Arc::new(AtomicUsize::new(0));
         let _ = self.commands.send(Command::Begin {
             key,
             id,
             sink: Box::new(sink),
+            backlog: Arc::clone(&backlog),
         });
         Utterance {
             key,
             commands: self.commands.clone(),
             resampler: Resampler::new(sample_rate, RATE),
+            backlog,
+            behind: false,
             open: true,
         }
+    }
+
+    /// A handle that stops the recognition thread: every open utterance fails with [`Error::Stopped`], the recognizer is unloaded, and the thread exits.
+    pub fn stopper(&self) -> Stopper {
+        let commands = self.commands.clone();
+        Stopper::new(
+            move || {
+                let _ = commands.send(Command::Stop);
+            },
+            self.exited.clone(),
+        )
     }
 }
 
@@ -204,20 +199,33 @@ pub struct Utterance {
     key: u64,
     commands: Sender<Command>,
     resampler: Resampler,
+    /// Samples sent and not yet decoded, shared with the recognition thread.
+    backlog: Arc<AtomicUsize>,
+    behind: bool,
     open: bool,
 }
 
 impl Utterance {
-    /// Append audio at the utterance's sample rate.
+    /// Append audio at the utterance's sample rate. Once the audio waiting to be decoded passes [`BACKLOG`], the utterance fails with [`Error::Behind`] and later audio is not sent.
     pub fn push(&mut self, samples: &[i16]) {
+        if self.behind {
+            return;
+        }
         let mut resampled = Vec::new();
         self.resampler.process(samples, &mut resampled);
-        if !resampled.is_empty() {
-            let _ = self.commands.send(Command::Audio {
-                key: self.key,
-                samples: resampled,
-            });
+        if resampled.is_empty() {
+            return;
         }
+        let waiting = self.backlog.fetch_add(resampled.len(), Ordering::SeqCst) + resampled.len();
+        if waiting > BACKLOG {
+            self.behind = true;
+            let _ = self.commands.send(Command::Behind { key: self.key });
+            return;
+        }
+        let _ = self.commands.send(Command::Audio {
+            key: self.key,
+            samples: resampled,
+        });
     }
 
     /// Append the samples of a frame, adapting to its sample rate.
@@ -230,7 +238,7 @@ impl Utterance {
         self.push(&frame.samples);
     }
 
-    /// The participant finished speaking: decode the uncommitted tail and deliver the final transcript.
+    /// The participant finished speaking: decode the rest and deliver the final transcript.
     pub fn end(mut self) {
         self.open = false;
         let _ = self.commands.send(Command::End { key: self.key });
@@ -251,128 +259,92 @@ impl Drop for Utterance {
     }
 }
 
-/// The recognizer and how utterances are decoded with it.
-enum Decoder {
-    Window {
-        recognizer: Box<dyn Recognizer>,
-        config: RecognizerConfig,
-    },
-    Streaming(Box<dyn StreamingRecognizer>),
-}
-
-/// The decoding state of one utterance.
-enum State {
-    Window(Policy),
-    Streaming(Box<dyn RecognitionStream>),
-}
-
-impl State {
-    fn push(&mut self, samples: &[i16]) {
-        match self {
-            Self::Window(policy) => policy.push(samples),
-            Self::Streaming(stream) => stream.accept(samples),
-        }
-    }
-
-    fn due(&self) -> bool {
-        match self {
-            Self::Window(policy) => policy.due(),
-            Self::Streaming(stream) => stream.due(),
-        }
-    }
-
-    fn transcript(&self) -> Transcript {
-        match self {
-            Self::Window(policy) => policy.transcript(),
-            Self::Streaming(stream) => stream.transcript(),
-        }
-    }
-
-    /// Decode what is due.
-    fn decode(&mut self, decoder: &mut Decoder) -> Result<(), Error> {
-        match (self, decoder) {
-            (Self::Window(policy), Decoder::Window { recognizer, .. }) => {
-                policy.decode(&mut **recognizer)
-            }
-            (Self::Streaming(stream), _) => stream.decode(),
-            (Self::Window(_), Decoder::Streaming(_)) => {
-                unreachable!("window state is only created for a window decoder")
-            }
-        }
-    }
-
-    /// Decode the rest and return the complete transcript.
-    fn finish(&mut self, decoder: &mut Decoder) -> Result<String, Error> {
-        match (self, decoder) {
-            (Self::Window(policy), Decoder::Window { recognizer, .. }) => {
-                policy.finish(&mut **recognizer)
-            }
-            (Self::Streaming(stream), _) => stream.finish(),
-            (Self::Window(_), Decoder::Streaming(_)) => {
-                unreachable!("window state is only created for a window decoder")
-            }
-        }
-    }
-}
-
 struct Active {
     key: u64,
     id: u64,
     sink: Sink,
-    state: State,
+    stream: Box<dyn RecognitionStream>,
     ending: bool,
     reported: Transcript,
+    /// Samples sent and not yet decoded, shared with the [`Utterance`].
+    backlog: Arc<AtomicUsize>,
+    /// Samples accepted since the last decode.
+    accepted: usize,
+}
+
+impl Active {
+    fn fail(mut self, error: Error) {
+        (self.sink)(TranscriptEvent::Failed(error));
+    }
 }
 
 struct Engine {
-    decoder: Decoder,
+    /// The recognizer, until a panic disables recognition or the engine stops.
+    recognizer: Option<Box<dyn StreamingRecognizer>>,
     commands: Receiver<Command>,
     /// Active utterances, in the order they will next be served.
     active: VecDeque<Active>,
     connected: bool,
+    disabled: bool,
 }
 
 impl Engine {
-    fn new(decoder: Decoder, commands: Receiver<Command>) -> Self {
+    fn new(recognizer: Box<dyn StreamingRecognizer>, commands: Receiver<Command>) -> Self {
         Self {
-            decoder,
+            recognizer: Some(recognizer),
             commands,
             active: VecDeque::new(),
             connected: true,
+            disabled: false,
         }
     }
 
     fn run(mut self) {
         loop {
-            // Apply every queued command before decoding, so that a slow decode coalesces the audio that arrived meanwhile.
-            let work = self
-                .active
-                .iter()
-                .any(|active| active.ending || active.state.due());
-            if !work {
-                if !self.connected && self.active.is_empty() {
-                    return;
-                }
-                match self.commands.recv() {
-                    Ok(command) => self.apply(command),
-                    Err(_) => {
-                        self.disconnect();
-                        continue;
-                    }
-                }
+            match panic::catch_unwind(AssertUnwindSafe(|| self.turn())) {
+                Ok(true) => {}
+                Ok(false) => return,
+                Err(panic) => self.disable(&panic_message(&*panic)),
             }
-            loop {
-                match self.commands.try_recv() {
-                    Ok(command) => self.apply(command),
-                    Err(TryRecvError::Empty) => break,
-                    Err(TryRecvError::Disconnected) => {
-                        self.disconnect();
-                        break;
-                    }
-                }
-            }
-            self.step();
         }
+    }
+
+    /// Apply the waiting commands and serve one utterance. Returns whether the engine keeps running.
+    fn turn(&mut self) -> bool {
+        // Apply every queued command before decoding, so that a slow decode coalesces the audio that arrived meanwhile.
+        let work = self
+            .active
+            .iter()
+            .any(|active| active.ending || active.stream.due());
+        if !work {
+            if !self.connected && self.active.is_empty() {
+                return false;
+            }
+            match self.commands.recv() {
+                Ok(command) => {
+                    if !self.apply(command) {
+                        return false;
+                    }
+                }
+                Err(_) => self.disconnect(),
+            }
+        }
+        loop {
+            match self.commands.try_recv() {
+                Ok(command) => {
+                    if !self.apply(command) {
+                        return false;
+                    }
+                }
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    self.disconnect();
+                    break;
+                }
+            }
+        }
+        self.step();
+        true
     }
 
     /// Once the service shuts down, utterances that have not ended can never end.
@@ -383,34 +355,79 @@ impl Engine {
         }
     }
 
-    fn apply(&mut self, command: Command) {
+    /// Disable recognition after a panic: fail every open utterance, unload the recognizer, and fail later utterances at once.
+    fn disable(&mut self, message: &str) {
+        if !self.disabled {
+            self.disabled = true;
+            log::error!(
+                "Speech recognition stopped after a panic ({message}); it is unavailable until the server restarts."
+            );
+        }
+        let active = std::mem::take(&mut self.active);
+        let recognizer = self.recognizer.take();
+        // Failing an utterance or unloading the recognizer may panic again; that must not end the thread.
+        let _ = panic::catch_unwind(AssertUnwindSafe(move || {
+            for active in active {
+                active.fail(Error::Stopped(UNAVAILABLE.into()));
+            }
+            drop(recognizer);
+        }));
+    }
+
+    /// Fail every utterance and unload the recognizer, as the server is shutting down.
+    fn stop(&mut self) {
+        for active in std::mem::take(&mut self.active) {
+            active.fail(Error::Stopped("the server is shutting down".into()));
+        }
+        self.recognizer = None;
+    }
+
+    /// Apply `command`. Returns whether the engine keeps running.
+    fn apply(&mut self, command: Command) -> bool {
         match command {
-            Command::Begin { key, id, mut sink } => {
-                let state = match &mut self.decoder {
-                    Decoder::Window { config, .. } => State::Window(Policy::new(config.clone())),
-                    Decoder::Streaming(recognizer) => match recognizer.open() {
-                        Ok(stream) => State::Streaming(stream),
-                        Err(error) => {
-                            log::warn!("Transcription of utterance {id} could not start: {error}");
-                            sink(TranscriptEvent::Failed(error));
-                            return;
-                        }
-                    },
+            Command::Begin {
+                key,
+                id,
+                mut sink,
+                backlog,
+            } => {
+                let Some(recognizer) = self.recognizer.as_mut() else {
+                    sink(TranscriptEvent::Failed(Error::Stopped(UNAVAILABLE.into())));
+                    return true;
                 };
-                self.active.push_back(Active {
-                    key,
-                    id,
-                    sink,
-                    state,
-                    ending: false,
-                    reported: Transcript::default(),
-                });
+                match recognizer.open() {
+                    Ok(stream) => self.active.push_back(Active {
+                        key,
+                        id,
+                        sink,
+                        stream,
+                        ending: false,
+                        reported: Transcript::default(),
+                        backlog,
+                        accepted: 0,
+                    }),
+                    Err(error) => {
+                        log::warn!("Transcription of utterance {id} could not start: {error}");
+                        sink(TranscriptEvent::Failed(error));
+                    }
+                }
             }
             Command::Audio { key, samples } => {
                 if let Some(active) = self.find(key)
                     && !active.ending
                 {
-                    active.state.push(&samples);
+                    active.stream.accept(&samples);
+                    active.accepted += samples.len();
+                }
+            }
+            Command::Behind { key } => {
+                if let Some(index) = self.active.iter().position(|active| active.key == key) {
+                    let active = self.active.remove(index).expect("index is in range");
+                    log::warn!(
+                        "Transcription of utterance {} fell too far behind the audio.",
+                        active.id
+                    );
+                    active.fail(Error::Behind);
                 }
             }
             Command::End { key } => {
@@ -420,7 +437,12 @@ impl Engine {
             }
             Command::Cancel { key } => self.active.retain(|active| active.key != key),
             Command::Shutdown => self.disconnect(),
+            Command::Stop => {
+                self.stop();
+                return false;
+            }
         }
+        true
     }
 
     fn find(&mut self, key: u64) -> Option<&mut Active> {
@@ -428,43 +450,54 @@ impl Engine {
     }
 
     /// Serve one utterance: finish the first that has ended, otherwise decode the next that is due.
+    ///
+    /// The utterance stays in `active` while the recognizer works on it, so that if the recognizer panics, [`Engine::disable`] reports the failure.
     fn step(&mut self) {
         let index = self
             .active
             .iter()
             .position(|active| active.ending)
-            .or_else(|| self.active.iter().position(|active| active.state.due()));
+            .or_else(|| self.active.iter().position(|active| active.stream.due()));
         let Some(index) = index else {
             return;
         };
-        let mut active = self.active.remove(index).expect("index is in range");
+        let active = &mut self.active[index];
         if active.ending {
-            match active.state.finish(&mut self.decoder) {
+            let result = active.stream.finish();
+            let mut active = self.active.remove(index).expect("index is in range");
+            match result {
                 Ok(text) => (active.sink)(TranscriptEvent::Final(text)),
                 Err(error) => {
                     log::warn!("Transcription of utterance {} failed: {error}", active.id);
-                    (active.sink)(TranscriptEvent::Failed(error));
+                    active.fail(error);
                 }
             }
             return;
         }
-        match active.state.decode(&mut self.decoder) {
+        match active.stream.decode() {
             Ok(()) => {
-                let transcript = active.state.transcript();
+                active.backlog.fetch_sub(active.accepted, Ordering::SeqCst);
+                active.accepted = 0;
+                let transcript = active.stream.transcript();
                 if transcript != active.reported {
                     active.reported = transcript.clone();
                     (active.sink)(TranscriptEvent::Partial(transcript));
                 }
                 // Rotate to the back so that concurrent utterances take turns.
+                let active = self.active.remove(index).expect("index is in range");
                 self.active.push_back(active);
             }
             Err(error) => {
+                let active = self.active.remove(index).expect("index is in range");
                 log::warn!("Transcription of utterance {} failed: {error}", active.id);
-                (active.sink)(TranscriptEvent::Failed(error));
+                active.fail(error);
             }
         }
     }
 }
+
+/// Why utterances fail once a panic has disabled recognition.
+const UNAVAILABLE: &str = "speech recognition stopped after an internal error";
 
 #[cfg(test)]
 mod tests;

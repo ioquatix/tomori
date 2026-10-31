@@ -207,7 +207,10 @@ fn split(text: &str) -> Transcript {
 mod tests {
     use super::*;
     use crate::{Recognition, TranscriptEvent};
-    use std::{sync::mpsc, time::Duration};
+    use std::{
+        sync::mpsc,
+        time::{Duration, Instant},
+    };
 
     fn repository() -> PathBuf {
         match std::env::var_os("TOMORI_SPEECH_ROOT") {
@@ -265,26 +268,35 @@ mod tests {
             .unwrap();
 
         let recognizer = TransducerRecognizer::new(&TransducerConfig::from_root(&root)).unwrap();
-        let mut recognition = Recognition::spawn_streaming(recognizer);
+        let mut recognition = Recognition::spawn(recognizer);
         let (sender, events) = mpsc::channel();
         let mut utterance = recognition.begin(1, rate, move |event| {
             let _ = sender.send(event);
         });
-        // 100 ms frames, as the headset sends them, paced so that decoding keeps up with them.
-        for frame in audio.chunks(rate as usize / 10) {
-            utterance.push(frame);
-            std::thread::sleep(Duration::from_millis(50));
-        }
-        utterance.end();
+        // 100 ms frames in real time, as the headset sends them.
+        let start = Instant::now();
         let mut partials = 0;
+        for (index, frame) in audio.chunks(rate as usize / 10).enumerate() {
+            utterance.push(frame);
+            while let Ok(event) = events.try_recv() {
+                match event {
+                    TranscriptEvent::Partial(_) => partials += 1,
+                    other => panic!("unexpected {other:?} before the utterance ended"),
+                }
+            }
+            let due = start + Duration::from_millis(100 * (index as u64 + 1));
+            std::thread::sleep(due.saturating_duration_since(Instant::now()));
+        }
+        // Partial results arrive while the participant is still speaking.
+        assert!(partials > 0, "no partial result before the utterance ended");
+        utterance.end();
         let text = loop {
             match events.recv_timeout(Duration::from_secs(60)).unwrap() {
-                TranscriptEvent::Partial(_) => partials += 1,
+                TranscriptEvent::Partial(_) => {}
                 TranscriptEvent::Final(text) => break text.to_lowercase(),
                 TranscriptEvent::Failed(error) => panic!("{error}"),
             }
         };
-        assert!(partials > 0);
         assert!(text.contains("quick brown fox"), "{text}");
         assert!(text.contains("back home"), "{text}");
     }

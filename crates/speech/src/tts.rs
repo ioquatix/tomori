@@ -3,18 +3,22 @@
 
 //! Ordered speech synthesis for a space's agent speech stream.
 //!
-//! [`Speech`] owns one [`Synthesizer`] on a dedicated thread and synthesizes queued segments in order, delivering audio as soon as each chunk is produced. Synthesis never waits for playback, so segment N+1 is synthesized while segment N plays. There is deliberately no way to interrupt, skip or truncate queued speech: participant input never stops agent speech (`design/speech.md`).
+//! [`Speech`] owns one [`Synthesizer`] on a dedicated thread and synthesizes queued segments in order, delivering audio as soon as each chunk is produced. Synthesis never waits for playback, so segment N+1 is synthesized while segment N plays. A panic in the synthesizer disables this stream: it is logged once, and that segment and every later one fail with [`Error::Stopped`]. There is deliberately no way to interrupt, skip or truncate queued speech: participant input never stops agent speech (`design/speech.md`).
 
 mod kokoro;
 
 use std::{
+    panic::{self, AssertUnwindSafe},
     sync::mpsc::{self, Sender},
     thread::{self, JoinHandle},
 };
 
 pub use kokoro::{KokoroConfig, KokoroSynthesizer};
 
-use crate::Error;
+use crate::{Error, stop::panic_message};
+
+/// Why segments fail once a panic has disabled synthesis.
+const UNAVAILABLE: &str = "speech synthesis stopped after an internal error";
 
 /// A block of synthesized 16-bit mono PCM.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -70,20 +74,42 @@ impl Speech {
         let thread = thread::Builder::new()
             .name("speech-synthesis".into())
             .spawn(move || {
+                // Set once the synthesizer panics; later segments fail without reaching it.
+                let mut disabled = false;
                 for Job { segment, text } in receiver {
                     sink(SpeechEvent::Started {
                         segment,
                         text: text.clone(),
                     });
-                    let result = synthesizer.synthesize(&text, &mut |chunk| {
-                        if !chunk.samples.is_empty() {
-                            sink(SpeechEvent::Audio { segment, chunk });
-                        }
-                    });
+                    let result = if disabled {
+                        Err(Error::Stopped(UNAVAILABLE.into()))
+                    } else {
+                        let sink = &mut sink;
+                        panic::catch_unwind(AssertUnwindSafe(|| {
+                            synthesizer.synthesize(&text, &mut |chunk| {
+                                if !chunk.samples.is_empty() {
+                                    sink(SpeechEvent::Audio { segment, chunk });
+                                }
+                            })
+                        }))
+                        .unwrap_or_else(|panic| {
+                            disabled = true;
+                            log::error!(
+                                "Speech synthesis stopped after a panic ({}); it is unavailable until the server restarts.",
+                                panic_message(&*panic)
+                            );
+                            Err(Error::Stopped(UNAVAILABLE.into()))
+                        })
+                    };
                     match result {
                         Ok(()) => sink(SpeechEvent::Finished { segment }),
                         Err(error) => {
-                            log::warn!("Speech synthesis of segment {segment} failed: {error}");
+                            // A stopped engine has already logged why, once.
+                            if matches!(error, Error::Stopped(_)) {
+                                log::debug!("Speech synthesis of segment {segment} failed: {error}");
+                            } else {
+                                log::warn!("Speech synthesis of segment {segment} failed: {error}");
+                            }
                             sink(SpeechEvent::Failed { segment, error });
                         }
                     }
@@ -136,7 +162,7 @@ mod tests {
         time::{Duration, Instant},
     };
 
-    /// Produces one chunk per word, with a delay, and fails on text containing "fail".
+    /// Produces one chunk per word, with a delay, fails on text containing "fail", and panics on text containing "crash".
     struct Fake {
         delay: Duration,
         log: Arc<Mutex<Vec<String>>>,
@@ -149,6 +175,9 @@ mod tests {
             output: &mut dyn FnMut(AudioChunk),
         ) -> Result<(), Error> {
             self.log.lock().unwrap().push(text.to_owned());
+            if text.contains("crash") {
+                panic!("the synthesizer crashed");
+            }
             for (index, _) in text.split_whitespace().enumerate() {
                 thread::sleep(self.delay);
                 output(AudioChunk {
@@ -249,6 +278,25 @@ mod tests {
             error: Error::Engine("cannot say that".into())
         }));
         assert!(events.contains(&SpeechEvent::Finished { segment: 2 }));
+    }
+
+    #[test]
+    fn a_panic_disables_synthesis_for_later_segments() {
+        let (mut speech, receiver, log) = spawn(Duration::ZERO);
+        speech.speak("please crash now");
+        speech.speak("recovered");
+        speech.close();
+        let failures: Vec<_> = receiver
+            .iter()
+            .filter(|event| matches!(event, SpeechEvent::Failed { .. }))
+            .collect();
+        let stopped = |segment| SpeechEvent::Failed {
+            segment,
+            error: Error::Stopped(UNAVAILABLE.into()),
+        };
+        assert_eq!(failures, [stopped(1), stopped(2)]);
+        // The disabled synthesizer is not asked again.
+        assert_eq!(log.lock().unwrap().len(), 1);
     }
 
     #[test]

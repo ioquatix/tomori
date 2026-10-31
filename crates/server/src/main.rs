@@ -15,7 +15,7 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use base_scheduler::{Cancellation, SocketLocalAddress};
 use base_scheduler_direct::{DirectOptions, DirectScheduler};
@@ -113,10 +113,18 @@ fn parse(mut arguments: impl Iterator<Item = String>) -> Result<Arguments, Strin
             }
             "--speech-provider" => {
                 let value = arguments.next().ok_or("--speech-provider needs a name")?;
-                if !matches!(value.as_str(), "cpu" | "cuda") {
-                    return Err(format!(
-                        "--speech-provider needs cpu or cuda, not {value:?}"
-                    ));
+                match value.as_str() {
+                    "cpu" => {}
+                    "cuda" if cfg!(feature = "speech-shared") => {}
+                    // The static libraries linked by default contain only the CPU provider, and ONNX Runtime would silently fall back to it.
+                    "cuda" => {
+                        return Err("--speech-provider cuda needs a server built with the speech-shared feature and the CUDA build of sherpa-onnx; see crates/speech/readme.md.".to_owned());
+                    }
+                    _ => {
+                        return Err(format!(
+                            "--speech-provider needs cpu or cuda, not {value:?}"
+                        ));
+                    }
                 }
                 parsed.speech_provider = value;
             }
@@ -229,9 +237,41 @@ fn backends(names: &[String]) -> Result<Backends, String> {
     Ok(backends)
 }
 
+/// How long shutdown waits for the speech engine threads to stop, after the server has drained. Synthesis stops at the end of the sentence being generated and recognition between decodes, each well under a second on the reference Mac.
+const ENGINE_STOP: Duration = Duration::from_secs(3);
+
+/// The speech engine threads to stop when the server shuts down; see `design/server.md`.
+#[derive(Default)]
+struct Engines {
+    #[cfg(feature = "speech")]
+    stoppers: Vec<speech::Stopper>,
+}
+
+impl Engines {
+    /// Stop every engine thread and wait until `deadline` for them to exit. Returns whether they all did.
+    fn stop(&self, deadline: Instant) -> bool {
+        #[cfg(feature = "speech")]
+        {
+            for stopper in &self.stoppers {
+                stopper.stop();
+            }
+            self.stoppers.iter().all(|stopper| stopper.wait(deadline))
+        }
+        #[cfg(not(feature = "speech"))]
+        {
+            let _ = deadline;
+            true
+        }
+    }
+}
+
 /// Speech recognition: the streaming transducer from `root`, run with `provider`, or none. Without recognition, every utterance fails visibly.
 #[cfg(feature = "speech")]
-fn transcriber(root: Option<&Path>, provider: &str) -> Result<Arc<dyn Transcriber>, String> {
+fn transcriber(
+    root: Option<&Path>,
+    provider: &str,
+    engines: &mut Engines,
+) -> Result<Arc<dyn Transcriber>, String> {
     use speech::stt::{TransducerConfig, TransducerRecognizer};
 
     let Some(root) = root else {
@@ -246,7 +286,9 @@ fn transcriber(root: Option<&Path>, provider: &str) -> Result<Arc<dyn Transcribe
                 "Speech recognition: streaming transducer from {} ({provider}).",
                 config.model.display()
             );
-            Arc::new(server::RecognitionTranscriber::streaming(recognizer))
+            let transcriber = server::RecognitionTranscriber::new(recognizer);
+            engines.stoppers.push(transcriber.stopper());
+            Arc::new(transcriber)
         }
         Err(error) => {
             eprintln!(
@@ -260,7 +302,11 @@ fn transcriber(root: Option<&Path>, provider: &str) -> Result<Arc<dyn Transcribe
 }
 
 #[cfg(not(feature = "speech"))]
-fn transcriber(root: Option<&Path>, _provider: &str) -> Result<Arc<dyn Transcriber>, String> {
+fn transcriber(
+    root: Option<&Path>,
+    _provider: &str,
+    _engines: &mut Engines,
+) -> Result<Arc<dyn Transcriber>, String> {
     if root.is_some() {
         return Err(
             "This server was built without the speech feature, so --speech-root is not supported."
@@ -273,7 +319,7 @@ fn transcriber(root: Option<&Path>, _provider: &str) -> Result<Arc<dyn Transcrib
 
 /// Speech synthesis: Kokoro from `root`, or none, in which case replies are not spoken.
 #[cfg(feature = "speech")]
-fn synthesis(server: Server, root: Option<&Path>) -> Server {
+fn synthesis(server: Server, root: Option<&Path>, engines: &mut Engines) -> Server {
     use speech::tts::{KokoroConfig, KokoroSynthesizer};
 
     let Some(root) = root else {
@@ -283,6 +329,7 @@ fn synthesis(server: Server, root: Option<&Path>) -> Server {
     match KokoroSynthesizer::new(&KokoroConfig::from_root(root)) {
         Ok(synthesizer) => {
             eprintln!("Speech synthesis: Kokoro from {}.", root.display());
+            engines.stoppers.push(synthesizer.stopper());
             server.with_synthesizer(synthesizer)
         }
         Err(error) => {
@@ -293,7 +340,7 @@ fn synthesis(server: Server, root: Option<&Path>) -> Server {
 }
 
 #[cfg(not(feature = "speech"))]
-fn synthesis(server: Server, _root: Option<&Path>) -> Server {
+fn synthesis(server: Server, _root: Option<&Path>, _engines: &mut Engines) -> Server {
     eprintln!("Speech synthesis: off (built without speech); replies are not spoken.");
     server
 }
@@ -323,7 +370,8 @@ fn main() -> ExitCode {
         }
     };
     let root = arguments.speech_root.as_deref();
-    let transcriber = match transcriber(root, &arguments.speech_provider) {
+    let mut engines = Engines::default();
+    let transcriber = match transcriber(root, &arguments.speech_provider, &mut engines) {
         Ok(transcriber) => transcriber,
         Err(message) => {
             eprintln!("{message}");
@@ -347,7 +395,7 @@ fn main() -> ExitCode {
     if let Some(timeout) = arguments.request_timeout {
         server = server.with_request_timeout(timeout);
     }
-    let server = synthesis(server, root);
+    let server = synthesis(server, root, &mut engines);
     let cancellation = Cancellation::new();
     // Stop on Ctrl-C or SIGTERM by shutting down in order, so that the Bonjour advertisement is withdrawn rather than left to expire.
     #[cfg(unix)]
@@ -388,13 +436,29 @@ fn main() -> ExitCode {
             })
     });
     block_on(scheduler.shutdown());
-    match result {
+    let code = match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(message) => {
             eprintln!("{message}");
             ExitCode::FAILURE
         }
+    };
+    // Stop the speech engines before returning, so that no inference is running while static destructors, including ONNX Runtime's, run.
+    if !engines.stop(Instant::now() + ENGINE_STOP) {
+        log::error!(
+            "The speech engines did not stop within {ENGINE_STOP:?}; exiting without running destructors."
+        );
+        #[cfg(unix)]
+        exit_now(if code == ExitCode::SUCCESS { 0 } else { 1 });
     }
+    code
+}
+
+/// Exit at once, without running static destructors or `atexit` handlers, which could free state that a native engine thread is still using.
+#[cfg(unix)]
+fn exit_now(code: libc::c_int) -> ! {
+    // SAFETY: `_exit` only ends the process; it is async-signal-safe and touches no Rust state.
+    unsafe { libc::_exit(code) }
 }
 
 /// Shut down in order on the first signal, and exit immediately on a repeated one in case shutdown hangs.
@@ -407,7 +471,8 @@ impl base_scheduler::Notify<libc::c_int> for Shutdown {
         if self.0.cancel() {
             eprintln!("Shutting down; signal again to exit immediately.");
         } else {
-            std::process::exit(128 + signal);
+            // Engine threads may still be running, so static destructors must not run.
+            exit_now(128 + signal);
         }
     }
 }
@@ -454,6 +519,26 @@ mod tests {
         ] {
             assert!(arguments(list).is_err(), "{list:?} was accepted");
         }
+    }
+
+    #[test]
+    fn the_speech_provider_must_be_one_this_build_supports() {
+        assert_eq!(arguments(&[]).unwrap().speech_provider, "cpu");
+        assert_eq!(
+            arguments(&["--speech-provider", "cpu"])
+                .unwrap()
+                .speech_provider,
+            "cpu"
+        );
+        let cuda = arguments(&["--speech-provider", "cuda"]);
+        if cfg!(feature = "speech-shared") {
+            assert_eq!(cuda.unwrap().speech_provider, "cuda");
+        } else {
+            let error = cuda.err().expect("cuda is refused without speech-shared");
+            assert!(error.contains("speech-shared"), "{error}");
+        }
+        assert!(arguments(&["--speech-provider", "gpu"]).is_err());
+        assert!(arguments(&["--speech-provider"]).is_err());
     }
 
     #[test]

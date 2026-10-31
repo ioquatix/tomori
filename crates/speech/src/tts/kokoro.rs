@@ -5,9 +5,14 @@
 
 use std::{
     cell::Cell,
+    panic::{self, AssertUnwindSafe},
     path::{Path, PathBuf},
     rc::Rc,
-    sync::mpsc::{self, Receiver, Sender},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc::{self, Receiver, Sender},
+    },
     thread::{self, JoinHandle},
 };
 
@@ -16,8 +21,14 @@ use sherpa_onnx::{
     OfflineTtsModelConfig,
 };
 
-use super::{AudioChunk, Synthesizer};
-use crate::Error;
+use super::{AudioChunk, Synthesizer, UNAVAILABLE};
+use crate::{
+    Error, Stopper,
+    stop::{Exited, panic_message},
+};
+
+/// Why requests fail while the server shuts down.
+const SHUTTING_DOWN: &str = "the server is shutting down";
 
 /// The number of voices in the Kokoro multi-language v1.0 model.
 const VOICES: u32 = 54;
@@ -114,12 +125,21 @@ struct Request {
     replies: Sender<Message>,
 }
 
+enum Command {
+    Synthesize(Request),
+    /// Unload the model and exit, once the requests queued before this one are answered.
+    Stop,
+}
+
 /// A [`Synthesizer`] that runs Kokoro in this process.
 ///
-/// The model is loaded and run on a thread owned by the synthesizer, so synthesis never runs on the caller's scheduler. Each sentence's audio is passed to the caller as soon as it is generated. A segment that fails is reported to its caller and not retried.
+/// The model is loaded and run on a thread owned by the synthesizer, so synthesis never runs on the caller's scheduler. Each sentence's audio is passed to the caller as soon as it is generated. A segment that fails is reported to its caller and not retried. A panic on the thread disables synthesis: it is logged once, and every later segment fails with [`Error::Stopped`].
 pub struct KokoroSynthesizer {
-    requests: Option<Sender<Request>>,
+    commands: Sender<Command>,
     thread: Option<JoinHandle<()>>,
+    exited: Exited,
+    /// Set by a [`Stopper`]: synthesis stops at the next sentence, and waiting requests fail.
+    stopping: Arc<AtomicBool>,
     voice: u32,
     speed: f32,
     sample_rate: u32,
@@ -132,10 +152,16 @@ impl KokoroSynthesizer {
         config.check()?;
         let sherpa = config.sherpa();
         let (ready_sender, ready) = mpsc::channel();
-        let (requests, receiver) = mpsc::channel::<Request>();
+        let (commands, receiver) = mpsc::channel();
+        let exited = Exited::default();
+        let guard = exited.guard();
+        let stopping = Arc::new(AtomicBool::new(false));
+        let serving = Arc::clone(&stopping);
         let thread = thread::Builder::new()
             .name("speech-kokoro".into())
             .spawn(move || {
+                // Dropped last, once the model has been unloaded.
+                let _guard = guard;
                 let Some(tts) = OfflineTts::create(&sherpa) else {
                     let _ = ready_sender.send(Err(Error::Unavailable(
                         "sherpa-onnx could not load the Kokoro model".into(),
@@ -143,7 +169,7 @@ impl KokoroSynthesizer {
                     return;
                 };
                 let _ = ready_sender.send(Ok((tts.sample_rate(), tts.num_speakers())));
-                serve(&tts, receiver);
+                serve(&tts, receiver, &serving);
             })
             .map_err(|error| Error::Unavailable(format!("could not start Kokoro: {error}")))?;
         let (sample_rate, speakers) = match ready.recv() {
@@ -160,8 +186,10 @@ impl KokoroSynthesizer {
             }
         };
         let synthesizer = Self {
-            requests: Some(requests),
+            commands,
             thread: Some(thread),
+            exited,
+            stopping,
             voice: config.voice,
             speed: config.speed,
             sample_rate: u32::try_from(sample_rate).unwrap_or(0),
@@ -190,46 +218,95 @@ impl KokoroSynthesizer {
     pub fn speakers(&self) -> u32 {
         self.speakers
     }
+
+    /// A handle that stops the synthesis thread: the segment being synthesized stops after its current sentence, waiting segments fail with [`Error::Stopped`], the model is unloaded, and the thread exits.
+    pub fn stopper(&self) -> Stopper {
+        let stopping = Arc::clone(&self.stopping);
+        let commands = self.commands.clone();
+        Stopper::new(
+            move || {
+                stopping.store(true, Ordering::SeqCst);
+                let _ = commands.send(Command::Stop);
+            },
+            self.exited.clone(),
+        )
+    }
 }
 
-/// Serve requests on the synthesis thread until the synthesizer is dropped.
-fn serve(tts: &OfflineTts, requests: Receiver<Request>) {
-    for request in requests {
-        let replies = request.replies.clone();
-        let streamed = Rc::new(Cell::new(false));
-        let callback = {
-            let streamed = Rc::clone(&streamed);
-            move |samples: &[f32], _progress: f32| {
-                if samples.is_empty() {
-                    return true;
-                }
-                streamed.set(true);
-                // Stop early if the caller has gone away.
-                replies.send(Message::Audio(samples.to_vec())).is_ok()
+/// Serve requests on the synthesis thread until the synthesizer is dropped or stopped, or a panic disables it.
+fn serve(tts: &OfflineTts, commands: Receiver<Command>, stopping: &Arc<AtomicBool>) {
+    for command in commands {
+        let Command::Synthesize(request) = command else {
+            return;
+        };
+        if stopping.load(Ordering::SeqCst) {
+            let _ = request
+                .replies
+                .send(Message::Failed(Error::Stopped(SHUTTING_DOWN.into())));
+            continue;
+        }
+        match panic::catch_unwind(AssertUnwindSafe(|| generate(tts, &request, stopping))) {
+            Ok(reply) => {
+                let _ = request.replies.send(reply);
             }
-        };
-        let generation = GenerationConfig {
-            sid: request.voice,
-            speed: request.speed,
-            ..Default::default()
-        };
-        let audio = tts.generate_with_config(&request.text, &generation, Some(callback));
-        let reply = match audio {
-            None => Message::Failed(Error::Engine("Kokoro could not synthesize the text".into())),
-            Some(audio) if !streamed.get() => {
-                // A build that does not call back still returns the whole segment.
-                if audio.samples().is_empty() {
-                    Message::Failed(Error::Engine("Kokoro produced no audio".into()))
-                } else {
-                    let _ = request
-                        .replies
-                        .send(Message::Audio(audio.samples().to_vec()));
-                    Message::Done
-                }
+            Err(panic) => {
+                log::error!(
+                    "Kokoro speech synthesis stopped after a panic ({}); it is unavailable until the server restarts.",
+                    panic_message(&*panic)
+                );
+                // Later requests find the thread gone and fail with the same error.
+                let _ = request
+                    .replies
+                    .send(Message::Failed(Error::Stopped(UNAVAILABLE.into())));
+                return;
             }
-            Some(_) => Message::Done,
-        };
-        let _ = request.replies.send(reply);
+        }
+    }
+}
+
+/// Synthesize one request, streaming its audio, and return the final reply.
+fn generate(tts: &OfflineTts, request: &Request, stopping: &Arc<AtomicBool>) -> Message {
+    let replies = request.replies.clone();
+    let streamed = Rc::new(Cell::new(false));
+    let callback = {
+        let streamed = Rc::clone(&streamed);
+        let stopping = Arc::clone(stopping);
+        // This runs inside sherpa-onnx, where a panic would abort the process; nothing here panics.
+        move |samples: &[f32], _progress: f32| {
+            if stopping.load(Ordering::SeqCst) {
+                return false;
+            }
+            if samples.is_empty() {
+                return true;
+            }
+            streamed.set(true);
+            // Stop early if the caller has gone away.
+            replies.send(Message::Audio(samples.to_vec())).is_ok()
+        }
+    };
+    let generation = GenerationConfig {
+        sid: request.voice,
+        speed: request.speed,
+        ..Default::default()
+    };
+    let audio = tts.generate_with_config(&request.text, &generation, Some(callback));
+    if stopping.load(Ordering::SeqCst) {
+        return Message::Failed(Error::Stopped(SHUTTING_DOWN.into()));
+    }
+    match audio {
+        None => Message::Failed(Error::Engine("Kokoro could not synthesize the text".into())),
+        Some(audio) if !streamed.get() => {
+            // A build that does not call back still returns the whole segment.
+            if audio.samples().is_empty() {
+                Message::Failed(Error::Engine("Kokoro produced no audio".into()))
+            } else {
+                let _ = request
+                    .replies
+                    .send(Message::Audio(audio.samples().to_vec()));
+                Message::Done
+            }
+        }
+        Some(_) => Message::Done,
     }
 }
 
@@ -256,7 +333,7 @@ fn prepare(text: &str) -> Result<String, Error> {
 impl Synthesizer for KokoroSynthesizer {
     fn synthesize(&mut self, text: &str, output: &mut dyn FnMut(AudioChunk)) -> Result<(), Error> {
         let text = prepare(text)?;
-        let stopped = || Error::Stopped("the Kokoro synthesis thread stopped".into());
+        let stopped = || Error::Stopped(UNAVAILABLE.into());
         let (replies, receiver) = mpsc::channel();
         let request = Request {
             text,
@@ -264,10 +341,8 @@ impl Synthesizer for KokoroSynthesizer {
             speed: self.speed,
             replies,
         };
-        self.requests
-            .as_ref()
-            .ok_or_else(stopped)?
-            .send(request)
+        self.commands
+            .send(Command::Synthesize(request))
             .map_err(|_| stopped())?;
         loop {
             match receiver.recv() {
@@ -284,9 +359,9 @@ impl Synthesizer for KokoroSynthesizer {
 }
 
 impl Drop for KokoroSynthesizer {
-    /// Waits for the segment being synthesized, if any, then unloads the model.
+    /// Waits for the segments already queued, then unloads the model.
     fn drop(&mut self) {
-        self.requests = None;
+        let _ = self.commands.send(Command::Stop);
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
@@ -372,5 +447,13 @@ mod tests {
             .synthesize("Again.", &mut |chunk| more += chunk.samples.len())
             .unwrap();
         assert!(more > 0);
+        // Stopping unloads the model and ends the thread; later segments fail.
+        let stopper = synthesizer.stopper();
+        stopper.stop();
+        assert!(stopper.wait(std::time::Instant::now() + std::time::Duration::from_secs(5)));
+        assert!(matches!(
+            synthesizer.synthesize("After.", &mut |_| {}),
+            Err(Error::Stopped(_))
+        ));
     }
 }

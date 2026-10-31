@@ -210,7 +210,13 @@ mod enabled {
         clock: Option<Instant>,
         epoch: Instant,
         sequence: u32,
+        /// Whether synthesis has been reported as stopped.
+        stopped: bool,
     }
+
+    /// Reported once per space when synthesis has stopped: a panic disabled it, or the server is shutting down.
+    const SYNTHESIS_STOPPED: &str =
+        "Speech synthesis is unavailable until the server restarts, so replies are not spoken.";
 
     impl Pacer {
         fn new(
@@ -234,6 +240,7 @@ mod enabled {
                 clock: None,
                 epoch: Instant::now(),
                 sequence: 0,
+                stopped: false,
             }
         }
 
@@ -327,9 +334,18 @@ mod enabled {
                 SpeechEvent::Failed { error, .. } => {
                     self.flush();
                     self.announcing = None;
-                    self.pending.push_back(Item::Failed(format!(
-                        "Part of the reply could not be spoken: {error}."
-                    )));
+                    if matches!(error, speech::Error::Stopped(_)) {
+                        // Synthesis stays stopped until the server restarts, so say so once rather than for every sentence.
+                        if !self.stopped {
+                            self.stopped = true;
+                            self.pending
+                                .push_back(Item::Failed(SYNTHESIS_STOPPED.to_owned()));
+                        }
+                    } else {
+                        self.pending.push_back(Item::Failed(format!(
+                            "Part of the reply could not be spoken: {error}."
+                        )));
+                    }
                 }
             }
         }

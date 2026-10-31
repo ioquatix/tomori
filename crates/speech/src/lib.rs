@@ -7,17 +7,16 @@
 //! - [`speakable`]: selects stable, speakable sentences from streaming Markdown.
 //! - [`tts`]: ordered synthesis of those sentences.
 //!
-//! Engines run in this process through sherpa-onnx, on threads owned by this crate; see `readme.md`.
+//! Engines run in this process through sherpa-onnx, on threads owned by this crate; see `readme.md`. A panic in an engine disables that engine: it is logged once, and every later request fails with [`Error::Stopped`]. Each engine thread can be stopped and waited for with a [`Stopper`] when the server shuts down.
 
 mod error;
 pub mod speakable;
+mod stop;
 pub mod stt;
 pub mod tts;
 
 pub use error::Error;
 pub use speakable::{Speakable, SpeakableOptions};
-pub use stt::{
-    Recognition, RecognitionStream, Recognizer, RecognizerConfig, StreamingRecognizer,
-    TranscriptEvent, Utterance,
-};
+pub use stop::Stopper;
+pub use stt::{Recognition, RecognitionStream, StreamingRecognizer, TranscriptEvent, Utterance};
 pub use tts::{AudioChunk, Speech, SpeechEvent, Synthesizer};

@@ -7,7 +7,7 @@
 //! cargo run --release -p speech --example recognition_benchmark -- --root . [--model DIRECTORY]... [--whisper]
 //! ```
 //!
-//! Clips are the LibriSpeech test wavs shipped with the default streaming model, and sentences synthesized with Kokoro in four voices. Each streaming model is fed 100 ms frames in real time through [`Recognition`], as push-to-talk delivers them, and then again as fast as it can decode. Whisper, which cannot stream, decodes each whole clip; its first partial is estimated as the 1 second refresh interval of local agreement plus the time to decode that first second.
+//! Clips are the LibriSpeech test wavs shipped with the default streaming model, and sentences synthesized with Kokoro in four voices. Each streaming model is fed 100 ms frames in real time through [`Recognition`], as push-to-talk delivers them, and then again as fast as it can decode. Whisper, which cannot stream, decodes each whole clip; its first partial is estimated as a 1 second refresh interval, as a windowed re-decoding scheme would use, plus the time to decode that first second.
 
 use std::{
     path::{Path, PathBuf},
@@ -241,7 +241,7 @@ fn streaming(directory: &Path, clips: &[Clip], threads: u32) -> Totals {
     let loaded = Instant::now();
     let recognizer = TransducerRecognizer::new(&config).expect("load the streaming model");
     eprintln!("Loaded {} in {:?}", directory.display(), loaded.elapsed());
-    let mut recognition = Recognition::spawn_streaming(recognizer);
+    let mut recognition = Recognition::spawn(recognizer);
     let mut totals = Totals::default();
     for clip in clips {
         let processor = processor_time();
