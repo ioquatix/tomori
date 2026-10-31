@@ -16,7 +16,12 @@
 mod blocks;
 mod sentence;
 
+use std::borrow::Cow;
+
 use sentence::Next;
+
+/// Separates the carried definitions from the text being parsed. A line at the left margin closes any footnote definition, so indented text after it is not taken as the definition's continuation; the comment itself is an HTML block that is never spoken.
+const PRELUDE_END: &str = "<!-- -->\n\n";
 
 /// Options for [`Speakable`].
 #[derive(Clone, Debug)]
@@ -44,12 +49,24 @@ struct Cursor {
 }
 
 /// The speakable filter and sentence segmenter for one assistant message.
+///
+/// Each delta re-parses only the text after the last top-level boundary that has been spoken, so streaming a message costs time proportional to its length, apart from top-level blocks that span blank lines (see `blocks`).
 #[derive(Debug, Default)]
 pub struct Speakable {
     source: String,
     options: SpeakableOptions,
     cursor: Option<Cursor>,
     finished: bool,
+    /// The source offset parsing starts from. Everything before it has been spoken and can no longer change.
+    origin: usize,
+    /// Reference and footnote definitions before `origin`, each followed by a blank line, parsed ahead of the text so that later uses still resolve.
+    definitions: String,
+    /// Parse the whole message on every delta, as an oracle for tests.
+    #[cfg(test)]
+    whole: bool,
+    /// The number of bytes parsed so far.
+    #[cfg(test)]
+    parsed: usize,
 }
 
 impl Speakable {
@@ -86,16 +103,38 @@ impl Speakable {
     }
 
     fn collect(&mut self) -> Vec<String> {
-        let blocks = blocks::analyse(
-            &self.source,
-            self.finished,
-            self.options.code_notice.as_deref(),
-        );
+        let origin = self.origin;
+        let text: Cow<str> = if origin == 0 {
+            Cow::Borrowed(&self.source)
+        } else {
+            let mut text = String::with_capacity(
+                self.definitions.len() + PRELUDE_END.len() + self.source.len() - origin,
+            );
+            if !self.definitions.is_empty() {
+                text.push_str(&self.definitions);
+                text.push_str(PRELUDE_END);
+            }
+            text.push_str(&self.source[origin..]);
+            Cow::Owned(text)
+        };
+        // Offsets in `text` from `prelude` on correspond to source offsets from `origin` on.
+        let prelude = text.len() - (self.source.len() - origin);
+        let to_source = |offset: usize| offset - prelude + origin;
+        #[cfg(test)]
+        {
+            self.parsed += text.len();
+        }
+        let analysis = blocks::analyse(&text, self.finished, self.options.code_notice.as_deref());
         let mut segments = Vec::new();
-        for block in &blocks {
+        for block in analysis
+            .blocks
+            .iter()
+            .filter(|block| block.start >= prelude)
+        {
+            let start = to_source(block.start);
             let mut offset = match self.cursor {
-                Some(cursor) if block.start < cursor.block => continue,
-                Some(cursor) if block.start == cursor.block => cursor.offset.min(block.text.len()),
+                Some(cursor) if start < cursor.block => continue,
+                Some(cursor) if start == cursor.block => cursor.offset.min(block.text.len()),
                 _ => 0,
             };
             // Clamp to a character boundary in case the block's text changed shape.
@@ -122,16 +161,40 @@ impl Speakable {
             }
             // A block's text can shrink temporarily, for example while a trailing line looks like a table header; never move back over text that was already spoken.
             let offset = match self.cursor {
-                Some(cursor) if cursor.block == block.start => offset.max(cursor.offset),
+                Some(cursor) if cursor.block == start => offset.max(cursor.offset),
                 _ => offset,
             };
             self.cursor = Some(Cursor {
-                block: block.start,
+                block: start,
                 offset,
             });
             if !block.complete {
                 break;
             }
+        }
+
+        // Move the origin to the last boundary at or before the block being spoken: every block before it is complete and has been spoken.
+        #[cfg(test)]
+        let whole = self.whole;
+        #[cfg(not(test))]
+        let whole = false;
+        if let Some(cursor) = self.cursor
+            && !self.finished
+            && !whole
+            && let Some(boundary) = analysis
+                .boundaries
+                .iter()
+                .filter(|&&boundary| boundary >= prelude)
+                .map(|&boundary| to_source(boundary))
+                .rfind(|&boundary| boundary > origin && boundary <= cursor.block)
+        {
+            for range in &analysis.definitions {
+                if range.start >= prelude && to_source(range.start) < boundary {
+                    self.definitions.push_str(text[range.clone()].trim_end());
+                    self.definitions.push_str("\n\n");
+                }
+            }
+            self.origin = boundary;
         }
         segments
     }

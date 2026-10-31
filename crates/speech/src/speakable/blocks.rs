@@ -3,7 +3,7 @@
 
 //! Speakable text of each leaf block, and how much of it is stable.
 //!
-//! This is the only part of the filter that parses Markdown. It currently re-parses the accumulated message on every delta; an incremental parser only needs to replace [`analyse`] and may skip blocks before the caller's resume offset, because the caller never revisits them.
+//! This is the only part of the filter that parses Markdown. The caller parses from the last top-level boundary it has finished speaking rather than from the start of the message (see [`Analysis::boundaries`]), so each delta re-parses only the unfinished tail. A top-level block that contains blank lines, such as a long loose list, is still re-parsed in full on every delta. An incremental parser would remove that cost too and only needs to replace [`analyse`]; base-markdown's `IncrementalParser` (base-rs pull request #77) is the intended replacement once released.
 
 use std::ops::Range;
 
@@ -103,16 +103,32 @@ struct Link {
     source_end: usize,
 }
 
+/// The leaf blocks of a source and where it may be cut.
+#[derive(Debug)]
+pub(crate) struct Analysis {
+    pub blocks: Vec<Block>,
+    /// Offsets where a top-level block starts on the line after a blank line.
+    ///
+    /// No block before such a boundary can continue past it, and no later text can change that: only containers continue across a blank line, and a container continues only into an indented line or while it is open (a fence or an HTML block), in which case nothing starts at the top level. Parsing from a boundary therefore yields the same blocks after it, provided the reference and footnote definitions before it come first.
+    pub boundaries: Vec<usize>,
+    /// Source ranges of reference and footnote definitions that later text may use. Each one parses as the same definition on its own.
+    pub definitions: Vec<Range<usize>>,
+}
+
 /// Analyse `source`, the accumulated Markdown of one message.
 ///
 /// When `finished` is true the message is complete and every block is complete.
-pub(crate) fn analyse(source: &str, finished: bool, code_notice: Option<&str>) -> Vec<Block> {
+pub(crate) fn analyse(source: &str, finished: bool, code_notice: Option<&str>) -> Analysis {
     let options = ParseOptions::gfm();
     let mut leaves: Vec<Leaf> = Vec::new();
     let mut current: Option<Leaf> = None;
     // Depth of containers whose content is not spoken (tables, images, footnote definitions).
     let mut silent = 0usize;
     let mut link: Option<Link> = None;
+    // Depth of open containers below the document.
+    let mut depth = 0usize;
+    let mut boundaries = Vec::new();
+    let mut definitions: Vec<Range<usize>> = Vec::new();
 
     for event in EventParser::new(source, &options) {
         let Ok(event) = event else {
@@ -120,6 +136,41 @@ pub(crate) fn analyse(source: &str, finished: bool, code_notice: Option<&str>) -
             break;
         };
         let span = event.span.clone();
+        let top_level = depth == 0
+            && match &event.kind {
+                EventKind::Start(Tag::Document(_)) => false,
+                EventKind::Start(_)
+                | EventKind::CodeBlock { .. }
+                | EventKind::Rule
+                | EventKind::Definition { .. } => true,
+                EventKind::Html { block, .. } | EventKind::Opaque { block, .. } => *block,
+                _ => false,
+            };
+        if top_level && after_blank_line(source, span.start) {
+            boundaries.push(span.start);
+        }
+        match &event.kind {
+            EventKind::Start(Tag::FootnoteDefinition(_)) if depth == 0 => {
+                definitions.push(span.clone());
+            }
+            // A definition nested in a container is kept only when it is one line, because its span does not include the container's markers on later lines.
+            EventKind::Definition { .. }
+                if depth == 0
+                    || (!source[span.clone()].contains('\n')
+                        && !definitions
+                            .last()
+                            .is_some_and(|last| last.contains(&span.start))) =>
+            {
+                definitions.push(span.clone());
+            }
+            _ => {}
+        }
+        match &event.kind {
+            EventKind::Start(Tag::Document(_)) | EventKind::End(TagKind::Document) => {}
+            EventKind::Start(_) => depth += 1,
+            EventKind::End(_) => depth = depth.saturating_sub(1),
+            _ => {}
+        }
         match event.kind {
             EventKind::Start(Tag::Paragraph { .. }) => {
                 current = Some(Leaf::new(Kind::Paragraph, span.start, span.end));
@@ -292,7 +343,20 @@ pub(crate) fn analyse(source: &str, finished: bool, code_notice: Option<&str>) -
             complete,
         });
     }
-    blocks
+    Analysis {
+        blocks,
+        boundaries,
+        definitions,
+    }
+}
+
+/// Whether the line before `offset`, which starts a line, is blank.
+fn after_blank_line(source: &str, offset: usize) -> bool {
+    let Some(before) = source[..offset].strip_suffix('\n') else {
+        return false;
+    };
+    let line = before.rsplit('\n').next().unwrap_or(before);
+    line.trim().is_empty()
 }
 
 fn resolve<'a>(source: &'a str, value: &'a Text<'_>) -> &'a str {
