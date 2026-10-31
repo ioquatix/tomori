@@ -41,8 +41,8 @@ speech = ["dep:speech"]
 async-channel = "2"
 backend = { path = "../backend" }
 backend-claude-code = { path = "../backend-claude-code", optional = true }
-base-http = "0.1.0"
-base-http-server = "0.1.0"
+base-http = "0.2.0"
+base-http-server = "0.2.0"
 base-scheduler = "0.3.0"
 base-scheduler-direct = "0.3.0"
 discovery = { path = "../discovery" }

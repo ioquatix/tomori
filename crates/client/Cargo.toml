@@ -9,8 +9,8 @@ license = "MIT"
 publish = false
 
 [dependencies]
-base-http = "0.1.0"
-base-http-client = "0.1.0"
+base-http = "0.2.0"
+base-http-client = "0.2.0"
 base-scheduler = "0.3.0"
 base-scheduler-direct = "0.3.0"
 discovery = { path = "../discovery" }
@@ -19,4 +19,4 @@ protocol = { path = "../protocol" }
 
 [dev-dependencies]
 base-endpoint = "0.1.0"
-base-http-server = "0.1.0"
+base-http-server = "0.2.0"

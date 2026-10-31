@@ -385,9 +385,9 @@ dependencies = [
 
 [[package]]
 name = "base-http"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "693033d37de09d1681b735aa15ad2ca9faff2d43fe16e50d5889b45c76cf148a"
+checksum = "8084e7dce56f546c7e0abf10fcd2f8087fc06efb6d9a92cd97a339ac8a0df0f0"
 dependencies = [
  "arrayvec",
  "base-scheduler",
@@ -397,9 +397,9 @@ dependencies = [
 
 [[package]]
 name = "base-http-client"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "726d3e06d8700688e1ba5ec73137758933911ddb16e64cad7f7f85f92cd481fe"
+checksum = "1ba780d68b248684e22a85d15cd5a9dec3c1231dbe90a737ee371acb99036f98"
 dependencies = [
  "async-stream",
  "base-endpoint",
@@ -417,9 +417,9 @@ dependencies = [
 
 [[package]]
 name = "base-http-protocol"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f92541dfd488c90e9ff4fba1ca8ced9e80e515b429203ea9f64497a89e8c0e20"
+checksum = "a6e2bd2a2827d21fb18b6b4c2fcbd8daeb28e1447c1c56676b09db06c7777790"
 dependencies = [
  "base-endpoint",
  "base-http1",
@@ -427,9 +427,9 @@ dependencies = [
 
 [[package]]
 name = "base-http-server"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b7a9ae595f9cf931a2f60e01d5dc9be67f610597039228bd857f964034a607bd"
+checksum = "2804c96a95f558c1d93ff4786d30afc369ebfa1bc256b573ec7529ae1c6bf761"
 dependencies = [
  "base-endpoint",
  "base-http",
@@ -441,9 +441,9 @@ dependencies = [
 
 [[package]]
 name = "base-http1"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6a4fa771d515b1e4b09b0dbaf294ab97c1778872bf6a543cb3e680ff6b6a7078"
+checksum = "fd99c40cc98f0097635bdd6e04d1ae8c76cd98d939a4dcb36ce467486f5732fa"
 dependencies = [
  "base-endpoint",
  "base-http",
