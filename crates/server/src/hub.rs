@@ -6,7 +6,7 @@
 //! Every client action and backend event is applied synchronously under the lock. Work that may call out of the server — transcriber calls and backend operations — is deferred until the lock is released, or sent to the space's driver task.
 
 use std::cell::Cell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::{Duration, Instant};
@@ -24,12 +24,15 @@ use crate::limits;
 use crate::outbox::{Outbox, Outgoing};
 use crate::space::{AnswerOutcome, SpaceModel};
 use crate::transcriber::{Transcriber, TranscriptSink, UtteranceId};
-use crate::workspace::{SpaceSlot, SpaceSlots};
+use crate::workspace::SpaceSlots;
 
 pub type ConnectionId = u64;
 
 /// The shortest time between snapshots of one space caused by agent events, so that a streaming reply sends about ten full snapshots a second however fast its text arrives. See `design/server.md`.
 pub const SNAPSHOT_INTERVAL: Duration = Duration::from_millis(100);
+
+/// The most closed spaces kept that nobody is in. Beyond this, the oldest are forgotten, so that sessions ending repeatedly cannot grow the server's memory without bound. See `design/spaces.md`.
+pub const CLOSED_SPACES: usize = 32;
 
 /// Work for a space's driver, which owns the backend session.
 #[derive(Debug)]
@@ -59,8 +62,6 @@ pub struct CreateRequest {
     pub creator: String,
     /// The space the creator was in when they asked.
     pub creator_space: Option<String>,
-    /// This space's place under the running space limit, held until its session has closed or failed to start.
-    pub slot: SpaceSlot,
 }
 
 pub struct Hub {
@@ -147,7 +148,7 @@ struct Liveness {
 struct OpenUtterance {
     client: String,
     id: UtteranceId,
-    /// The sequence number of the next frame of this utterance, once its first frame has arrived. A gap after that means frames were lost mid-utterance; see `design/speech.md`.
+    /// The sequence number of the next frame, after an agent frame of this utterance. A gap between two agent frames means agent audio was lost mid-utterance; see `design/speech.md`. A frame of another gate clears it, so the agent frame after it is not checked.
     ///
     /// The first frame is not checked against frames before `UtteranceBegin`: the client legitimately skips sequence numbers there, by not sending frames while the gate is off and by dropping congested live audio. It never drops frames of an open utterance, and frames and control share one ordered stream, so the first frame after `UtteranceBegin` is the utterance's first.
     expected: Option<u32>,
@@ -253,6 +254,32 @@ impl HubState {
         false
     }
 
+    /// Forget the oldest closed spaces that nobody is in, beyond [`CLOSED_SPACES`]. Returns whether any were forgotten.
+    fn forget_closed(&mut self) -> bool {
+        let occupied: HashSet<&str> = self
+            .participants
+            .values()
+            .filter_map(|record| record.space.as_deref())
+            .collect();
+        let forgettable: Vec<String> = self
+            .spaces
+            .iter()
+            .filter(|space| {
+                space.model.is_closed()
+                    && space.model.participants.is_empty()
+                    && !occupied.contains(space.model.id.as_str())
+            })
+            .map(|space| space.model.id.clone())
+            .collect();
+        let Some(excess) = forgettable.len().checked_sub(CLOSED_SPACES) else {
+            return false;
+        };
+        let forgotten: HashSet<&String> = forgettable[..excess].iter().collect();
+        self.spaces
+            .retain(|space| !forgotten.contains(&space.model.id));
+        excess > 0
+    }
+
     /// Tell every greeted participant outside a space that the listing changed.
     fn touch_lobby(&self) {
         for record in self.participants.values() {
@@ -294,7 +321,13 @@ impl HubState {
             .collect()
     }
 
+    /// Take a participant out of their space. A closed space left empty may be forgotten; see [`CLOSED_SPACES`].
     fn leave(&mut self, participant: &str) {
+        self.depart(participant);
+        self.forget_closed();
+    }
+
+    fn depart(&mut self, participant: &str) {
         let Some(record) = self.participants.get_mut(participant) else {
             return;
         };
@@ -308,7 +341,8 @@ impl HubState {
     }
 
     fn join(&mut self, participant: &str, space: &str) {
-        self.leave(participant);
+        // Not forgotten until the participant is in the space they join, which might be a closed one.
+        self.depart(participant);
         let Some(record) = self.space_mut(space) else {
             return;
         };
@@ -322,6 +356,7 @@ impl HubState {
         if let Some(outbox) = self.outbox(participant) {
             outbox.clear_audio();
         }
+        self.forget_closed();
         self.touch_space(space);
     }
 
@@ -740,17 +775,11 @@ impl Hub {
                     );
                     return;
                 }
-                // Spaces still starting count, so concurrent requests cannot pass the limit together. The directory is checked when the session starts, outside the lock.
-                let Some(slot) = self.slots.acquire() else {
-                    state.error(
-                        participant,
-                        format!(
-                            "This server already runs its limit of {} spaces; try again when one closes.",
-                            self.slots.limit()
-                        ),
-                    );
+                // Refuse early when the limit is already reached. The supervisor checks the directory outside the lock and only then takes a place, so that a refused directory never holds one.
+                if self.slots.is_full() {
+                    state.error(participant, self.slots.full_error());
                     return;
-                };
+                }
                 let request = CreateRequest {
                     title,
                     backend,
@@ -758,7 +787,6 @@ impl Hub {
                     session,
                     creator: participant.to_owned(),
                     creator_space: space.map(str::to_owned),
-                    slot,
                 };
                 if self.jobs.try_send(request).is_err() {
                     state.error(participant, "The server is shutting down.");
@@ -864,6 +892,15 @@ impl Hub {
                 decision,
                 option,
             } => {
+                let checked = limits::check(&request, limits::IDENTIFIER_BYTES, "request")
+                    .and_then(|()| match &option {
+                        Some(option) => limits::check(option, limits::IDENTIFIER_BYTES, "option"),
+                        None => Ok(()),
+                    });
+                if let Err(error) = checked {
+                    state.error(participant, error);
+                    return;
+                }
                 let decision = match (decision, option) {
                     (protocol::Decision::AllowOnce, None) => backend::Decision::AllowOnce,
                     (protocol::Decision::Deny, None) => backend::Decision::Deny,
@@ -908,7 +945,10 @@ impl Hub {
                 field,
                 text,
             } => {
-                if let Err(error) = limits::check(&text, limits::ANSWER_BYTES, "answer") {
+                let checked = limits::check(&text, limits::ANSWER_BYTES, "answer")
+                    .and_then(|()| limits::check(&question, limits::IDENTIFIER_BYTES, "question"))
+                    .and_then(|()| limits::check(&field, limits::IDENTIFIER_BYTES, "field"));
+                if let Err(error) = checked {
                     state.error(participant, error);
                     return;
                 }
@@ -975,12 +1015,17 @@ impl Hub {
                 return;
             };
             let gap = match record.utterance.as_mut() {
-                Some(open) => {
+                Some(open) if frame.gate == Gate::Agent => {
                     let gap = open
                         .expected
                         .is_some_and(|expected| expected != frame.sequence);
                     open.expected = Some(frame.sequence.wrapping_add(1));
                     gap
+                }
+                Some(open) => {
+                    // Only agent audio is recognized, so only a gap between agent frames loses part of the utterance.
+                    open.expected = None;
+                    false
                 }
                 None => false,
             };
@@ -1060,8 +1105,13 @@ impl Hub {
             return;
         };
         let text = text.trim();
-        // The key makes a repeated finalization of the same client utterance idempotent: it is acknowledged with the text queued the first time, and nothing is queued again.
-        let key = format!("{}/{}", record.participant, record.client);
+        // The key makes a repeated finalization of the same client utterance idempotent: it is acknowledged with the text queued the first time, and nothing is queued again. The participant's length comes first, so that no two participants' utterances share a key whatever their identifiers contain.
+        let key = format!(
+            "{}:{}/{}",
+            record.participant.len(),
+            record.participant,
+            record.client
+        );
         if let Some(queued) = state
             .space(&record.space)
             .and_then(|space| space.model.queued_text(&key))
@@ -1185,6 +1235,7 @@ impl Hub {
             state.join(&request.creator, &id);
         }
         state.pump(&id);
+        state.forget_closed();
         state.touch_lobby();
         Some(id)
     }
@@ -1326,6 +1377,8 @@ impl Hub {
         if !record.model.is_closed() {
             record.model.apply(Event::Closed { reason: error });
         }
+        // Forgotten before the lobby listing that touching the space produces.
+        state.forget_closed();
         state.touch_space(space);
     }
 

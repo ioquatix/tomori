@@ -185,7 +185,7 @@ impl State {
 ///
 /// Utterance control messages (`UtteranceBegin`, `UtteranceEnd`, `UtteranceCancel`) and audio frames are sent in exactly the order they were queued, so recognition receives an utterance's audio whole. Other control messages may overtake queued audio, but never overtake an earlier utterance control message, nor are they overtaken by a later one.
 ///
-/// Live audio is real-time: it is dropped while disconnected, and when the link is congested the oldest queued frames beyond the audio limit are dropped instead of buffering without bound. `Agent` frames of the open utterance are never dropped this way, because every one must reach recognition (`design/live-audio.md`). They are bounded separately by the utterance limit: beyond it, or if the connection ends before the utterance is sent, the utterance fails visibly rather than reaching recognition with a gap. Its queued frames are dropped, `UtteranceCancel` replaces them on a live connection, its later end is not sent, and a [`FailedUtterance`] is returned for the application.
+/// Live audio is real-time: it is dropped while disconnected, and when the link is congested the oldest queued frames beyond the audio limit are dropped instead of buffering without bound. Frames of the open utterance, `Agent` or `Live`, are never dropped this way, because every `Agent` frame must reach recognition and a gap between them fails the utterance (`design/live-audio.md`). They are bounded separately by the utterance limit: beyond it, or if the connection ends before the utterance is sent, the utterance fails visibly rather than reaching recognition with a gap. Its queued frames are dropped, `UtteranceCancel` replaces them on a live connection, its later end is not sent, and a [`FailedUtterance`] is returned for the application.
 pub struct Outbox {
     state: Mutex<State>,
 }
@@ -335,7 +335,8 @@ impl Outbox {
         }
         let limit = state.utterance_limit;
         let utterance = match state.utterance.as_mut() {
-            Some(open) if frame.gate == Gate::Agent && !open.failed => {
+            // Live frames of the open utterance are kept too, so that its sequence numbers have no gap the server would take for lost agent audio.
+            Some(open) if !open.failed => {
                 if open.queued >= limit {
                     state.dropped_audio += 1;
                     let failed = state.fail_congested();

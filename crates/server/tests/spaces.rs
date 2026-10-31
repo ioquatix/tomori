@@ -1,12 +1,14 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use backend::{AnswerValue, Event, Field, FieldKind, FieldOption, Permission, Question};
 use protocol::{Activity, ClientMessage, Decision, Gate, QueueState, ServerMessage, SpaceState};
+use server::Server;
 use server::fake::FakeBackend;
-use server::test_support::{TIMEOUT, TestClient, TestServer, speech};
+use server::test_support::{TIMEOUT, TestClient, TestServer, TextTranscriber, speech};
 
 /// Errors received within `window`, skipping other messages.
 fn errors_within(client: &TestClient, window: Duration) -> Vec<String> {
@@ -104,6 +106,38 @@ fn queued_input_is_visible_to_everyone_and_anyone_can_cancel_it() {
         .map(|prompt| prompt.text)
         .collect();
     assert_eq!(prompts, ["Ada: first", "Bob: third"]);
+}
+
+#[test]
+fn only_the_most_recent_empty_closed_spaces_are_kept() {
+    let server = TestServer::with_server(FakeBackend::new(), |backends| {
+        Server::new(backends, Arc::new(TextTranscriber::default())).with_max_spaces(64)
+    });
+    let mut ada = server.connect("ada", "Ada");
+    let mut bob = server.connect("bob", "Bob");
+    // Bob stays in the first space, so it is kept although it closes first.
+    let first = ada.create_space("Space 0").id;
+    join(&mut bob, &first, 2);
+    let count = server::CLOSED_SPACES + 8;
+    let mut ids = vec![first];
+    for index in 0..count {
+        if index > 0 {
+            ids.push(ada.create_space(&format!("Space {index}")).id);
+        }
+        server.backend.started()[index].emit(Event::Closed { reason: None });
+        ada.space(|state| state.activity == Activity::Closed);
+        ada.send(&ClientMessage::Leave);
+    }
+    ada.send(&ClientMessage::ListSpaces);
+    let listed: Vec<String> = ada.wait_for(|message| match message {
+        ServerMessage::Spaces { spaces } if spaces.len() <= server::CLOSED_SPACES + 1 => {
+            Some(spaces.iter().map(|space| space.id.clone()).collect())
+        }
+        _ => None,
+    });
+    let mut expected = vec![ids[0].clone()];
+    expected.extend(ids[count - server::CLOSED_SPACES..].iter().cloned());
+    assert_eq!(listed, expected);
 }
 
 #[test]
@@ -280,6 +314,41 @@ fn a_repeated_utterance_is_queued_once() {
         .map(|entry| entry.text.as_str())
         .collect();
     assert_eq!(texts, ["first", "second", "third"]);
+}
+
+#[test]
+fn utterances_of_different_participants_never_share_a_key() {
+    let server = TestServer::with_backend(FakeBackend::manual());
+    let mut first = server.connect("a", "First");
+    let mut second = server.connect("a/b", "Second");
+    let space = first.create_space("Keys").id;
+    join(&mut second, &space, 2);
+    first.space(|state| state.participants.len() == 2);
+    let finished = |client: &TestClient, id: &str| {
+        client.wait_for(|message| match message {
+            ServerMessage::Transcript {
+                utterance,
+                text,
+                finished: true,
+            } if utterance == id => Some(text.clone()),
+            ServerMessage::TranscriptFailed { utterance, error } if utterance == id => {
+                panic!("{id} failed: {error}")
+            }
+            _ => None,
+        })
+    };
+    // Joined with `/`, both would be `a/b/c`.
+    first.say("b/c", "from first");
+    assert_eq!(finished(&first, "b/c"), "from first");
+    second.say("c", "from second");
+    assert_eq!(finished(&second, "c"), "from second");
+    let state = first.space(|state| state.queue.len() == 2);
+    let texts: Vec<&str> = state
+        .queue
+        .iter()
+        .map(|entry| entry.text.as_str())
+        .collect();
+    assert_eq!(texts, ["from first", "from second"]);
 }
 
 #[test]
@@ -603,6 +672,36 @@ fn sequence_numbers_skipped_before_an_utterance_do_not_fail_it() {
 }
 
 #[test]
+fn skipped_live_frames_within_an_utterance_do_not_fail_it() {
+    let server = TestServer::start();
+    let (mut ada, _bob, _) = pair(&server);
+    ada.send(&ClientMessage::UtteranceBegin {
+        utterance: "u1".to_owned(),
+    });
+    ada.send_audio(Gate::Agent, speech("he"));
+    // The gate switches to live and back; some live frames were not sent.
+    ada.skip_sequence(2);
+    ada.send_audio(Gate::Live, speech("--"));
+    ada.skip_sequence(3);
+    ada.send_audio(Gate::Agent, speech("llo"));
+    ada.send(&ClientMessage::UtteranceEnd {
+        utterance: "u1".to_owned(),
+    });
+    let text = ada.wait_for(|message| match message {
+        ServerMessage::Transcript {
+            utterance,
+            text,
+            finished: true,
+        } if utterance == "u1" => Some(text.clone()),
+        ServerMessage::TranscriptFailed { utterance, error } if utterance == "u1" => {
+            panic!("u1 failed: {error}")
+        }
+        _ => None,
+    });
+    assert_eq!(text, "hello");
+}
+
+#[test]
 fn a_lost_frame_fails_the_utterance() {
     let server = TestServer::start();
     let (mut ada, _bob, _) = pair(&server);
@@ -731,6 +830,43 @@ fn a_streaming_reply_sends_paced_snapshots_ending_with_the_latest_state() {
         "{snapshots} snapshots in {elapsed:?}, expected at most {limit}"
     );
     assert!(snapshots >= 2, "snapshots were not sent while streaming");
+}
+
+#[test]
+fn a_snapshot_deferred_while_a_later_one_is_pending_is_sent_when_it_is_due() {
+    let server = TestServer::start();
+    let mut ada = server.connect("ada", "Ada");
+    let mut bob = server.connect("bob", "Bob");
+    ada.create_space("Later");
+    bob.create_space("Sooner");
+    let later = server.backend.started()[0].clone();
+    let sooner = server.backend.started()[1].clone();
+    // Let the snapshots of creating the spaces fall out of the interval.
+    std::thread::sleep(Duration::from_millis(200));
+    let error = |message: &str| Event::Error {
+        message: message.to_owned(),
+    };
+
+    sooner.emit(error("first"));
+    bob.space(|state| state.error.as_deref() == Some("first"));
+    std::thread::sleep(Duration::from_millis(60));
+    // This space defers a snapshot due about 160 ms after the first.
+    later.emit(error("first"));
+    ada.space(|state| state.error.as_deref() == Some("first"));
+    later.emit(error("second"));
+    // Let the pacer start waiting for it.
+    std::thread::sleep(Duration::from_millis(20));
+
+    // The other space then defers one due about 100 ms after the first, sooner than the pending one.
+    let started = std::time::Instant::now();
+    sooner.emit(error("second"));
+    bob.space(|state| state.error.as_deref() == Some("second"));
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < Duration::from_millis(50),
+        "the sooner snapshot took {elapsed:?}, as if it waited for the later one"
+    );
+    ada.space(|state| state.error.as_deref() == Some("second"));
 }
 
 /// End `client`'s connection and wait until the server has released it.

@@ -47,7 +47,7 @@ Options:
                        long (default 10).
   --workspace-root PATH
                        Let spaces run in this directory or beneath it; repeat for several. Without
-                       it, the only root is your home directory. Each root must exist.
+                       it, the only root is the directory the server starts in. Each root must exist.
   --max-spaces COUNT   The most spaces whose agent sessions run at once (default 8).
   --help               Show this help.";
 
@@ -59,7 +59,7 @@ struct Arguments {
     advertise: bool,
     keepalive: Keepalive,
     request_timeout: Option<Duration>,
-    /// Empty for the default, the home directory.
+    /// Empty for the default, the current directory.
     workspace_roots: Vec<PathBuf>,
     max_spaces: usize,
 }
@@ -147,10 +147,10 @@ fn parse(mut arguments: impl Iterator<Item = String>) -> Result<Arguments, Strin
     Ok(parsed)
 }
 
-/// The canonical workspace roots: those given, or the home directory. A root that does not exist is an error.
+/// The canonical workspace roots: those given, or the current directory. A root that does not exist is an error. They are printed, so that starting the server somewhere broad, such as the home directory, is visible.
 fn workspace_roots(roots: &[PathBuf]) -> Result<WorkspaceRoots, String> {
     let roots = if roots.is_empty() {
-        WorkspaceRoots::home()
+        WorkspaceRoots::current()
     } else {
         WorkspaceRoots::new(roots)
     }
@@ -479,9 +479,9 @@ mod tests {
         let missing =
             std::env::temp_dir().join(format!("tomori-missing-root-{}", std::process::id()));
         assert!(workspace_roots(&[missing]).is_err());
-        // Without any, the home directory is the only root.
-        let home = std::env::home_dir().unwrap().canonicalize().unwrap();
-        assert_eq!(workspace_roots(&[]).unwrap().roots(), [home]);
+        // Without any, the current directory is the only root.
+        let current = std::env::current_dir().unwrap().canonicalize().unwrap();
+        assert_eq!(workspace_roots(&[]).unwrap().roots(), [current]);
         let roots = workspace_roots(&[std::env::temp_dir()]).unwrap();
         assert_eq!(
             roots.roots(),

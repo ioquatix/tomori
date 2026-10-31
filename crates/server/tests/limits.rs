@@ -56,6 +56,28 @@ fn oversized_client_strings_are_rejected_without_repeating_them() {
     });
     assert_eq!(ada.error(), "That utterance is not open.");
 
+    ada.send(&ClientMessage::Decide {
+        request: "r".repeat(10_000),
+        decision: protocol::Decision::Grant,
+        option: Some("o".into()),
+    });
+    let error = ada.error();
+    assert!(error.contains("request") && error.len() < 100, "{error}");
+    ada.send(&ClientMessage::Decide {
+        request: "r".into(),
+        decision: protocol::Decision::Grant,
+        option: Some("o".repeat(10_000)),
+    });
+    let error = ada.error();
+    assert!(error.contains("option") && error.len() < 100, "{error}");
+    ada.send(&ClientMessage::Answer {
+        question: "q".into(),
+        field: "f".repeat(10_000),
+        text: "yes".into(),
+    });
+    let error = ada.error();
+    assert!(error.contains("field") && error.len() < 100, "{error}");
+
     // The connection and the server keep working.
     ada.send(&ClientMessage::ListSpaces);
     ada.wait_for(|message| matches!(message, ServerMessage::Spaces { .. }).then_some(()));
@@ -156,6 +178,53 @@ fn a_long_conversation_is_trimmed_to_the_budget() {
     });
     assert!(json_len(&state) <= BUDGET);
     assert!(state.messages.len() < 20);
+}
+
+#[test]
+fn an_enormous_question_is_trimmed_to_the_budget_and_can_still_be_answered() {
+    use backend::{AnswerValue, Event, Field, FieldKind, FieldOption, Question};
+    let server = TestServer::start();
+    let mut ada = server.connect("ada", "Ada");
+    ada.create_space("Question");
+    let session = server.backend.started()[0].clone();
+    // As with Claude Code's AskUserQuestion, the field key is the question itself.
+    let asked = "Which? ".repeat(100_000);
+    session.emit(Event::QuestionAsked(Question {
+        id: "q1".to_owned(),
+        title: "T".repeat(300_000),
+        fields: vec![Field {
+            key: asked.clone(),
+            title: asked.clone(),
+            description: Some("D".repeat(300_000)),
+            kind: FieldKind::Choice,
+            options: vec![FieldOption {
+                label: "Yes".to_owned(),
+                description: None,
+            }],
+            custom: false,
+        }],
+    }));
+    session.emit(Event::Error {
+        message: "E".repeat(300_000),
+    });
+    let state = ada.space(|state| state.question.is_some() && state.error.is_some());
+    assert!(json_len(&state) <= BUDGET, "{}", json_len(&state));
+    let question = state.question.unwrap();
+    assert_eq!(question.field, "field 1");
+
+    ada.send(&ClientMessage::Answer {
+        question: question.id,
+        field: question.field,
+        text: "1".to_owned(),
+    });
+    ada.space(|state| state.question.is_none());
+    assert_eq!(
+        session.log().answers,
+        [(
+            "q1".to_owned(),
+            vec![(asked, AnswerValue::Choices(vec!["Yes".to_owned()]))]
+        )]
+    );
 }
 
 /// The error reported for `utterance`.

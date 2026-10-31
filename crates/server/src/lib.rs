@@ -31,11 +31,14 @@ pub mod test_support;
 
 pub use application::Application;
 pub use backends::{AnyBackend, AnySession, Backends};
+pub use hub::CLOSED_SPACES;
 #[cfg(feature = "speech")]
 pub use recognition::RecognitionTranscriber;
 pub use server::{DEFAULT_PARTICIPANT_RETENTION, Server, bind};
 pub use transcriber::{NullTranscriber, Transcriber, TranscriptSink, UtteranceId};
-pub use workspace::{DEFAULT_MAX_SPACES, DIRECTORY_UNAVAILABLE, Unavailable, WorkspaceRoots};
+pub use workspace::{
+    DEFAULT_MAX_SPACES, DIRECTORY_UNAVAILABLE, MAX_RESOLVING, Unavailable, WorkspaceRoots,
+};
 
 /// The server name reported in [`protocol::ServerMessage::Welcome`].
 pub const SERVER_NAME: &str = "tomori";
