@@ -32,7 +32,7 @@ separate from sessions, worker simulation and application input.
 
 - **Quest / desktop XR:** squeeze and release the right grip to switch presets.
 - **Desktop window:** press **E** to switch presets; or launch with
-  `TOMORI_ENVIRONMENT=minimal cargo run` for the original grid.
+  `TOMORI_ENVIRONMENT=minimal cargo run -p client-quest` for the original grid.
 - **Spectator:** follows the headset's selection; older headset builds without
   an environment field retain Minimal. Update the PC bridge for new senders.
 
@@ -52,7 +52,7 @@ on-device frame-time budget still needs measurement. To run
 the stereo/switch/recenter regression and optionally save a preview sheet:
 
 ```sh
-TOMORI_SKY_PREVIEW=/tmp/opencode/tomori-sky.png cargo test --locked \
+TOMORI_SKY_PREVIEW=/tmp/opencode/tomori-sky.png cargo test --locked -p client-quest \
   sky_environment_renders_stereo_switches_and_preserves_recenter -- --ignored
 ```
 
@@ -239,7 +239,7 @@ It shows “Waiting for Quest” after updates stop. No OBS or YouTube stream st
 automatically.
 
 Both tracked controller grip poses are rendered using the bundled, MIT-licensed
-WebXR Quest Touch Plus models (see `assets/controllers/`). If the Quest runtime
+WebXR Quest Touch Plus models (see `crates/client-quest/assets/controllers/`). If the Quest runtime
 exposes `XR_FB_render_model`, the headset attempts to load its models on a
 background thread and falls back to the bundled meshes if loading fails. The PC
 spectator currently uses the bundled meshes rather than copying runtime assets.
@@ -253,7 +253,7 @@ same up-to-20-Hz scene-state rate; it does not persist them.
 
 ```sh
 bash scripts/opencode-bridge.sh       # keep running; requires USB/adb reverse
-cargo run -- --spectator              # PC window; capture this in OBS
+cargo run -p client-quest -- --spectator # PC window; capture this in OBS
 ```
 
 The spectator requests a **1920×1080 physical-pixel** content area at startup,
@@ -274,11 +274,11 @@ restarting the bridge.
 
 ### Experimental direct PipeWire video (Linux)
 
-Instead of capturing a window, run `cargo run -- --spectator-pipewire`. It
+Instead of capturing a window, run `cargo run -p client-quest -- --spectator-pipewire`. It
 publishes `Tomori-Spectator` (`tomori-spectator`) **without
 creating a window or display surface**. Press **Ctrl-C** to stop it. For an
 optional window showing the same direct output, use
-`cargo run -- --spectator-pipewire-preview` instead; Escape closes that window
+`cargo run -p client-quest -- --spectator-pipewire-preview` instead; Escape closes that window
 and stops its output. Run only one direct-output spectator at a time.
 
 Both modes render to a fixed **3840×2160 RGBA** texture at up to 30 fps. The
@@ -470,7 +470,7 @@ The script downloads the official Khronos **1.1.65** OpenXR loader AAR from Mave
 Central, checks its published SHA-256, and packages the arm64 loader in the APK.
 The Quest APK does not contain a transcription model. PC transcription setup
 fetches MIT-licensed `Systran/faster-whisper-small.en` at a pinned revision and
-verifies the model SHA-256. The prior Quest model files are left untouched.
+verifies the model SHA-256.
 `cargo-apk` creates a local debug signing key if needed. Build output:
 `target/debug/apk/tomori.apk` (package `io.github.ioquatix.tomori`).
 Launch from **Library → Unknown Sources → Tomori** if not auto-started.
@@ -490,7 +490,7 @@ by `.android-env`; system Rust is not modified.
 ## Desktop window
 
 ```sh
-cargo run
+cargo run -p client-quest
 ```
 
 Runs the same simulation and wgpu renderer in a resizable desktop window;
@@ -503,9 +503,9 @@ Runs the same simulation and wgpu renderer in a resizable desktop window;
 ## Tests / desktop OpenXR
 
 ```sh
-cargo test                       # simulation, projection, desktop camera tests
-cargo test graphics::tests -- --ignored  # offscreen stereo captions / mono rendering
-cargo run -- --xr                 # use an active desktop OpenXR Vulkan runtime
+cargo test --workspace                   # simulation, projection, desktop camera, server and client tests
+cargo test -p client-quest graphics::tests -- --ignored  # offscreen stereo captions / mono rendering
+cargo run -p client-quest -- --xr        # use an active desktop OpenXR Vulkan runtime
 npm test --prefix bridge          # session routing, questions and permissions
 ```
 
@@ -519,8 +519,7 @@ curl -fL https://raw.githubusercontent.com/ggml-org/whisper.cpp/master/samples/j
 ```
 
 It checks partial results, finalization, out-of-order rejection, and a recording
-longer than a minute. The legacy local-Quest Whisper model comparison tests
-remain optional and require the old `android/assets/` and `android/voice-assets/` models.
+longer than a minute.
 
 A USB-connected Quest does **not** provide a Linux desktop OpenXR runtime:
 build the Android APK for standalone Quest use. Desktop execution requires its
@@ -528,16 +527,16 @@ own OpenXR loader/runtime (for example Monado).
 
 ## Layout / interop
 
-- `src/desktop.rs`: desktop window, orbit camera, mouse attraction.
-- `src/xr.rs`: Android/desktop OpenXR lifecycle, predicted views, controller actions.
-- `src/vulkan.rs`: XR-created Vulkan instance/device imported into wgpu; borrowed
+- `crates/client-quest/src/desktop.rs`: desktop window, orbit camera, mouse attraction.
+- `crates/client-quest/src/xr.rs`: Android/desktop OpenXR lifecycle, predicted views, controller actions.
+- `crates/client-quest/src/vulkan.rs`: XR-created Vulkan instance/device imported into wgpu; borrowed
   two-layer XR swapchain images, one layer per eye.
-- `src/graphics.rs`, `src/swarm.wgsl`: instanced cube rendering with per-eye depth.
-- `src/swarm.rs`: deterministic CPU flocking, separation/alignment/cohesion.
-- `src/voice.rs`, `src/speech.rs`: Android permission/capture and ordered PC audio streaming.
+- `crates/client-quest/src/graphics.rs`, `crates/client-quest/src/swarm.wgsl`: instanced cube rendering with per-eye depth.
+- `crates/client-quest/src/swarm.rs`: deterministic CPU flocking, separation/alignment/cohesion.
+- `crates/client-quest/src/voice.rs`, `crates/client-quest/src/speech.rs`: Android permission/capture and ordered PC audio streaming.
 - `bridge/asr.mjs`, `bridge/asr_worker.py`: GPU/CPU Whisper rolling transcription.
-- `src/caption.rs`, `src/caption.wgsl`: head-relative, stereo text panel.
-- `src/chat.rs`: session browser, reply paging, background loopback HTTP client.
+- `crates/client-quest/src/caption.rs`, `crates/client-quest/src/caption.wgsl`: head-relative, stereo text panel.
+- `crates/client-quest/src/chat.rs`: session browser, reply paging, background loopback HTTP client.
 - `bridge/`: official OpenCode V2 client adapter (no alternate AI backend).
 
 An ndk 0.9 workaround is covered by regression tests: positive AAudio read/write
@@ -562,10 +561,10 @@ passthrough; optional tracked-hand skeletons are described above.
 Original project code is released under the MIT License; see [license.md](license.md).
 Third-party components retain their own licenses:
 
-- Bundled controller assets: [MIT](assets/controllers/LICENSE.md).
+- Bundled controller assets: [MIT](crates/client-quest/assets/controllers/LICENSE.md).
 - Basis Universal notices and test fixtures:
-  [Apache-2.0](assets/licenses/basisu-LICENSE.txt), with fixture provenance in
-  [tests/fixtures/README.md](tests/fixtures/README.md).
+  [Apache-2.0](crates/client-quest/assets/licenses/basisu-LICENSE.txt), with fixture provenance in
+  [crates/client-quest/tests/fixtures/README.md](crates/client-quest/tests/fixtures/README.md).
 - The optional OBS plugin compatibility patch follows the upstream plugin's
   GPL-2.0-or-later licensing; its packaging metadata is under `packaging/`.
 - Speech models and native dependencies are downloaded separately, not bundled

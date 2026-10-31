@@ -2,8 +2,6 @@
 /android/libs/
 /.android-env
 /.tools/
-/android/assets/*.bin
-/android/voice-assets/*.bin
 /bridge/node_modules/
 /.space/
 

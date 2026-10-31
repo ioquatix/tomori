@@ -815,7 +815,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires a Vulkan adapter; run cargo test -- --ignored"]
+    #[ignore = "requires a Vulkan adapter; run cargo test -p client-quest -- --ignored"]
     fn conversational_states_render_distinct_images() {
         pollster::block_on(async {
             let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
@@ -937,7 +937,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires a Vulkan adapter; run cargo test -- --ignored"]
+    #[ignore = "requires a Vulkan adapter; run cargo test -p client-quest -- --ignored"]
     fn both_controller_poses_change_the_offscreen_image() {
         pollster::block_on(async {
             let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
@@ -1078,7 +1078,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires a Vulkan adapter; run cargo test -- --ignored"]
+    #[ignore = "requires a Vulkan adapter; run cargo test -p client-quest -- --ignored"]
     fn workspace_pages_render_stereo_recenter_and_clear() {
         pollster::block_on(async {
             let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
@@ -1384,7 +1384,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires a Vulkan adapter; run cargo test -- --ignored"]
+    #[ignore = "requires a Vulkan adapter; run cargo test -p client-quest -- --ignored"]
     fn renders_stereo_offscreen() {
         pollster::block_on(async {
             let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
