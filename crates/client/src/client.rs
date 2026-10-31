@@ -10,7 +10,7 @@ use base_scheduler::Cancellation;
 use base_scheduler_direct::DirectScheduler;
 use protocol::{AudioFrame, ClientMessage};
 
-use crate::outbox::{Membership, Outbox};
+use crate::outbox::{FailedUtterance, Membership, Outbox};
 use crate::{ConnectionState, Event, Events, Options, SendError, session};
 
 /// State shared by the application handles and the connection thread.
@@ -27,6 +27,12 @@ impl Shared {
         *self.state.lock().unwrap_or_else(PoisonError::into_inner) = state.clone();
         self.events.push(Event::State(state));
     }
+
+    pub fn report(&self, failed: impl IntoIterator<Item = FailedUtterance>) {
+        for failed in failed {
+            self.events.push(Event::UtteranceFailed(failed));
+        }
+    }
 }
 
 /// A cloneable, thread-safe handle for sending to the server. Sending never blocks.
@@ -36,14 +42,22 @@ pub struct Sender {
 }
 
 impl Sender {
-    /// Queue a control message. Control messages are never dropped while the client is open: those sent while disconnected are delivered after the next connection's Hello and restored membership. `Join`, `Leave` and `Gate` also update the membership restored on reconnection; while disconnected they, and `Presence`, only update local state.
+    /// Queue a control message. Those sent while disconnected are delivered after the next connection's Hello and restored membership. `Join`, `Leave` and `Gate` also update the membership restored on reconnection; while disconnected they, and `Presence`, only update local state.
+    ///
+    /// Utterance messages stay in order with the audio sent by [`Self::send_audio`]. An utterance that cannot reach recognition intact, because it began while disconnected, the connection ended before it was sent, or the link was too congested, is reported as [`Event::UtteranceFailed`], and its later end is not sent.
+    ///
+    /// Delivery is at most once: a message already written to a connection that then fails may be lost. The application sees that connection end as [`Event::State`].
     pub fn send(&self, message: ClientMessage) -> Result<(), SendError> {
-        self.shared.outbox.send(message)
+        let failed = self.shared.outbox.send(message)?;
+        self.shared.report(failed);
+        Ok(())
     }
 
-    /// Queue a microphone frame. Live audio is dropped while disconnected and, when the link is congested, the oldest queued frames are dropped first. Frames with [`protocol::Gate::Off`] are ignored.
+    /// Queue a microphone frame. Live audio is dropped while disconnected and, when the link is congested, the oldest queued frames are dropped first. `Agent` frames of an open utterance are never dropped individually; see [`Options::outgoing_utterance_limit`]. Frames with [`protocol::Gate::Off`] are ignored.
     pub fn send_audio(&self, frame: AudioFrame) -> Result<(), SendError> {
-        self.shared.outbox.send_audio(frame)
+        let failed = self.shared.outbox.send_audio(frame)?;
+        self.shared.report(failed);
+        Ok(())
     }
 
     pub fn state(&self) -> ConnectionState {
@@ -85,7 +99,10 @@ impl Client {
     pub fn connect(options: Options) -> io::Result<Self> {
         let scheduler = DirectScheduler::new(Default::default())?;
         let shared = Arc::new(Shared {
-            outbox: Outbox::new(options.outgoing_audio_limit),
+            outbox: Outbox::new(
+                options.outgoing_audio_limit,
+                options.outgoing_utterance_limit,
+            ),
             state: Mutex::new(ConnectionState::Connecting { attempt: 1 }),
             events: Events::new(),
             closing: Cancellation::new(),

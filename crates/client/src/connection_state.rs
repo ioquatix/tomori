@@ -6,6 +6,8 @@ use std::time::Duration;
 
 use protocol::ServerMessage;
 
+use crate::FailedUtterance;
+
 /// Why a connection ended or could not be established.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Disconnect {
@@ -70,6 +72,8 @@ pub enum Event {
     State(ConnectionState),
     /// A control message from the server. `Welcome` is reported as [`ConnectionState::Connected`] instead.
     Message(ServerMessage),
+    /// An utterance failed in the client and will produce no transcript. See [`crate::Sender::send`].
+    UtteranceFailed(FailedUtterance),
 }
 
 #[cfg(test)]

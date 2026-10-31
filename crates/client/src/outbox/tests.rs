@@ -75,7 +75,7 @@ fn presence(x: f32) -> ClientMessage {
 
 #[test]
 fn alternates_control_and_audio_so_neither_starves() {
-    let outbox = Outbox::new(16);
+    let outbox = Outbox::new(16, 64);
     outbox.connect();
     for index in 0..3 {
         outbox.send(answer(&index.to_string())).unwrap();
@@ -98,7 +98,7 @@ fn alternates_control_and_audio_so_neither_starves() {
 
 #[test]
 fn congestion_drops_the_oldest_audio_but_never_control() {
-    let outbox = Outbox::new(2);
+    let outbox = Outbox::new(2, 64);
     outbox.connect();
     for index in 0..100 {
         outbox.send(answer(&index.to_string())).unwrap();
@@ -125,7 +125,7 @@ fn congestion_drops_the_oldest_audio_but_never_control() {
 
 #[test]
 fn batches_respect_the_size_limit() {
-    let outbox = Outbox::new(16);
+    let outbox = Outbox::new(16, 64);
     outbox.connect();
     for sequence in 0..4 {
         outbox.send_audio(audio(sequence)).unwrap();
@@ -140,7 +140,7 @@ fn batches_respect_the_size_limit() {
 
 #[test]
 fn waits_and_wakes_when_traffic_arrives() {
-    let outbox = Outbox::new(16);
+    let outbox = Outbox::new(16, 64);
     outbox.connect();
     let counter = Arc::new(Counter(AtomicUsize::new(0)));
     let waker = Waker::from(counter.clone());
@@ -156,7 +156,7 @@ fn waits_and_wakes_when_traffic_arrives() {
 
 #[test]
 fn disconnected_traffic_is_deferred_or_dropped() {
-    let outbox = Outbox::new(16);
+    let outbox = Outbox::new(16, 64);
     outbox.send_audio(audio(0)).unwrap();
     assert_eq!(outbox.dropped_audio(), 1);
     outbox
@@ -192,7 +192,7 @@ fn disconnected_traffic_is_deferred_or_dropped() {
 
 #[test]
 fn restored_membership_supersedes_unsent_membership_changes() {
-    let outbox = Outbox::new(16);
+    let outbox = Outbox::new(16, 64);
     outbox.connect();
     outbox
         .send(ClientMessage::Join {
@@ -229,7 +229,7 @@ fn restored_membership_supersedes_unsent_membership_changes() {
 
 #[test]
 fn presence_is_coalesced_to_the_latest_pose() {
-    let outbox = Outbox::new(16);
+    let outbox = Outbox::new(16, 64);
     outbox.connect();
     outbox.send(presence(1.0)).unwrap();
     outbox.send(answer("between")).unwrap();
@@ -245,7 +245,7 @@ fn presence_is_coalesced_to_the_latest_pose() {
 
 #[test]
 fn gated_off_audio_is_never_sent() {
-    let outbox = Outbox::new(16);
+    let outbox = Outbox::new(16, 64);
     outbox.connect();
     let mut frame = audio(0);
     frame.gate = Gate::Off;
@@ -256,7 +256,7 @@ fn gated_off_audio_is_never_sent() {
 
 #[test]
 fn hello_is_reserved_and_closing_drains_control() {
-    let outbox = Outbox::new(16);
+    let outbox = Outbox::new(16, 64);
     outbox.connect();
     let hello = ClientMessage::Hello {
         protocol: 1,
@@ -278,7 +278,7 @@ fn hello_is_reserved_and_closing_drains_control() {
 
 #[test]
 fn membership_follows_the_server_unless_a_change_is_queued() {
-    let outbox = Outbox::new(8);
+    let outbox = Outbox::new(8, 64);
     outbox.connect();
     outbox
         .send(ClientMessage::Join { space: "a".into() })
@@ -300,7 +300,7 @@ fn membership_follows_the_server_unless_a_change_is_queued() {
 
 #[test]
 fn keepalive_precedes_queued_traffic_and_is_not_deferred() {
-    let outbox = Outbox::new(16);
+    let outbox = Outbox::new(16, 64);
     // Keepalive belongs to one connection: nothing is kept while disconnected.
     outbox.keepalive(ClientMessage::Ping { nonce: 0 });
     outbox.connect();
@@ -341,4 +341,188 @@ fn keepalive_precedes_queued_traffic_and_is_not_deferred() {
     ] {
         assert_eq!(outbox.send(message), Err(SendError::Reserved));
     }
+}
+
+fn agent(sequence: u32) -> AudioFrame {
+    AudioFrame {
+        gate: Gate::Agent,
+        ..audio(sequence)
+    }
+}
+
+fn begin(utterance: &str) -> ClientMessage {
+    ClientMessage::UtteranceBegin {
+        utterance: utterance.into(),
+    }
+}
+
+fn end(utterance: &str) -> ClientMessage {
+    ClientMessage::UtteranceEnd {
+        utterance: utterance.into(),
+    }
+}
+
+fn cancel(utterance: &str) -> ClientMessage {
+    ClientMessage::UtteranceCancel {
+        utterance: utterance.into(),
+    }
+}
+
+/// The utterance control messages and audio sequences, in the order sent.
+fn utterance_items(items: &[Item]) -> Vec<&Item> {
+    items
+        .iter()
+        .filter(|item| match item {
+            Item::Audio(_) => true,
+            Item::Control(message) => matches!(
+                message,
+                ClientMessage::UtteranceBegin { .. }
+                    | ClientMessage::UtteranceEnd { .. }
+                    | ClientMessage::UtteranceCancel { .. }
+            ),
+        })
+        .collect()
+}
+
+#[test]
+fn utterance_begin_is_not_overtaken_by_its_audio() {
+    let outbox = Outbox::new(16, 64);
+    outbox.connect();
+    // A backlog of control messages used to delay the begin while its audio went ahead.
+    for index in 0..4 {
+        outbox.send(answer(&index.to_string())).unwrap();
+    }
+    outbox.send(begin("u")).unwrap();
+    for sequence in 0..4 {
+        outbox.send_audio(agent(sequence)).unwrap();
+    }
+    outbox.send(end("u")).unwrap();
+    let items = items(&outbox);
+    assert_eq!(
+        utterance_items(&items),
+        [
+            &Item::Control(begin("u")),
+            &Item::Audio(0),
+            &Item::Audio(1),
+            &Item::Audio(2),
+            &Item::Audio(3),
+            &Item::Control(end("u")),
+        ]
+    );
+    // The earlier control messages still precede the begin.
+    let position = |wanted: &Item| items.iter().position(|item| item == wanted).unwrap();
+    assert!(position(&Item::Control(answer("3"))) < position(&Item::Control(begin("u"))));
+}
+
+#[test]
+fn utterance_end_is_not_sent_before_its_trailing_audio() {
+    let outbox = Outbox::new(16, 64);
+    outbox.connect();
+    outbox.send(begin("u")).unwrap();
+    for sequence in 0..6 {
+        outbox.send_audio(agent(sequence)).unwrap();
+    }
+    outbox.send(end("u")).unwrap();
+    // A control message queued after the end does not overtake it either.
+    outbox.send(answer("after")).unwrap();
+    let mut expected = vec![Item::Control(begin("u"))];
+    expected.extend((0..6).map(Item::Audio));
+    expected.push(Item::Control(end("u")));
+    expected.push(Item::Control(answer("after")));
+    assert_eq!(items(&outbox), expected);
+}
+
+#[test]
+fn congestion_drops_live_audio_but_never_frames_of_the_open_utterance() {
+    let outbox = Outbox::new(2, 64);
+    outbox.connect();
+    for sequence in 0..5 {
+        outbox.send_audio(audio(sequence)).unwrap();
+    }
+    outbox.send(begin("u")).unwrap();
+    for sequence in 10..30 {
+        outbox.send_audio(agent(sequence)).unwrap();
+    }
+    outbox.send(end("u")).unwrap();
+    for sequence in 40..45 {
+        outbox.send_audio(audio(sequence)).unwrap();
+    }
+    let mut expected = vec![Item::Control(begin("u"))];
+    expected.extend((10..30).map(Item::Audio));
+    expected.push(Item::Control(end("u")));
+    expected.extend([Item::Audio(43), Item::Audio(44)]);
+    assert_eq!(items(&outbox), expected);
+    assert_eq!(outbox.dropped_audio(), 8);
+}
+
+#[test]
+fn an_utterance_beyond_the_congestion_limit_fails_visibly() {
+    let outbox = Outbox::new(2, 3);
+    outbox.connect();
+    outbox.send(begin("u")).unwrap();
+    for sequence in 0..3 {
+        assert_eq!(outbox.send_audio(agent(sequence)), Ok(None));
+    }
+    assert_eq!(
+        outbox.send_audio(agent(3)),
+        Ok(Some(FailedUtterance {
+            utterance: "u".into(),
+            failure: UtteranceFailure::Congested
+        }))
+    );
+    // Later frames are only live audio now, and the end is not sent.
+    for sequence in 4..8 {
+        assert_eq!(outbox.send_audio(agent(sequence)), Ok(None));
+    }
+    assert_eq!(outbox.send(end("u")), Ok(None));
+    assert_eq!(
+        items(&outbox),
+        [
+            Item::Control(begin("u")),
+            Item::Control(cancel("u")),
+            Item::Audio(6),
+            Item::Audio(7),
+        ]
+    );
+
+    // Frames already sent are followed by the cancellation, so recognition never sees a gap.
+    outbox.send(begin("v")).unwrap();
+    outbox.send_audio(agent(10)).unwrap();
+    assert_eq!(items(&outbox), [Item::Control(begin("v")), Item::Audio(10)]);
+    for sequence in 11..15 {
+        outbox.send_audio(agent(sequence)).unwrap();
+    }
+    assert_eq!(items(&outbox), [Item::Control(cancel("v"))]);
+}
+
+#[test]
+fn utterances_interrupted_by_disconnection_fail_visibly() {
+    let outbox = Outbox::new(16, 64);
+    let disconnected = |utterance: &str| FailedUtterance {
+        utterance: utterance.into(),
+        failure: UtteranceFailure::Disconnected,
+    };
+
+    // Begun while disconnected: its audio cannot be delivered.
+    assert_eq!(outbox.send(begin("a")), Ok(Some(disconnected("a"))));
+    assert_eq!(outbox.send(end("a")), Ok(None));
+
+    outbox.connect();
+    // Ended but not yet sent, then still open, when the connection ends.
+    outbox.send(begin("b")).unwrap();
+    outbox.send_audio(agent(0)).unwrap();
+    outbox.send(end("b")).unwrap();
+    outbox.send(begin("c")).unwrap();
+    outbox.send_audio(agent(1)).unwrap();
+    assert_eq!(outbox.disconnect(), [disconnected("b"), disconnected("c")]);
+    assert_eq!(outbox.send(end("c")), Ok(None));
+    outbox.connect();
+    assert!(poll(&outbox, 1024).is_pending());
+
+    // An utterance sent completely is not reported.
+    outbox.send(begin("d")).unwrap();
+    outbox.send_audio(agent(2)).unwrap();
+    outbox.send(end("d")).unwrap();
+    items(&outbox);
+    assert!(outbox.disconnect().is_empty());
 }

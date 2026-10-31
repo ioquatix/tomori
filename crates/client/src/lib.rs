@@ -23,5 +23,5 @@ pub use client::{Client, Sender};
 pub use connection_state::{ConnectionState, Disconnect, Event};
 pub use events::Events;
 pub use options::Options;
-pub use outbox::{Membership, SendError};
+pub use outbox::{FailedUtterance, Membership, SendError, UtteranceFailure};
 pub use protocol::Keepalive;

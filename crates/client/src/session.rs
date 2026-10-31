@@ -62,7 +62,8 @@ pub(crate) async fn run(context: &Context<'_>) {
         });
         let welcomed = Cell::new(false);
         let reason = session(context, &welcomed).await;
-        context.shared.outbox.disconnect();
+        let failed = context.shared.outbox.disconnect();
+        context.shared.report(failed);
         if context.shared.outbox.is_closed() {
             break;
         }
