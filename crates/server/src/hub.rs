@@ -1051,8 +1051,13 @@ impl Hub {
             return;
         };
         let text = text.trim();
-        // The key makes a repeated finalization of the same client utterance idempotent: it is acknowledged with the text queued the first time, and nothing is queued again.
-        let key = format!("{}/{}", record.participant, record.client);
+        // The key makes a repeated finalization of the same client utterance idempotent: it is acknowledged with the text queued the first time, and nothing is queued again. The participant's length comes first, so that no two participants' utterances share a key whatever their identifiers contain.
+        let key = format!(
+            "{}:{}/{}",
+            record.participant.len(),
+            record.participant,
+            record.client
+        );
         if let Some(queued) = state
             .space(&record.space)
             .and_then(|space| space.model.queued_text(&key))

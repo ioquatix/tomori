@@ -283,6 +283,41 @@ fn a_repeated_utterance_is_queued_once() {
 }
 
 #[test]
+fn utterances_of_different_participants_never_share_a_key() {
+    let server = TestServer::with_backend(FakeBackend::manual());
+    let mut first = server.connect("a", "First");
+    let mut second = server.connect("a/b", "Second");
+    let space = first.create_space("Keys").id;
+    join(&mut second, &space, 2);
+    first.space(|state| state.participants.len() == 2);
+    let finished = |client: &TestClient, id: &str| {
+        client.wait_for(|message| match message {
+            ServerMessage::Transcript {
+                utterance,
+                text,
+                finished: true,
+            } if utterance == id => Some(text.clone()),
+            ServerMessage::TranscriptFailed { utterance, error } if utterance == id => {
+                panic!("{id} failed: {error}")
+            }
+            _ => None,
+        })
+    };
+    // Joined with `/`, both would be `a/b/c`.
+    first.say("b/c", "from first");
+    assert_eq!(finished(&first, "b/c"), "from first");
+    second.say("c", "from second");
+    assert_eq!(finished(&second, "c"), "from second");
+    let state = first.space(|state| state.queue.len() == 2);
+    let texts: Vec<&str> = state
+        .queue
+        .iter()
+        .map(|entry| entry.text.as_str())
+        .collect();
+    assert_eq!(texts, ["from first", "from second"]);
+}
+
+#[test]
 fn the_first_decision_wins() {
     let server = TestServer::start();
     let (mut ada, mut bob, _) = pair(&server);
