@@ -59,9 +59,11 @@ TOMORI_SKY_PREVIEW=/tmp/opencode/tomori-sky.png cargo test --locked -p client-qu
 Start the server on the PC with the Claude Code backend (see
 [design/server.md](design/server.md)). Spaces may run in the directory the
 server starts in or beneath it; give `--workspace-root PATH`, repeated as
-needed, to allow other directories instead:
+needed, to allow other directories instead. The server links the sherpa-onnx
+speech libraries, so fetch and verify them once before the first build:
 
 ```sh
+bash scripts/fetch-sherpa-onnx.sh
 cargo run -p server --bin tomori-server -- --backend claude-code
 ```
 
@@ -210,7 +212,8 @@ no open microphone for talking to other participants without the agent yet (see
 [design/live-audio.md](design/live-audio.md)).
 
 Recognition and synthesis run inside the server through sherpa-onnx, whose
-libraries are downloaded and linked when the server is built. Recognition uses
+libraries `scripts/fetch-sherpa-onnx.sh` downloads and checks, and the build
+links. Recognition uses
 a streaming transducer that shows words while you speak; synthesis uses Kokoro.
 The models need about 520 MB in `.tools/`. From the repository root:
 
@@ -472,6 +475,7 @@ files (`libasound2-dev` or `alsa-lib-devel`) for the microphone.
 ## Tests / desktop OpenXR
 
 ```sh
+bash scripts/fetch-sherpa-onnx.sh        # once: the speech libraries the server links
 cargo test --workspace                   # simulation, projection, desktop camera, server and client tests
 cargo test -p client-quest graphics::tests -- --ignored  # offscreen stereo captions / mono rendering
 cargo run -p client-quest -- --xr        # use an active desktop OpenXR Vulkan runtime
