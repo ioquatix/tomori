@@ -398,6 +398,38 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
+    /// A punctuator that records the thread it is dropped on.
+    struct Unloaded(Arc<Mutex<Option<std::thread::ThreadId>>>);
+
+    impl Punctuator for Unloaded {
+        fn punctuate(&mut self, text: &str) -> Result<String, Error> {
+            Ok(text.to_owned())
+        }
+    }
+
+    impl Drop for Unloaded {
+        fn drop(&mut self) {
+            *self.0.lock().unwrap() = Some(std::thread::current().id());
+        }
+    }
+
+    #[test]
+    fn stopping_unloads_the_punctuator_on_the_recognition_thread() {
+        let unloaded = Arc::new(Mutex::new(None));
+        let recognition = Recognition::spawn(Punctuated::new(
+            Fixed("run the tests"),
+            Unloaded(Arc::clone(&unloaded)),
+        ));
+        let stopper = recognition.stopper();
+        stopper.stop();
+        assert!(stopper.wait(std::time::Instant::now() + Duration::from_secs(5)));
+        let thread = unloaded
+            .lock()
+            .unwrap()
+            .expect("the punctuator was unloaded");
+        assert_ne!(thread, std::thread::current().id());
+    }
+
     #[test]
     fn removes_the_probe_word() {
         assert_eq!(without_probe("Run the tests. I"), Some("Run the tests."));

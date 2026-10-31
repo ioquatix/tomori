@@ -80,7 +80,7 @@ The ignored tests use the models under the repository root. To use models instal
 - the LibriSpeech samples that come with the streaming model;
 - sentences spoken by four Kokoro voices: American and British, female and male.
 
-Streaming models are fed in real time, in 100 ms frames, as the server receives them. The real-time factor is measured by decoding each clip again, directly, as fast as possible. With `--punctuation`, final transcripts are punctuated as the server punctuates them, and the time each punctuation takes is reported. Word errors ignore case and punctuation.
+Streaming models are fed in real time, in 100 ms frames, as the server receives them. The real-time factor is measured by decoding each clip again, directly, as fast as possible. With `--punctuation`, final transcripts are punctuated as the server punctuates them, in both passes, so the real-time factor includes punctuation, and the time each punctuation takes is reported. Word errors ignore case and punctuation.
 
 ```bash
 cargo run --release -p speech --example recognition_benchmark -- --root . \
@@ -110,7 +110,7 @@ Notes on the results:
 
 Measured on the same machine on 1 November 2026, at load average 55, with `--punctuation`:
 
-- Punctuating a final transcript took 22 ms of wall time on average (max 75 ms) under that load; on its own, the model used 7.5–9 ms of processor time for utterances of 1 to 20 words, and 12 ms for 48 words. The mean final after release rose from 0.07 s to 0.11 s.
+- Punctuating a final transcript took 22 ms of wall time on average (max 75 ms) under that load; on its own, the model used 7.5–9 ms of processor time for utterances of 1 to 20 words, and 12 ms for 48 words. In back-to-back runs, the mean final after release was 0.11 s with punctuation (load average 55) and 0.07 s without (load average 150), of which punctuation itself accounts for about 0.02 s and the rest is noise on this busy machine; the table above is from an earlier run.
 - 6 of the 8 Kokoro sentences matched their punctuated reference exactly, such as "Can you explain why the build failed on the Linux machine yesterday?". The other two read "What is the weather, like in Tokyo this weekend?", with a stray comma; one of them also has the recognizer's "week end".
 - The LibriSpeech clips came back as "After early nightfall, the yellow lamps would light up here and there the squalid quarter of the brothels." and "Yet these thoughts affected Hester Prynne less with hope than apprehension.", with the names capitalized.
 - sherpa-onnx's Chinese and English CT-Transformer was faster, about 3 ms for a sentence, but writes Chinese full-width punctuation ("，", "。") and does not restore capitals, so it is not used.
