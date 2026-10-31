@@ -8,6 +8,8 @@ A space is bound to exactly one agent session. Every participant in a space inte
 
 The server hosts multiple spaces concurrently. Clients can list, create, join, leave and move between spaces. Creating a space either starts a new agent session or binds an existing one, where the backend supports binding. A client is a participant in at most one space at a time; moving to another space leaves the previous one. Starting a session can take time; once it has started, the creator joins the new space, unless they have joined another space since asking.
 
+A participant who disconnects leaves their space but keeps their identity and audio source, and rejoins that space when they reconnect, unless they left it explicitly. A client may send `leave` straight after Hello to restore a leave made while it was disconnected; this overrides the rejoin, and is harmless when the participant is in no space. The server forgets a participant who has been disconnected for longer than a generous retention, 12 hours by default; after that they reconnect as a new participant in the lobby.
+
 Shared space state is held by the server and is the same for every participant: the conversation, the input queue, pending approvals and questions (including partially answered forms), delegated workers, presentation cards and worker visibility. Per-participant state is limited to presence, local presentation choices such as mute or paging, and the participant's own in-progress recording.
 
 When participants act concurrently:
@@ -33,5 +35,6 @@ The server's space registry, the client protocol for joining and leaving spaces,
 - Test that finalizing the same utterance twice queues it once and acknowledges the repeat with the text queued first.
 - Test queue cancellation: a queued entry can be cancelled by another participant before sending, and cannot be cancelled after delivery.
 - Test attribution on and off for delivered messages.
+- Test that reconnecting rejoins the space, that `leave` straight after Hello overrides the rejoin and is harmless in the lobby, and that a participant gone longer than the retention reconnects as a new participant.
 - Test that closing a session fails its queued input, marks the space closed in its state and the listing, and refuses new input.
 - Test moving a client between two spaces: it receives the new space's state and no further events from the old one.

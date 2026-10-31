@@ -693,3 +693,81 @@ fn a_streaming_reply_sends_paced_snapshots_ending_with_the_latest_state() {
     );
     assert!(snapshots >= 2, "snapshots were not sent while streaming");
 }
+
+/// End `client`'s connection and wait until the server has released it.
+fn hang_up(mut client: TestClient) {
+    client.finish();
+    assert!(client.is_closed(TIMEOUT));
+}
+
+#[test]
+fn leaving_right_after_hello_overrides_the_rejoin() {
+    let server = TestServer::start();
+    let (ada, bob, space) = pair(&server);
+    hang_up(ada);
+    bob.space(|state| state.participants.len() == 1);
+
+    // Ada left while disconnected; her client says so as soon as it is welcomed, without waiting for the rejoin.
+    let mut ada = TestClient::open(server.address);
+    ada.hello("ada", "Ada");
+    ada.send(&ClientMessage::Leave);
+    ada.wait_for(|message| matches!(message, ServerMessage::Left).then_some(()));
+    let spaces = ada.wait_for(|message| match message {
+        ServerMessage::Spaces { spaces } => Some(spaces.clone()),
+        _ => None,
+    });
+    let listed = spaces.iter().find(|listed| listed.id == space).unwrap();
+    assert_eq!(listed.participants, 1);
+    bob.space(|state| state.participants.len() == 1);
+
+    // The leave is remembered: reconnecting again does not rejoin.
+    hang_up(ada);
+    let again = server.connect("ada", "Ada");
+    again.wait_for(|message| match message {
+        ServerMessage::Spaces { .. } => Some(()),
+        ServerMessage::Space { .. } => panic!("rejoined a space that was left"),
+        _ => None,
+    });
+
+    // Leaving while in the lobby is harmless.
+    let mut carol = server.connect("carol", "Carol");
+    carol.send(&ClientMessage::Leave);
+    carol.wait_for(|message| matches!(message, ServerMessage::Left).then_some(()));
+    carol.wait_for(|message| match message {
+        ServerMessage::Spaces { .. } => Some(()),
+        ServerMessage::Error { error } => panic!("leaving the lobby failed: {error}"),
+        _ => None,
+    });
+}
+
+#[test]
+fn a_participant_gone_longer_than_the_retention_is_forgotten() {
+    let retention = Duration::from_millis(800);
+    let server = TestServer::with_server(FakeBackend::new(), move |backends| {
+        server::Server::new(
+            backends,
+            std::sync::Arc::new(server::test_support::TextTranscriber::default()),
+        )
+        .with_participant_retention(retention)
+    });
+    let (ada, bob, space) = pair(&server);
+    let source = ada.source;
+
+    // Within the retention, Ada keeps her source and rejoins.
+    hang_up(ada);
+    let ada = server.connect("ada", "Ada");
+    assert_eq!(ada.source, source);
+    ada.space(|state| state.id == space);
+
+    // After it, she is a new participant in the lobby.
+    hang_up(ada);
+    bob.space(|state| state.participants.len() == 1);
+    std::thread::sleep(retention * 2);
+    let ada = server.connect("ada", "Ada");
+    assert_ne!(ada.source, source);
+    ada.wait_for(|message| match message {
+        ServerMessage::Spaces { .. } => Some(()),
+        ServerMessage::Space { .. } => panic!("a forgotten participant rejoined"),
+        _ => None,
+    });
+}

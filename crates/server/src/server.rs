@@ -37,7 +37,11 @@ pub struct Server {
     keepalive: Keepalive,
     admission: Admission,
     request_timeout: Duration,
+    retention: Duration,
 }
+
+/// How long a disconnected participant keeps their identity, audio source and space, so that a headset that slept or walked out of range for a while comes back where it was. See `design/spaces.md`.
+pub const DEFAULT_PARTICIPANT_RETENTION: Duration = Duration::from_secs(12 * 60 * 60);
 
 /// The most connections served at once; further peers wait in the listen backlog.
 const MAX_CONNECTIONS: usize = 256;
@@ -76,7 +80,14 @@ impl Server {
             keepalive: Keepalive::default(),
             admission: Admission::default(),
             request_timeout: DEFAULT_REQUEST_TIMEOUT,
+            retention: DEFAULT_PARTICIPANT_RETENTION,
         }
+    }
+
+    /// Change how long a disconnected participant is remembered; see [`DEFAULT_PARTICIPANT_RETENTION`].
+    pub fn with_participant_retention(mut self, retention: Duration) -> Self {
+        self.retention = retention;
+        self
     }
 
     /// Change how long a connection may go without a complete request head, or a `/connect` exchange without Hello, before it is closed. The default is 10 seconds. See `design/server.md`.
@@ -240,6 +251,7 @@ impl Server {
             .interval
             .min(self.keepalive.timeout)
             .min(self.request_timeout)
+            .min(self.retention)
             / 4)
         .max(Duration::from_millis(1));
         let mut timer = scheduler.timer();
@@ -253,6 +265,7 @@ impl Server {
                     let now = scheduler.now();
                     self.admission.sweep(now, self.request_timeout);
                     self.hub.sweep(now, &self.keepalive, self.request_timeout);
+                    self.hub.forget_departed(now, self.retention);
                 }
                 Err(error) => {
                     if !cancellation.is_cancelled() {

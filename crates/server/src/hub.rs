@@ -156,6 +156,8 @@ struct ParticipantRecord {
     space: Option<String>,
     /// The space to rejoin when this participant reconnects.
     last_space: Option<String>,
+    /// When the participant's last connection ended, while it has none.
+    departed: Option<Instant>,
 }
 
 struct SpaceRecord {
@@ -468,6 +470,22 @@ impl Hub {
         }
     }
 
+    /// Forget participants whose last connection ended at least `retention` before `now`. Until then, a participant who reconnects keeps their audio source and rejoins their space; afterwards they are a new participant. See `design/spaces.md`.
+    pub fn forget_departed(&self, now: Instant, retention: Duration) {
+        let mut state = self.lock();
+        let before = state.participants.len();
+        state.participants.retain(|_, record| {
+            record.connection.is_some()
+                || record
+                    .departed
+                    .is_none_or(|departed| now.saturating_duration_since(departed) < retention)
+        });
+        let forgotten = before - state.participants.len();
+        if forgotten > 0 {
+            log::info!("Forgot {forgotten} participants who left more than {retention:?} ago.");
+        }
+    }
+
     pub fn disconnect(&self, connection: ConnectionId) {
         let mut deferred = Vec::new();
         {
@@ -490,6 +508,7 @@ impl Hub {
                     state.leave(&participant);
                     if let Some(record) = state.participants.get_mut(&participant) {
                         record.connection = None;
+                        record.departed = Some(Instant::now());
                     }
                 }
             }
@@ -592,6 +611,11 @@ impl Hub {
         }
         let invalid = if participant.is_empty() {
             Err("A participant identity is required.".to_owned())
+        } else if name.trim().is_empty() {
+            Err("A name is required.".to_owned())
+        } else if name.trim_start().starts_with('/') {
+            // The name begins each attributed prompt, where a leading slash could read as a command to the agent.
+            Err("A name must not start with \"/\".".to_owned())
         } else {
             limits::check(
                 &participant,
@@ -616,6 +640,7 @@ impl Hub {
                     connection: None,
                     space: None,
                     last_space: None,
+                    departed: None,
                 },
             );
         }
@@ -624,6 +649,7 @@ impl Hub {
             .get_mut(&participant)
             .expect("inserted above");
         record.name = name;
+        record.departed = None;
         let source = record.source;
         let previous = record.connection.replace(connection);
         let rejoin = record.space.clone().or_else(|| record.last_space.clone());

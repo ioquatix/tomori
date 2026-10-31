@@ -32,7 +32,7 @@ pub use application::Application;
 pub use backends::{AnyBackend, AnySession, Backends};
 #[cfg(feature = "speech")]
 pub use recognition::RecognitionTranscriber;
-pub use server::{Server, bind};
+pub use server::{DEFAULT_PARTICIPANT_RETENTION, Server, bind};
 pub use transcriber::{NullTranscriber, Transcriber, TranscriptSink, UtteranceId};
 
 /// The server name reported in [`protocol::ServerMessage::Welcome`].

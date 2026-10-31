@@ -64,6 +64,11 @@ fn an_oversized_hello_is_refused() {
     for (participant, name) in [
         ("p".repeat(1000), "Ada".to_owned()),
         ("ada".to_owned(), "N".repeat(1000)),
+        ("ada".to_owned(), String::new()),
+        ("ada".to_owned(), " \t ".to_owned()),
+        // A name begins each attributed prompt, so it must not read as a slash command.
+        ("ada".to_owned(), "/clear".to_owned()),
+        ("ada".to_owned(), " /compact".to_owned()),
     ] {
         let mut client = TestClient::open(server.address);
         client.send(&ClientMessage::Hello {

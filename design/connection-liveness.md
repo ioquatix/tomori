@@ -10,7 +10,7 @@ Both ends of a client connection (`server.md`) detect a peer that has gone silen
 - A side that has received nothing for the keepalive timeout ends the connection. Ending it must not depend on the peer or on a pending write completing: a write blocked on a peer that is gone is abandoned.
 - The server also ends a connection whose outgoing data has not been accepted for the keepalive timeout, that is, a write that has made no progress for that long, even if the peer is still sending. A peer that does not read cannot receive audio or space state, so it is not a working participant. The server does not read a connection while one of its writes is blocked, so data the peer sends meanwhile is only seen once the write completes.
 - The defaults are a 5 second interval and a 15 second timeout. With these defaults, each side ends a silent connection within 20 seconds of the last data it received. Both values are configurable on the client and on the server.
-- When the server ends a silent connection, it releases the participant exactly as for any other disconnection: the participant leaves its space but keeps its identity and audio source, and rejoins that space on reconnection (`spaces.md`).
+- When the server ends a silent connection, it releases the participant exactly as for any other disconnection: the participant leaves its space but keeps its identity and audio source, and rejoins that space on reconnection, within the participant retention (`spaces.md`).
 - When the client ends a silent connection, it reports the disconnection as a timeout and reconnects with its usual backoff.
 
 ## Rationale
