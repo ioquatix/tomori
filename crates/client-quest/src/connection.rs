@@ -1,15 +1,23 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-//! Carries out the [`Conversation`]'s actions: owns the server connection and browses for servers while the server list shows.
+//! Carries out the [`Conversation`]'s actions: owns the server connection, the microphone and the speaker, and browses for servers while the server list shows.
 use crate::{
     capture::{Capture, Recording},
     conversation::{Action, Conversation},
     identity::{Identity, Store},
+    playback::{Output, Playback},
     server_choice::{self, Choice, Source},
 };
-use client::{Client, ConnectionState, Event, Microphone, Options, discovery};
-use std::sync::{Arc, Mutex, PoisonError};
+use client::{
+    Client, ConnectionState, Event, Microphone, Options, discovery,
+    playback::{MixerOptions, Player, PlayerControl},
+};
+use protocol::{ClientMessage, ServerMessage};
+use std::{
+    sync::{Arc, Mutex, PoisonError},
+    time::{Duration, Instant},
+};
 
 /// Permission to receive multicast while browsing.
 pub trait Multicast {
@@ -34,6 +42,7 @@ pub struct Connection {
     failed: bool,
     remembered: Option<String>,
     voice: Voice,
+    speaker: Speaker,
 }
 
 /// Push-to-talk audio, from the platform microphone through the client's [`Microphone`]. The microphone is open only while recording.
@@ -133,6 +142,109 @@ impl Voice {
     }
 }
 
+/// How long to wait before opening the speaker again after it failed.
+const SPEAKER_RETRY: Duration = Duration::from_secs(5);
+
+/// Other participants and the agent's speech, played through the platform speaker by the client's [`Player`]. The speaker opens once the server welcomes the client and stays open until the client goes away.
+struct Speaker {
+    playback: Box<dyn Playback>,
+    /// The player of the current client, shared with the output callback, and its control.
+    player: Option<(crate::playback::Shared, PlayerControl)>,
+    output: Option<Output>,
+    /// Why the open output stopped, set from the output's own thread.
+    failure: Arc<Mutex<Option<String>>>,
+    /// When to try opening the speaker again.
+    retry_at: Option<Instant>,
+    /// Whether a failure has been shown since the speaker last opened, so that retries do not repeat it.
+    reported: bool,
+}
+
+impl Speaker {
+    fn new(playback: Box<dyn Playback>) -> Self {
+        Self {
+            playback,
+            player: None,
+            output: None,
+            failure: Arc::default(),
+            retry_at: None,
+            reported: false,
+        }
+    }
+
+    /// Take the new client's received audio; nothing plays until [`Self::open`].
+    fn attach(&mut self, client: &mut Client) {
+        self.detach();
+        if let Some(audio) = client.take_audio() {
+            let (player, control) = Player::new(audio, MixerOptions::default());
+            self.player = Some((Arc::new(Mutex::new(player)), control));
+        }
+    }
+
+    /// The client is going away: stop playing and forget its audio.
+    fn detach(&mut self) {
+        self.output = None;
+        if let Some((_, control)) = self.player.take() {
+            let statistics = control.statistics();
+            if statistics != Default::default() {
+                log::info!("Playback: {statistics:?}");
+            }
+        }
+        self.retry_at = None;
+        self.reported = false;
+    }
+
+    fn control(&self) -> Option<&PlayerControl> {
+        self.player.as_ref().map(|(_, control)| control)
+    }
+
+    /// Open the speaker if it is not open and is due. Returns a failure to show, once until the speaker opens again.
+    fn open(&mut self) -> Option<String> {
+        let (player, _) = self.player.as_ref()?;
+        if self.output.is_some() || self.retry_at.is_some_and(|at| Instant::now() < at) {
+            return None;
+        }
+        *self.failure.lock().unwrap_or_else(PoisonError::into_inner) = None;
+        let failure = self.failure.clone();
+        let failed = Box::new(move |error: String| {
+            failure
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .get_or_insert(error);
+        });
+        match self.playback.open(player.clone(), failed) {
+            Ok(output) => {
+                self.output = Some(output);
+                self.retry_at = None;
+                self.reported = false;
+                None
+            }
+            Err(error) => self.failed(error),
+        }
+    }
+
+    /// Close an output that failed, so that it is opened again after a while. Returns a failure to show.
+    fn poll(&mut self) -> Option<String> {
+        self.output.as_ref()?;
+        let error = self
+            .failure
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()?;
+        self.output = None;
+        self.failed(error)
+    }
+
+    fn failed(&mut self, error: String) -> Option<String> {
+        self.retry_at = Some(Instant::now() + SPEAKER_RETRY);
+        if std::mem::replace(&mut self.reported, true) {
+            log::debug!("Speaker: {error}");
+            return None;
+        }
+        log::warn!("{error}");
+        Some(format!("{error} Replies cannot be heard."))
+    }
+}
+
 impl Connection {
     /// Connects straight away to a server given at startup; otherwise the conversation starts at the server list.
     pub fn new(
@@ -140,6 +252,7 @@ impl Connection {
         store: Store,
         multicast: Box<dyn Multicast>,
         capture: Box<dyn Capture>,
+        playback: Box<dyn Playback>,
         conversation: &mut Conversation,
     ) -> Self {
         log::info!(
@@ -166,6 +279,7 @@ impl Connection {
                 shared: Arc::default(),
                 recording: None,
             },
+            speaker: Speaker::new(playback),
         }
     }
 
@@ -174,18 +288,46 @@ impl Connection {
         self.perform(conversation);
         self.browse(focused && conversation.is_browsing(), conversation);
         while let Some(event) = self.client.as_ref().and_then(Client::try_event) {
-            if let Event::State(ConnectionState::Connected { .. }) = &event
+            let connected = matches!(event, Event::State(ConnectionState::Connected { .. }));
+            if connected
                 && let Some(instance) = conversation.server().and_then(|c| c.instance.as_deref())
             {
                 self.store.remember_server(instance);
                 self.remembered = Some(instance.to_owned());
             }
+            if let Some(control) = self.speaker.control() {
+                match &event {
+                    // Audio from before reconnecting, or from a space that was left, is stale.
+                    Event::State(ConnectionState::Connected { source, .. }) => {
+                        control.set_local_source(Some(*source));
+                        control.clear();
+                    }
+                    Event::Message(ServerMessage::Left) => control.clear(),
+                    _ => {}
+                }
+            }
             conversation.apply(event);
+            // Opened after the conversation applies the welcome, which clears earlier errors, so that a failure stays visible.
+            if connected && let Some(error) = self.speaker.open() {
+                conversation.fail(error);
+            }
         }
         if let Some(error) = self.voice.failure() {
             conversation.microphone_failed(error);
         }
         self.perform(conversation);
+        if self
+            .client
+            .as_ref()
+            .is_some_and(|client| client.state().is_connected())
+            && let Some(error) = self.speaker.poll().or_else(|| self.speaker.open())
+        {
+            conversation.fail(error);
+        }
+        // Nothing plays while the microphone records, so that playback cannot be transcribed. See `design/live-audio.md`.
+        if let Some(control) = self.speaker.control() {
+            control.set_silenced(self.voice.recording.is_some());
+        }
     }
 
     fn perform(&mut self, conversation: &mut Conversation) {
@@ -199,7 +341,10 @@ impl Connection {
                         &self.identity.name,
                     );
                     match Client::connect(options) {
-                        Ok(client) => self.client = Some(client),
+                        Ok(mut client) => {
+                            self.speaker.attach(&mut client);
+                            self.client = Some(client);
+                        }
                         Err(error) => {
                             conversation.fail(format!("Cannot start a connection: {error}"))
                         }
@@ -214,6 +359,12 @@ impl Connection {
                 }
                 Action::Send(message) => match &self.client {
                     Some(client) => {
+                        // Audio still buffered from the space being left is not part of the next.
+                        if let (ClientMessage::Join { .. }, Some(control)) =
+                            (&message, self.speaker.control())
+                        {
+                            control.clear();
+                        }
                         if let Err(error) = client.send(message) {
                             conversation.fail(format!("Cannot send: {error}"));
                         }
@@ -221,6 +372,10 @@ impl Connection {
                     None => conversation.fail("Not connected."),
                 },
                 Action::BeginUtterance(utterance) => {
+                    // Silence the speaker before the microphone opens.
+                    if let Some(control) = self.speaker.control() {
+                        control.set_silenced(true);
+                    }
                     let begun = match &self.client {
                         Some(client) => self.voice.begin(client, utterance),
                         None => Err("Not connected.".into()),
@@ -253,6 +408,7 @@ impl Connection {
     /// Close the connection without stalling the frame: closing waits briefly for the server.
     fn disconnect(&mut self) {
         self.voice.reset();
+        self.speaker.detach();
         if let Some(client) = self.client.take() {
             let closed = std::thread::Builder::new()
                 .name("tomori-close".into())
@@ -308,6 +464,7 @@ impl Drop for Connection {
     fn drop(&mut self) {
         self.browser = None;
         self.multicast.set_held(false);
+        self.speaker.detach();
         // Close in the foreground, so the server hears the goodbye before the process ends.
         if let Some(client) = self.client.take() {
             client.close();
@@ -470,6 +627,90 @@ mod tests {
         voice.begin(&client, "u2".into()).unwrap();
         voice.finish(false).unwrap();
         assert_eq!(voice.failure(), None);
+        client.close();
+    }
+
+    /// Opens outputs that render the player once, or fails to open while `refuse` is set. Keeps each open output's failure callback.
+    #[derive(Clone, Default)]
+    struct FakeSpeaker {
+        opened: Arc<AtomicU32>,
+        refuse: Arc<AtomicBool>,
+        failed: Arc<Mutex<Option<crate::playback::Failed>>>,
+    }
+
+    impl Playback for FakeSpeaker {
+        fn open(
+            &mut self,
+            player: crate::playback::Shared,
+            failed: crate::playback::Failed,
+        ) -> Result<Output, String> {
+            if self.refuse.load(Ordering::Relaxed) {
+                return Err("No speaker is available.".into());
+            }
+            let mut output = [1; 48];
+            player.lock().unwrap().render(48_000, &mut output);
+            assert_eq!(output, [0; 48]);
+            self.opened.fetch_add(1, Ordering::Relaxed);
+            *self.failed.lock().unwrap() = Some(failed);
+            Ok(Output::new(()))
+        }
+    }
+
+    #[test]
+    fn the_speaker_plays_the_client_until_it_goes_away() {
+        let mut client = client();
+        let fake = FakeSpeaker::default();
+        let mut speaker = Speaker::new(Box::new(fake.clone()));
+        // Nothing to play before a client is attached.
+        assert_eq!(speaker.open(), None);
+        assert_eq!(fake.opened.load(Ordering::Relaxed), 0);
+
+        speaker.attach(&mut client);
+        assert!(client.take_audio().is_none(), "the speaker took the audio");
+        assert_eq!(speaker.open(), None);
+        assert_eq!(speaker.open(), None);
+        assert_eq!(fake.opened.load(Ordering::Relaxed), 1);
+        assert!(speaker.output.is_some());
+
+        speaker.detach();
+        assert!(speaker.output.is_none() && speaker.control().is_none());
+        client.close();
+    }
+
+    #[test]
+    fn a_failed_speaker_is_reported_once_and_opened_again_later() {
+        let mut client = client();
+        let fake = FakeSpeaker::default();
+        let mut speaker = Speaker::new(Box::new(fake.clone()));
+        speaker.attach(&mut client);
+
+        fake.refuse.store(true, Ordering::Relaxed);
+        let error = speaker.open().expect("the failure is shown");
+        assert!(error.contains("No speaker"), "{error}");
+        // Not tried again until the retry is due, and not shown again when it fails again.
+        assert_eq!(speaker.open(), None);
+        speaker.retry_at = Some(Instant::now());
+        assert_eq!(speaker.open(), None);
+        assert_eq!(fake.opened.load(Ordering::Relaxed), 0);
+
+        fake.refuse.store(false, Ordering::Relaxed);
+        speaker.retry_at = Some(Instant::now());
+        assert_eq!(speaker.open(), None);
+        assert_eq!(fake.opened.load(Ordering::Relaxed), 1);
+        assert_eq!(speaker.poll(), None);
+
+        // The open output fails from its own thread: it is closed, shown, and reopened once due.
+        let failed = fake.failed.lock().unwrap().take().unwrap();
+        std::thread::spawn(move || failed("The speaker failed: unplugged".into()))
+            .join()
+            .unwrap();
+        let error = speaker.poll().expect("the failure is shown");
+        assert!(error.contains("unplugged"), "{error}");
+        assert!(speaker.output.is_none());
+        assert_eq!(speaker.open(), None);
+        speaker.retry_at = Some(Instant::now());
+        assert_eq!(speaker.open(), None);
+        assert_eq!(fake.opened.load(Ordering::Relaxed), 2);
         client.close();
     }
 }
