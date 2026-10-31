@@ -10,6 +10,8 @@ Speech recognition and synthesis run on the PC server.
 
 **Synthesis starts before the reply completes.** The server consumes the agent's streaming text and begins synthesizing as soon as a speakable segment is stable, rather than waiting for the message to complete. Following segments are synthesized while earlier ones play.
 
+**The agent speaks with one English voice.** Synthesis uses Kokoro's American English `af_heart` voice, speaker 3 of the Kokoro v1.0 voice table.
+
 **Only speakable text is spoken.** Speakable text is selected from Markdown structure: code blocks, tool output, internal reasoning, raw HTML and Markdown syntax are not spoken, and tables are not read cell by cell. Text whose Markdown structure may still change as more text arrives is held back until it is stable.
 
 **Agent speech is not interrupted by participant input.** Each space has one agent speech stream that every participant receives. Recording, sending or queueing input does not stop, pause or skip it. A participant may mute their own playback locally. A client silences its own playback while its participant records push-to-talk, as `live-audio.md` requires, so that the reply is not transcribed as their input; the stream continues meanwhile, and they hear it again, live, when they stop recording.
@@ -18,7 +20,7 @@ Only newly produced assistant text is spoken; existing history is not read aloud
 
 ## Rationale
 
-Conversation latency matters most at both ends of a turn: participants should see their words transcribed while speaking, and hear the agent as soon as it has something to say. Participants can queue further input instead of interrupting; see `spaces.md`. Agreed in the October 2026 design discussion.
+Conversation latency matters most at both ends of a turn: participants should see their words transcribed while speaking, and hear the agent as soon as it has something to say. Replies are in English, so they are spoken with an English voice; participants preferred `af_heart` to the Japanese `jf_alpha` used before. Participants can queue further input instead of interrupting; see `spaces.md`. Agreed in the October 2026 design discussion.
 
 ## Scope
 
@@ -29,6 +31,7 @@ The server's recognition and synthesis pipelines, the speakable-text filter and 
 - Test that losing a frame within an utterance fails the utterance instead of queueing a cut transcript, that sequence numbers skipped before an utterance, or next to its `live` frames, do not, and that the client queues the `live` frames of an open utterance without dropping them under congestion.
 - Test that partial transcripts arrive before an utterance ends, and that the final decode covers only the uncommitted tail.
 - Test that the first synthesized audio for a streamed reply is produced before that reply's message completes.
+- Test that the server synthesizes with speaker 3.
 - Test the speakable filter with streamed Markdown containing fences, inline code, tables, links, headings and a line that later becomes a table header or setext heading.
 - Test that participant recording and queueing during playback leave the speech stream unchanged.
 

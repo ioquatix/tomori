@@ -37,7 +37,8 @@ impl KokoroConfig {
             python: root.join(".tools/asr-venv/bin/python"),
             script: Path::new(env!("CARGO_MANIFEST_DIR")).join("worker/tts_worker.py"),
             model: root.join(".tools/tts/kokoro-multi-lang-v1_0"),
-            voice: 37,
+            // `af_heart`.
+            voice: 3,
             speed: 1.0,
             threads: 2,
         }
@@ -204,6 +205,12 @@ mod tests {
             KokoroWorker::new(&config),
             Err(Error::Unavailable(_))
         ));
+    }
+
+    #[test]
+    fn defaults_to_the_heart_voice() {
+        // Speaker 3 of the Kokoro v1.0 voice table is `af_heart`.
+        assert_eq!(KokoroConfig::from_root(Path::new("/")).voice, 3);
     }
 
     #[test]
