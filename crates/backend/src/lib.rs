@@ -46,7 +46,8 @@ pub struct SessionSummary {
 pub struct Prompt {
     /// Unique per queue entry. A backend that is asked to send the same key twice delivers it at most once.
     pub key: String,
-    /// The text to deliver, already including speaker attribution if enabled.
+    /// The text to deliver, already including speaker attribution if enabled. It is delivered as the content of a user
+    /// message and never interpreted as an agent command, such as a Claude Code slash command, whatever it begins with.
     pub text: String,
 }
 
@@ -311,7 +312,8 @@ pub trait Session: Send + Sync + 'static {
 
     fn snapshot(&self) -> impl Future<Output = Result<Snapshot>> + Send;
 
-    /// Deliver a prompt. Only called while the session is idle; the server queues input otherwise.
+    /// Deliver a prompt as a user message. Only called while the session is idle; the server queues input otherwise. No
+    /// prompt text runs an agent command; see [`Prompt::text`].
     fn send(&self, prompt: Prompt) -> impl Future<Output = Result<()>> + Send;
 
     fn decide(

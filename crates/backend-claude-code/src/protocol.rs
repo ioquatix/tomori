@@ -112,7 +112,7 @@ impl State {
         let uuid = uuid::Uuid::new_v4().to_string();
         let line = json!({
             "type": "user",
-            "message": {"role": "user", "content": prompt.text},
+            "message": {"role": "user", "content": message_text(&prompt.text)},
             "parent_tool_use_id": null,
             "session_id": self.session,
             "uuid": uuid,
@@ -668,6 +668,19 @@ impl State {
     }
 }
 
+/// Prompt text as sent to Claude Code, which never runs it as a slash command.
+///
+/// Claude Code 2.1 runs a user message as a slash command only when its raw text begins with `/`; it does not trim
+/// the text first. Text that would begin with `/` gains a leading space, a visible change that the model reads past.
+/// Text that already begins with whitespace is sent unchanged.
+fn message_text(text: &str) -> String {
+    if text.starts_with('/') {
+        format!(" {text}")
+    } else {
+        text.into()
+    }
+}
+
 fn control_response(id: &str, response: Value) -> Value {
     json!({
         "type": "control_response",
@@ -755,6 +768,43 @@ mod tests {
             "request_id": id,
             "request": {"subtype": "can_use_tool", "tool_name": tool, "input": input, "tool_use_id": "toolu_1"},
         })
+    }
+
+    #[test]
+    fn prompts_never_run_slash_commands() {
+        let mut state = State::new("session".into());
+        let mut content = |text: &str| {
+            let prompt = Prompt {
+                key: text.into(),
+                text: text.into(),
+            };
+            state.prompt(prompt).unwrap()["message"]["content"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        };
+        assert_eq!(content("/model opus"), " /model opus");
+        assert_eq!(content("/model: hello"), " /model: hello");
+        assert_eq!(content("  /cost"), "  /cost");
+        assert_eq!(content("Samuel: /cost"), "Samuel: /cost");
+        assert_eq!(content("Read /etc/hosts."), "Read /etc/hosts.");
+
+        // The delivered message is reported as the participant said it.
+        let mut state = State::new("session".into());
+        let line = state
+            .prompt(Prompt {
+                key: "one".into(),
+                text: "/compact".into(),
+            })
+            .unwrap();
+        let replay = json!({"type": "user", "isReplay": true, "uuid": line["uuid"], "message": line["message"]});
+        handle(&mut state, replay);
+        assert_eq!(
+            state.snapshot().messages[0].parts,
+            vec![Part::Text {
+                text: "/compact".into()
+            }]
+        );
     }
 
     #[test]
