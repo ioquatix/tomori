@@ -528,12 +528,13 @@ impl Hub {
             }
             ClientMessage::Leave => {
                 state.abandon_utterance(connection, deferred);
+                // Announce leaving before the lobby listing that leaving produces.
+                outbox.clear_audio();
+                outbox.message(ServerMessage::Left);
                 state.leave(participant);
                 if let Some(record) = state.participants.get_mut(participant) {
                     record.last_space = None;
                 }
-                outbox.clear_audio();
-                outbox.message(ServerMessage::Left);
                 outbox.spaces();
             }
             ClientMessage::Gate { .. } => {
