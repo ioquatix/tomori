@@ -76,6 +76,16 @@ impl InputQueue {
         Some(entry)
     }
 
+    /// Fail every entry that is still queued, such as when the session has closed.
+    pub fn fail_waiting(&mut self) {
+        for entry in &mut self.entries {
+            if entry.state == QueueState::Queued {
+                entry.state = QueueState::Failed;
+            }
+        }
+        self.trim();
+    }
+
     /// Finish the sending entry with `key`. Returns the entry if it was sending.
     pub fn finish(&mut self, key: &str, state: QueueState) -> Option<QueueEntry> {
         let entry = self

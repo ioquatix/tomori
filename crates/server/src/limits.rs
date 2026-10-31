@@ -149,7 +149,7 @@ pub fn fit_state(state: &mut SpaceState) {
 /// Longest directory shown in the lobby listing once the listing is over budget, in bytes.
 const LISTED_DIRECTORY_BYTES: usize = 120;
 
-/// Trim the lobby listing to [`SNAPSHOT_BUDGET`]: shorten directories to their final components, then leave out the oldest spaces.
+/// Trim the lobby listing to [`SNAPSHOT_BUDGET`]: shorten directories to their final components, then leave out closed spaces, then the oldest spaces.
 pub fn fit_spaces(spaces: &mut Vec<SpaceSummary>) {
     let mut size = json_len(spaces);
     if size <= SNAPSHOT_BUDGET {
@@ -168,6 +168,14 @@ pub fn fit_spaces(spaces: &mut Vec<SpaceSummary>) {
             space.directory = format!("…{}", &space.directory[start..]);
             size -= before.saturating_sub(json_len(&space.directory));
         }
+    }
+    while size > SNAPSHOT_BUDGET
+        && let Some(index) = spaces
+            .iter()
+            .position(|space| space.activity == protocol::Activity::Closed)
+    {
+        let space = spaces.remove(index);
+        size -= json_len(&space) + 1;
     }
     while size > SNAPSHOT_BUDGET && !spaces.is_empty() {
         let space = spaces.remove(0);
@@ -247,12 +255,17 @@ mod tests {
         assert_eq!(spaces.len(), 200);
         assert!(spaces[0].directory.starts_with('…'));
 
-        // Beyond that, the oldest spaces are left out.
+        // Beyond that, closed spaces are left out, then the oldest spaces.
         let mut spaces = listing(2000);
+        for space in spaces.iter_mut().skip(1000).step_by(2) {
+            space.activity = protocol::Activity::Closed;
+        }
         fit_spaces(&mut spaces);
         assert!(json_len(&spaces) <= SNAPSHOT_BUDGET);
         assert!(spaces.len() < 2000);
         assert_eq!(spaces.last().unwrap().id, "space-1999");
+        assert!(spaces.iter().any(|space| space.id == "space-1001"));
+        assert!(!spaces.iter().any(|space| space.id == "space-1000"));
     }
 
     #[test]

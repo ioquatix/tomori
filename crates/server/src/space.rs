@@ -195,6 +195,9 @@ impl SpaceModel {
     }
 
     pub fn activity(&self) -> Activity {
+        if self.closed {
+            return Activity::Closed;
+        }
         if self.is_waiting() {
             return Activity::Waiting;
         }
@@ -332,6 +335,8 @@ impl SpaceModel {
                 if let Some(prompt) = self.in_flight.take() {
                     self.queue.finish(&prompt.key, QueueState::Failed);
                 }
+                // Nothing waiting can be delivered any more, so say so rather than leave it queued.
+                self.queue.fail_waiting();
                 // A closed session can no longer receive decisions or answers.
                 self.approvals.clear();
                 self.deciding.clear();
@@ -620,6 +625,28 @@ mod tests {
         space.apply(Event::PermissionResolved { id: "p2".into() });
         assert_eq!(space.activity(), Activity::Idle);
         assert!(space.next_prompt().is_some());
+    }
+
+    #[test]
+    fn closing_fails_waiting_input() {
+        let mut space = model();
+        space.enqueue("a".into(), "Ada".into(), "first".into());
+        space.next_prompt().unwrap();
+        space.enqueue("b".into(), "Bob".into(), "second".into());
+        space.apply(Event::PermissionRequested(permission("p")));
+        space.apply(Event::Closed { reason: None });
+        assert_eq!(space.activity(), Activity::Closed);
+        assert_eq!(space.summary().activity, Activity::Closed);
+        let state = space.state(Vec::new());
+        assert!(
+            state
+                .queue
+                .iter()
+                .all(|entry| entry.state == QueueState::Failed)
+        );
+        assert!(state.approval.is_none());
+        assert!(state.error.is_some());
+        assert!(space.next_prompt().is_none());
     }
 
     #[test]

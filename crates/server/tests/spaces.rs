@@ -107,6 +107,65 @@ fn queued_input_is_visible_to_everyone_and_anyone_can_cancel_it() {
 }
 
 #[test]
+fn input_to_a_closed_space_fails_visibly() {
+    let server = TestServer::with_backend(FakeBackend::manual());
+    let (mut ada, _bob, space) = pair(&server);
+    let lobby = server.connect("carol", "Carol");
+    ada.say("u1", "first");
+    ada.say("u2", "second");
+    ada.space(|state| {
+        state
+            .queue
+            .iter()
+            .any(|entry| entry.text == "second" && entry.state == QueueState::Queued)
+    });
+
+    // The session ends: queued input fails instead of waiting forever, and the space shows it is closed.
+    let session = server.backend.started()[0].clone();
+    session.emit(Event::Closed {
+        reason: Some("agent exited".to_owned()),
+    });
+    let state = ada.space(|state| state.activity == Activity::Closed);
+    assert_eq!(state.error.as_deref(), Some("agent exited"));
+    let states: Vec<(&str, QueueState)> = state
+        .queue
+        .iter()
+        .map(|entry| (entry.text.as_str(), entry.state))
+        .collect();
+    assert_eq!(
+        states,
+        [
+            ("first", QueueState::Delivered),
+            ("second", QueueState::Failed)
+        ]
+    );
+    lobby.wait_for(|message| match message {
+        ServerMessage::Spaces { spaces } => spaces
+            .iter()
+            .any(|summary| summary.id == space && summary.activity == Activity::Closed)
+            .then_some(()),
+        _ => None,
+    });
+
+    // New input is refused rather than queued.
+    ada.say("u3", "third");
+    let error = ada.wait_for(|message| match message {
+        ServerMessage::TranscriptFailed { utterance, error } if utterance == "u3" => {
+            Some(error.clone())
+        }
+        _ => None,
+    });
+    assert!(error.contains("ended"), "{error}");
+    let window = Duration::from_millis(200);
+    while let Some(message) = ada.next_message(window) {
+        if let ServerMessage::Space { state } = message {
+            assert!(!state.queue.iter().any(|entry| entry.text == "third"));
+        }
+    }
+    assert_eq!(session.log().prompts.len(), 1);
+}
+
+#[test]
 fn a_repeated_utterance_is_queued_once() {
     let server = TestServer::with_backend(FakeBackend::manual());
     let (mut ada, _bob, _) = pair(&server);

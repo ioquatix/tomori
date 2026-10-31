@@ -871,7 +871,12 @@ impl Hub {
             return;
         };
         let text = text.trim();
-        let failure = if text.is_empty() {
+        let failure = if state
+            .space(&record.space)
+            .is_some_and(|space| space.model.is_closed())
+        {
+            Some("The agent session has ended, so nothing was sent.")
+        } else if text.is_empty() {
             Some("Nothing was heard, so nothing was sent.")
         } else if text.len() > limits::QUEUED_TEXT_BYTES {
             Some("The recording was too long, so nothing was sent. Please say it in shorter parts.")
