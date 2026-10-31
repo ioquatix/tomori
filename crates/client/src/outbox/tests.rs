@@ -500,6 +500,25 @@ fn congestion_drops_live_audio_but_never_frames_of_the_open_utterance() {
 }
 
 #[test]
+fn congestion_keeps_live_frames_within_the_open_utterance() {
+    let outbox = Outbox::new(2, 64);
+    outbox.connect();
+    outbox.send(begin("u")).unwrap();
+    // The gate switches to live and back while the utterance is open.
+    outbox.send_audio(agent(0)).unwrap();
+    for sequence in 1..6 {
+        outbox.send_audio(audio(sequence)).unwrap();
+    }
+    outbox.send_audio(agent(6)).unwrap();
+    outbox.send(end("u")).unwrap();
+    let mut expected = vec![Item::Control(begin("u"))];
+    expected.extend((0..7).map(Item::Audio));
+    expected.push(Item::Control(end("u")));
+    assert_eq!(items(&outbox), expected);
+    assert_eq!(outbox.dropped_audio(), 0);
+}
+
+#[test]
 fn an_utterance_beyond_the_congestion_limit_fails_visibly() {
     let outbox = Outbox::new(2, 3);
     outbox.connect();

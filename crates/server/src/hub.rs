@@ -145,7 +145,7 @@ struct Liveness {
 struct OpenUtterance {
     client: String,
     id: UtteranceId,
-    /// The sequence number of the next frame of this utterance, once its first frame has arrived. A gap after that means frames were lost mid-utterance; see `design/speech.md`.
+    /// The sequence number of the next frame, after an agent frame of this utterance. A gap between two agent frames means agent audio was lost mid-utterance; see `design/speech.md`. A frame of another gate clears it, so the agent frame after it is not checked.
     ///
     /// The first frame is not checked against frames before `UtteranceBegin`: the client legitimately skips sequence numbers there, by not sending frames while the gate is off and by dropping congested live audio. It never drops frames of an open utterance, and frames and control share one ordered stream, so the first frame after `UtteranceBegin` is the utterance's first.
     expected: Option<u32>,
@@ -966,12 +966,17 @@ impl Hub {
                 return;
             };
             let gap = match record.utterance.as_mut() {
-                Some(open) => {
+                Some(open) if frame.gate == Gate::Agent => {
                     let gap = open
                         .expected
                         .is_some_and(|expected| expected != frame.sequence);
                     open.expected = Some(frame.sequence.wrapping_add(1));
                     gap
+                }
+                Some(open) => {
+                    // Only agent audio is recognized, so only a gap between agent frames loses part of the utterance.
+                    open.expected = None;
+                    false
                 }
                 None => false,
             };

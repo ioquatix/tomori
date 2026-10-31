@@ -638,6 +638,36 @@ fn sequence_numbers_skipped_before_an_utterance_do_not_fail_it() {
 }
 
 #[test]
+fn skipped_live_frames_within_an_utterance_do_not_fail_it() {
+    let server = TestServer::start();
+    let (mut ada, _bob, _) = pair(&server);
+    ada.send(&ClientMessage::UtteranceBegin {
+        utterance: "u1".to_owned(),
+    });
+    ada.send_audio(Gate::Agent, speech("he"));
+    // The gate switches to live and back; some live frames were not sent.
+    ada.skip_sequence(2);
+    ada.send_audio(Gate::Live, speech("--"));
+    ada.skip_sequence(3);
+    ada.send_audio(Gate::Agent, speech("llo"));
+    ada.send(&ClientMessage::UtteranceEnd {
+        utterance: "u1".to_owned(),
+    });
+    let text = ada.wait_for(|message| match message {
+        ServerMessage::Transcript {
+            utterance,
+            text,
+            finished: true,
+        } if utterance == "u1" => Some(text.clone()),
+        ServerMessage::TranscriptFailed { utterance, error } if utterance == "u1" => {
+            panic!("u1 failed: {error}")
+        }
+        _ => None,
+    });
+    assert_eq!(text, "hello");
+}
+
+#[test]
 fn a_lost_frame_fails_the_utterance() {
     let server = TestServer::start();
     let (mut ada, _bob, _) = pair(&server);
