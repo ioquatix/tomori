@@ -8,17 +8,17 @@ The PC server is a Rust program built on `base-http-server`. It replaces the Nod
 
 Each client keeps one long-lived, bidirectional streaming connection to the server. Control messages, events, microphone audio, speech audio and presence are framed over that connection; the server does not require per-action request routes for interactive traffic. Audio frames are self-contained (source, sequence and timing) so that their transport can change without affecting the layers above.
 
-Initially, audio travels over the same HTTP streaming connection. Later, audio moves to UDP datagrams so that a lost packet is dropped instead of stalling the audio behind it. Transcribed audio must still meet `speech.md` over UDP. Whether it uses retransmission, forward error correction, or fails the utterance on loss is not yet decided.
+Initially, audio travels over the same HTTP streaming connection. Later, audio moves to UDP datagrams so that a lost packet is dropped instead of stalling the audio behind it. Over UDP, audio is Opus-encoded with in-band forward error correction, so isolated losses are recovered without a round trip. Transcribed audio must still meet `speech.md`: the server requests any `agent` frame that error correction could not recover, and fails the utterance visibly if the frame does not arrive in time. Live playback never waits for a retransmission.
 
 Whose view the spectator feed shows when a space has several participants is not yet decided.
 
 Wire types are defined once in a shared protocol crate used by both the server and native clients.
 
-The server listens on loopback only by default. Any non-loopback listener is explicitly enabled and requires participant pairing. The server exposes no generic filesystem, shell or session-deletion operations and never sends model credentials to clients.
+Clients connect over the local network; a USB connection is not required. Every client that does not connect over loopback must be paired with the server before it can join a space. Whether local network traffic is encrypted, and how clients discover the server, is not yet decided. The server exposes no generic filesystem, shell or session-deletion operations and never sends model credentials to clients.
 
 ## Rationale
 
-A single duplex connection per participant keeps the server simple and supports real-time audio in both directions. Sharing one protocol crate prevents the client and server definitions from drifting apart. The loopback default preserves the existing security model while allowing multiple clients later. Agreed in the October 2026 design discussion.
+A single duplex connection per participant keeps the server simple and supports real-time audio in both directions. Sharing one protocol crate prevents the client and server definitions from drifting apart. Local network connections let several headsets share a space without USB cables; pairing replaces the protection that loopback-only access provided, since space participants can approve agent tool use. Agreed in the October 2026 design discussion.
 
 ## Scope
 
@@ -28,5 +28,6 @@ The server crate, the protocol crate, the shared client crate and network config
 
 - Inspect dependencies: the server uses `base-http-server`; client and server wire types come from the protocol crate.
 - Test a client session over one connection carrying control messages, events and audio concurrently.
-- Confirm the default listener address is loopback and that a non-loopback listener refuses unpaired clients.
+- Confirm that a headset can connect over the local network without USB, and that unpaired non-loopback clients cannot join a space or receive space state.
+- Over UDP, test that an isolated lost packet is recovered by error correction, that an unrecovered `agent` frame is requested again, and that playback continues without waiting for it.
 - Review the protocol for operations outside the listed responsibilities.
