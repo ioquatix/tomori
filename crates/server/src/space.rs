@@ -103,12 +103,13 @@ fn role(role: backend::Role) -> protocol::Role {
     }
 }
 
-fn worker(worker: backend::Worker) -> protocol::Worker {
+/// Project a backend worker. A worker whose parent is the space's own session is reported without a parent, so clients need not know the backend's session identifier.
+fn worker(worker: backend::Worker, session: &str) -> protocol::Worker {
     use backend::WorkerState as From;
     use protocol::WorkerState as To;
     protocol::Worker {
         id: worker.id,
-        parent: worker.parent,
+        parent: worker.parent.filter(|parent| parent != session),
         title: worker.title,
         state: match worker.state {
             From::Running => To::Running,
@@ -139,6 +140,11 @@ impl SpaceModel {
         session: String,
         snapshot: Snapshot,
     ) -> Self {
+        let workers = snapshot
+            .workers
+            .into_iter()
+            .map(|entry| worker(entry, &session))
+            .collect();
         let mut model = Self {
             id,
             title,
@@ -163,7 +169,7 @@ impl SpaceModel {
                 })
                 .collect(),
             submitting: Vec::new(),
-            workers: snapshot.workers.into_iter().map(worker).collect(),
+            workers,
             attribution: true,
             error: None,
         };
@@ -325,7 +331,10 @@ impl SpaceModel {
                 self.submitting.retain(|pending| pending.question.id != id);
             }
             Event::WorkersChanged { workers } => {
-                self.workers = workers.into_iter().map(worker).collect();
+                self.workers = workers
+                    .into_iter()
+                    .map(|entry| worker(entry, &self.session))
+                    .collect();
             }
             Event::Error { message } => self.error = Some(message),
             Event::Closed { reason } => {

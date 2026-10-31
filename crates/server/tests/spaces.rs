@@ -4,7 +4,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use backend::{AnswerValue, Event, Field, FieldKind, FieldOption, Permission, Question};
+use backend::{
+    AnswerValue, Event, Field, FieldKind, FieldOption, Permission, Question, Session, Worker,
+    WorkerState,
+};
 use protocol::{Activity, ClientMessage, Decision, Gate, QueueState, ServerMessage, SpaceState};
 use server::Server;
 use server::fake::FakeBackend;
@@ -37,6 +40,37 @@ fn pair(server: &TestServer) -> (TestClient, TestClient, String) {
     join(&mut bob, &space, 2);
     ada.space(|state| state.participants.len() == 2);
     (ada, bob, space)
+}
+
+#[test]
+fn workers_started_by_the_session_have_no_parent() {
+    let server = TestServer::with_backend(FakeBackend::manual());
+    let mut ada = server.connect("ada", "Ada");
+    ada.create_space("Workers");
+    let session = server.backend.started()[0].clone();
+    let worker = |id: &str, parent: Option<String>| Worker {
+        id: id.to_owned(),
+        parent,
+        title: id.to_owned(),
+        state: WorkerState::Running,
+    };
+    session.emit(Event::WorkersChanged {
+        workers: vec![
+            worker("lead", Some(session.id())),
+            worker("helper", Some("lead".to_owned())),
+            worker("orphan", None),
+        ],
+    });
+    let state = ada.space(|state| state.workers.len() == 3);
+    let parents: Vec<(&str, Option<&str>)> = state
+        .workers
+        .iter()
+        .map(|worker| (worker.id.as_str(), worker.parent.as_deref()))
+        .collect();
+    assert_eq!(
+        parents,
+        [("lead", None), ("helper", Some("lead")), ("orphan", None)]
+    );
 }
 
 #[test]
