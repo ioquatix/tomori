@@ -258,6 +258,11 @@ impl TestClient {
         self.stream.write_all(&chunk).unwrap();
     }
 
+    /// Write raw request body bytes, which may split chunks and frames anywhere.
+    pub fn write_raw(&mut self, bytes: &[u8]) {
+        self.stream.write_all(bytes).unwrap();
+    }
+
     pub fn send(&mut self, message: &ClientMessage) {
         self.write_chunk(&Frame::client(message).encode());
     }

@@ -1,13 +1,13 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-use std::pin::{Pin, pin};
+use std::pin::pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::task::{Poll, Waker};
 
 use base_http::body::{BodyError, BodyFrame, ReadableBody};
 use base_scheduler::Cancellation;
+use futures_util::FutureExt;
 use futures_util::future::{Either, select};
 use protocol::{Frame, FrameDecoder, ServerMessage};
 
@@ -20,49 +20,6 @@ const CHUNK_TARGET: usize = 64 * 1024;
 /// The most request reads applied before each outgoing chunk when both directions are busy.
 const INPUT_READS_PER_OUTPUT: usize = 8;
 
-type ReadResult<B> = Result<BodyFrame<<B as ReadableBody>::Data>, <B as ReadableBody>::Error>;
-
-/// A request body read that survives across response reads, owning the body until it completes.
-type PendingRead<B> = Pin<Box<dyn Future<Output = (B, ReadResult<B>)> + Send>>;
-
-/// The request body, either idle or owned by a read in progress.
-enum Input<B: ReadableBody> {
-    Idle(B),
-    Reading(PendingRead<B>),
-    Closed,
-}
-
-impl<B: ReadableBody> Input<B> {
-    fn insert_reading(&mut self, pending: PendingRead<B>) -> &mut PendingRead<B> {
-        *self = Input::Reading(pending);
-        match self {
-            Input::Reading(pending) => pending,
-            _ => unreachable!(),
-        }
-    }
-}
-
-/// Start reading `request`, returning a future that hands the body back with the result.
-///
-/// TODO(upstream): base-http1's `IncomingBody` poisons itself when a pending `read` is dropped ("previous body read failed or was abandoned"), although the `ReadableBody` contract says dropping a pending read must not lose data. Racing the request read against outgoing frames would drop it, so the read is kept alive here instead. Once `IncomingBody::read` is drop-safe, select on `request.read` directly and remove this.
-fn start_read<'a, B: ReadableBody + 'a>(
-    mut request: B,
-    cancellation: Cancellation,
-) -> PendingRead<B> {
-    let future: Pin<Box<dyn Future<Output = (B, ReadResult<B>)> + Send + 'a>> =
-        Box::pin(async move {
-            let result = request.read(&cancellation).await;
-            (request, result)
-        });
-    // SAFETY: This only erases the lifetime `'a` that the future borrows through `B`. The result is stored solely in `Input<B>` inside `ConnectionBody<B>`, whose type still names `B` and so cannot outlive `'a`; it is only ever polled or dropped there. The layout is identical because only the trait object's lifetime bound changes.
-    unsafe {
-        std::mem::transmute::<
-            Pin<Box<dyn Future<Output = (B, ReadResult<B>)> + Send + 'a>>,
-            PendingRead<B>,
-        >(future)
-    }
-}
-
 /// The response body of `POST /connect`: server frames out, while reading client frames from the request body it owns.
 ///
 /// The HTTP server pulls this body to write the response. Each read returns the next outgoing frames, and while none are waiting it reads the request body and applies incoming frames to the [`Hub`]. No separate task is needed, so the connection's lifetime is exactly the HTTP exchange's. Dropping the body disconnects the participant.
@@ -74,7 +31,8 @@ pub struct ConnectionBody<B: ReadableBody> {
     received: Arc<AtomicBool>,
     /// Tracks whether output is being written, for the hub's keepalive sweep.
     output: Arc<Output>,
-    request: Input<B>,
+    /// The request body. Its reads are raced against outgoing frames and dropped when those win, which the `ReadableBody` contract allows: a dropped read loses no input.
+    request: B,
     decoder: FrameDecoder,
     input_ended: bool,
     finished: bool,
@@ -90,7 +48,7 @@ impl<B: ReadableBody> ConnectionBody<B> {
             outbox,
             received,
             output,
-            request: Input::Idle(request),
+            request,
             decoder: FrameDecoder::new(),
             input_ended: false,
             finished: false,
@@ -131,18 +89,6 @@ impl<B: ReadableBody> ConnectionBody<B> {
         Ok(())
     }
 
-    /// The request read in progress, starting one if the body is idle. `None` once the request body is closed.
-    fn reading(&mut self, cancellation: &Cancellation) -> Option<&mut PendingRead<B>> {
-        match std::mem::replace(&mut self.request, Input::Closed) {
-            Input::Idle(request) => Some(
-                self.request
-                    .insert_reading(start_read(request, cancellation.clone())),
-            ),
-            Input::Reading(pending) => Some(self.request.insert_reading(pending)),
-            Input::Closed => None,
-        }
-    }
-
     /// Apply request data that has already arrived, without waiting. Output is only written when the HTTP server asks for it, so without this a connection whose outbox never empties would never read its input, and would look silent to the keepalive sweep.
     fn take_ready_input(&mut self, cancellation: &Cancellation) -> Result<(), BodyError> {
         // Bounded, so that a fast sender cannot starve output either.
@@ -150,17 +96,10 @@ impl<B: ReadableBody> ConnectionBody<B> {
             if self.input_ended {
                 break;
             }
-            let Some(pending) = self.reading(cancellation) else {
+            // A read that is not ready is dropped, losing nothing; the next real wait reads again with a real waker.
+            let Some(result) = self.request.read(cancellation).now_or_never() else {
                 break;
             };
-            // The read stays in `self.request` if it is not ready; the next real wait polls it again with a real waker.
-            let Poll::Ready((request, result)) = pending
-                .as_mut()
-                .poll(&mut std::task::Context::from_waker(Waker::noop()))
-            else {
-                break;
-            };
-            self.request = Input::Idle(request);
             self.input(result.map_err(BodyError::new)?)?;
         }
         Ok(())
@@ -198,11 +137,7 @@ impl<B: ReadableBody> ReadableBody for ConnectionBody<B> {
 
     fn close(&mut self, _error: Option<BodyError>) {
         self.finished = true;
-        if let Input::Idle(request) = &mut self.request {
-            request.close(None);
-        }
-        // Dropping a read in progress abandons the request body, which is what closing means.
-        self.request = Input::Closed;
+        self.request.close(None);
     }
 
     async fn read(&mut self, cancellation: &Cancellation) -> Result<BodyFrame<Vec<u8>>, BodyError> {
@@ -234,17 +169,11 @@ impl<B: ReadableBody> ReadableBody for ConnectionBody<B> {
             if self.outbox.is_ready() {
                 continue;
             }
-            let Some(pending) = self.reading(cancellation) else {
-                self.finished = true;
-                return Ok(BodyFrame::End);
-            };
-            // When outgoing frames win, the read stays pending in `self.request`, so no input is lost.
-            let received = match select(pin!(listener), pending).await {
+            // When outgoing frames win, the pending read is dropped, losing no input; the next wait reads again from the same position.
+            let received = match select(pin!(listener), pin!(self.request.read(cancellation))).await
+            {
                 Either::Left(_) => None,
-                Either::Right(((request, result), _)) => {
-                    self.request = Input::Idle(request);
-                    Some(result.map_err(BodyError::new)?)
-                }
+                Either::Right((result, _)) => Some(result.map_err(BodyError::new)?),
             };
             if let Some(frame) = received {
                 self.input(frame)?;
