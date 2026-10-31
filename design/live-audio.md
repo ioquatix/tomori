@@ -12,7 +12,7 @@ Participants in a space can talk to each other. Each participant sends one micro
 
 Push-to-talk audio is not a separate upload path. Only `agent` audio is transcribed; open-microphone conversation between participants never reaches the agent.
 
-Each client mixes every incoming participant stream together with the space's agent speech stream into a single output. A participant does not hear their own microphone. The server mixes the same sources once for the spectator feed.
+Each client mixes every incoming participant stream together with the space's agent speech stream into a single output. A participant does not hear their own microphone. A client that shows who is speaking takes it from the audio its mixer actually plays, measured before local volume, so muting agent speech locally silences it without hiding that the agent is speaking. The server mixes the same sources once for the spectator feed.
 
 Playback and mixing are real time: audio that arrives too late to play is dropped from playback rather than delayed or replayed. This does not apply to transcription: every `agent` frame reaches recognition, in order, and a gap in `agent` audio fails the utterance with a visible error, as `speech.md` requires.
 
@@ -31,7 +31,7 @@ Client audio capture and playback, the microphone gate, server routing and the s
 ## Validation
 
 - Test that `agent` frames are both forwarded and transcribed, `live` frames are only forwarded, and `off` produces no frames.
-- Test that a client's output contains other participants and agent speech but not its own microphone.
+- Test that a client's output contains other participants and agent speech but not its own microphone, and that muted agent speech plays silently while still reporting a level.
 - Test that frames arriving too late for playback are dropped from playback and mixing, while the same `agent` frames still reach recognition.
 - Test that a missing `agent` frame fails the utterance visibly instead of producing a partial transcript.
 - Test that agent speech is sent at its playback rate rather than as fast as it is synthesized, that a participant joining mid-segment receives the rest of it, and that a backlog of participant audio on a connection does not displace agent frames.
