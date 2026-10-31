@@ -660,6 +660,23 @@ fn dropping_a_session_stops_the_agents_tools() {
 
 #[cfg(unix)]
 #[test]
+fn the_closing_reason_includes_the_last_error_line() {
+    run(|| async {
+        let fixture = Fixture::new("late-error");
+        let session = fixture.create().await;
+        let events = events_until(&session, |event| matches!(event, Event::Closed { .. })).await;
+        let Some(Event::Closed {
+            reason: Some(reason),
+        }) = events.last()
+        else {
+            panic!("expected a reason: {events:?}");
+        };
+        assert!(reason.ends_with("Error: authentication failed"), "{reason}");
+    });
+}
+
+#[cfg(unix)]
+#[test]
 fn closes_promptly_when_a_stray_process_holds_the_output() {
     run(|| async {
         let fixture = Fixture::new("stray");

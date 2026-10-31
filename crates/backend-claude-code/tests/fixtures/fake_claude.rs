@@ -12,10 +12,10 @@
 //! - `stderr <text>` writes a line to standard error.
 //! - `drain` reads standard input until it closes.
 //! - `hang` ignores standard input and never exits.
-//! - `spawn <program> [arguments...]` starts a child in the fake's process group with null standard streams, as a tool
-//!   would, and appends its process id to `children` next to the log.
-//! - `detach <program> [arguments...]` starts a child in a new process group that shares the fake's standard output
-//!   and error, and records it in the same way.
+//! - `spawn <shell command>` runs the command with `sh -c` in the fake's process group with null standard streams, as a
+//!   tool would, and appends its process id to `children` next to the log.
+//! - `detach <shell command>` runs the command in a new process group that shares the fake's standard output and error,
+//!   and records it in the same way.
 //! - `exit <code>` exits immediately.
 //!
 //! When standard input closes during `expect`, the fake exits successfully, as `claude` does.
@@ -110,9 +110,8 @@ fn main() {
                 thread::sleep(Duration::from_secs(60));
             },
             "spawn" | "detach" => {
-                let mut words = rest.split_whitespace();
-                let mut command = Command::new(words.next().expect("a program"));
-                command.args(words).stdin(Stdio::null());
+                let mut command = Command::new("sh");
+                command.args(["-c", rest]).stdin(Stdio::null());
                 if verb == "spawn" {
                     command.stdout(Stdio::null()).stderr(Stdio::null());
                 } else {

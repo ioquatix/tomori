@@ -23,7 +23,7 @@ use std::time::Duration;
 const STDERR_LINES: usize = 8;
 
 /// How long output may keep arriving after the process exits. A process the agent started can inherit its standard
-/// output and hold it open long after the agent has gone.
+/// output or error and hold them open long after the agent has gone.
 const OUTPUT_DRAIN_LIMIT: Duration = Duration::from_secs(1);
 
 /// Output from the child process, in order per pipe.
@@ -31,16 +31,16 @@ const OUTPUT_DRAIN_LIMIT: Duration = Duration::from_secs(1);
 pub(crate) enum Output {
     /// One line of standard output, without the line terminator.
     Line(String),
-    /// The process exited and has been reaped, and its standard output was read to the end or for
-    /// [`OUTPUT_DRAIN_LIMIT`].
+    /// The process exited and has been reaped, and its output was read to the end or for [`OUTPUT_DRAIN_LIMIT`].
     Exited(ExitStatus),
 }
 
 struct Status {
     child: Child,
     exited: Option<ExitStatus>,
-    /// Standard output has reached end of file.
+    /// Standard output and standard error have reached end of file.
     stdout_closed: bool,
+    stderr_closed: bool,
 }
 
 struct Shared {
@@ -105,6 +105,7 @@ impl Process {
                 child,
                 exited: None,
                 stdout_closed: false,
+                stderr_closed: false,
             }),
             changed: Condvar::new(),
         });
@@ -126,9 +127,14 @@ impl Process {
 
         let tail = Arc::new(Mutex::new(VecDeque::new()));
         let errors = tail.clone();
+        let closed = shared.clone();
         thread::Builder::new()
             .name("claude-stderr".into())
-            .spawn(move || keep_tail(stderr, &errors))?;
+            .spawn(move || {
+                keep_tail(stderr, &errors);
+                closed.status.lock().unwrap().stderr_closed = true;
+                closed.changed.notify_all();
+            })?;
 
         let (notify, exited) = async_channel::bounded::<()>(1);
         let reaped = shared.clone();
@@ -287,13 +293,15 @@ fn keep_tail(stderr: impl Read, tail: &Mutex<VecDeque<String>>) {
     }
 }
 
-/// Wait a bounded time for standard output to reach end of file, so that every line is delivered before the exit is
-/// reported.
+/// Wait a bounded time for standard output and error to reach end of file, so that every line is delivered and the
+/// standard error tail is complete before the exit is reported.
 fn drain(shared: &Shared) {
     let status = shared.status.lock().unwrap();
     let _ = shared
         .changed
-        .wait_timeout_while(status, OUTPUT_DRAIN_LIMIT, |status| !status.stdout_closed)
+        .wait_timeout_while(status, OUTPUT_DRAIN_LIMIT, |status| {
+            !(status.stdout_closed && status.stderr_closed)
+        })
         .unwrap();
 }
 

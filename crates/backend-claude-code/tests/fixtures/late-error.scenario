@@ -1,0 +1,4 @@
+# The agent fails, and the last line of standard error is read only after it has exited.
+stderr Error: starting
+detach exec >/dev/null; sleep 0.3; echo "Error: authentication failed" >&2
+exit 3
