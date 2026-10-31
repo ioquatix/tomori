@@ -63,6 +63,23 @@ impl Fixture {
             .unwrap()
     }
 
+    /// Process ids of the children the fake started, waiting until there are `count`.
+    async fn children(&self, count: usize) -> Vec<u32> {
+        loop {
+            let written = fs::read_to_string(self.directory.join("children")).unwrap_or_default();
+            // Only complete lines; the fake may be part way through writing one.
+            let children: Vec<u32> = written
+                .split_inclusive('\n')
+                .filter_map(|line| line.strip_suffix('\n'))
+                .map(|line| line.parse().unwrap())
+                .collect();
+            if children.len() >= count {
+                return children;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
     /// Lines Tomori wrote to the agent's standard input.
     fn written(&self) -> Vec<Value> {
         fs::read_to_string(&self.log)
@@ -203,6 +220,97 @@ fn streams_text() {
             "Reply with exactly: hello there"
         );
         assert_eq!(users[0]["session_id"], id.as_str());
+    });
+}
+
+#[test]
+fn reports_a_reply_that_did_not_stream() {
+    run(|| async {
+        let fixture = Fixture::new("fallback");
+        let session = fixture.create().await;
+        session.send(prompt("one", "Read a.")).await.unwrap();
+
+        let events = events_until(&session, |event| *event == Event::Idle).await;
+        let first = "msg_fallback".to_string();
+        let second = "msg_fallback_2".to_string();
+        assert_eq!(
+            events,
+            vec![
+                Event::Delivered { key: "one".into() },
+                Event::Busy,
+                Event::MessageStarted {
+                    message: first.clone(),
+                    role: Role::Assistant
+                },
+                Event::TextDelta {
+                    message: first.clone(),
+                    text: "I will read the file.".into()
+                },
+                Event::ToolStarted {
+                    message: first.clone(),
+                    tool: "Read".into(),
+                    id: "toolu_fallback".into(),
+                    input: serde_json::json!({"file_path": "/tmp/work/a.txt"}),
+                },
+                Event::ToolFinished {
+                    id: "toolu_fallback".into(),
+                    error: None
+                },
+                Event::MessageCompleted {
+                    message: first.clone()
+                },
+                Event::MessageStarted {
+                    message: second.clone(),
+                    role: Role::Assistant
+                },
+                Event::TextDelta {
+                    message: second.clone(),
+                    text: "It says a.".into()
+                },
+                Event::TextDelta {
+                    message: second.clone(),
+                    text: " Done.".into()
+                },
+                Event::MessageCompleted {
+                    message: second.clone()
+                },
+                Event::Idle,
+            ]
+        );
+
+        let snapshot = session.snapshot().await.unwrap();
+        assert_eq!(snapshot.messages.len(), 3);
+        assert_eq!(
+            snapshot.messages[1].parts,
+            vec![
+                Part::Reasoning {
+                    text: "Read it first.".into()
+                },
+                Part::Text {
+                    text: "I will read the file.".into()
+                },
+                Part::Tool {
+                    id: "toolu_fallback".into(),
+                    tool: "Read".into(),
+                    input: serde_json::json!({"file_path": "/tmp/work/a.txt"}),
+                    finished: true,
+                },
+            ]
+        );
+        assert!(snapshot.messages[1].completed);
+        assert_eq!(
+            snapshot.messages[2].parts,
+            vec![
+                Part::Text {
+                    text: "It says a.".into()
+                },
+                Part::Text {
+                    text: " Done.".into()
+                },
+            ]
+        );
+
+        close(&session).await;
     });
 }
 
@@ -498,6 +606,90 @@ fn kills_a_process_that_does_not_exit() {
         let fixture = Fixture::new("hang");
         let session = fixture.create().await;
         close(&session).await;
+    });
+}
+
+/// Wait for a process to disappear, returning whether it did within a few seconds.
+#[cfg(unix)]
+fn ends(pid: u32) -> bool {
+    for _ in 0..500 {
+        // A killed child stays a zombie until its parent is reaped, so this waits until the id is gone entirely.
+        if unsafe { libc::kill(pid as libc::pid_t, 0) } != 0 {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    false
+}
+
+#[cfg(unix)]
+#[test]
+fn closing_stops_the_agents_tools() {
+    run(|| async {
+        let fixture = Fixture::new("orphan");
+        let session = fixture.create().await;
+        let children = fixture.children(1).await;
+        close(&session).await;
+        assert!(ends(children[0]), "the tool process survived");
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn an_exiting_agent_leaves_no_tools_running() {
+    run(|| async {
+        let fixture = Fixture::new("leftover");
+        let session = fixture.create().await;
+        let children = fixture.children(1).await;
+        close(&session).await;
+        assert!(ends(children[0]), "the tool process survived");
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn dropping_a_session_stops_the_agents_tools() {
+    run(|| async {
+        let fixture = Fixture::new("orphan");
+        let session = fixture.create().await;
+        let children = fixture.children(1).await;
+        drop(session);
+        assert!(ends(children[0]), "the tool process survived");
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn the_closing_reason_includes_the_last_error_line() {
+    run(|| async {
+        let fixture = Fixture::new("late-error");
+        let session = fixture.create().await;
+        let events = events_until(&session, |event| matches!(event, Event::Closed { .. })).await;
+        let Some(Event::Closed {
+            reason: Some(reason),
+        }) = events.last()
+        else {
+            panic!("expected a reason: {events:?}");
+        };
+        assert!(reason.ends_with("Error: authentication failed"), "{reason}");
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn closes_promptly_when_a_stray_process_holds_the_output() {
+    run(|| async {
+        let fixture = Fixture::new("stray");
+        let started = std::time::Instant::now();
+        let session = fixture.create().await;
+        let events = events_until(&session, |event| matches!(event, Event::Closed { .. })).await;
+        let elapsed = started.elapsed();
+        let children = fixture.children(1).await;
+        unsafe { libc::kill(children[0] as libc::pid_t, libc::SIGKILL) };
+
+        // Output written before the exit is still reported.
+        assert_eq!(events, vec![Event::Busy, Event::Closed { reason: None }]);
+        assert!(elapsed < Duration::from_secs(4), "closing took {elapsed:?}");
     });
 }
 

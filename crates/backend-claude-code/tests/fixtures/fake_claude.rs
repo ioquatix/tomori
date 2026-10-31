@@ -12,13 +12,18 @@
 //! - `stderr <text>` writes a line to standard error.
 //! - `drain` reads standard input until it closes.
 //! - `hang` ignores standard input and never exits.
+//! - `spawn <shell command>` runs the command with `sh -c` in the fake's process group with null standard streams, as a
+//!   tool would, and appends its process id to `children` next to the log.
+//! - `detach <shell command>` runs the command in a new process group that shares the fake's standard output and error,
+//!   and records it in the same way.
 //! - `exit <code>` exits immediately.
 //!
 //! When standard input closes during `expect`, the fake exits successfully, as `claude` does.
 
 use std::fs::{self, OpenOptions};
 use std::io::{self, BufRead, Write};
-use std::process::exit;
+use std::path::Path;
+use std::process::{Command, Stdio, exit};
 use std::thread;
 use std::time::Duration;
 
@@ -35,10 +40,12 @@ fn main() {
     };
     let scenario = fs::read_to_string(option("--scenario").expect("--scenario is required"))
         .expect("the scenario is readable");
+    let log_path = option("--log").expect("--log is required");
+    let children = Path::new(&log_path).with_file_name("children");
     let mut log = OpenOptions::new()
         .create(true)
         .append(true)
-        .open(option("--log").expect("--log is required"))
+        .open(&log_path)
         .expect("the log is writable");
     let session = option("--session-id")
         .or_else(|| option("--resume"))
@@ -102,6 +109,27 @@ fn main() {
             "hang" => loop {
                 thread::sleep(Duration::from_secs(60));
             },
+            "spawn" | "detach" => {
+                let mut command = Command::new("sh");
+                command.args(["-c", rest]).stdin(Stdio::null());
+                if verb == "spawn" {
+                    command.stdout(Stdio::null()).stderr(Stdio::null());
+                } else {
+                    #[cfg(unix)]
+                    std::os::unix::process::CommandExt::process_group(&mut command, 0);
+                }
+                #[expect(
+                    clippy::zombie_processes,
+                    reason = "the child is left running to stand in for a tool or a stray process"
+                )]
+                let child = command.spawn().expect("the child starts");
+                let mut file = OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&children)
+                    .expect("the children file is writable");
+                writeln!(file, "{}", child.id()).unwrap();
+            }
             "exit" => exit(rest.parse().expect("an exit code")),
             _ => panic!("unknown scenario command {verb:?}"),
         }

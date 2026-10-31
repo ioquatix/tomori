@@ -20,6 +20,9 @@ const WORKER_TOOLS: [&str; 2] = ["Agent", "Task"];
 /// The tool Claude Code uses to ask the user structured questions.
 const QUESTION_TOOL: &str = "AskUserQuestion";
 
+/// The model Claude Code names on messages it generates itself, such as API errors.
+const SYNTHETIC_MODEL: &str = "<synthetic>";
+
 /// The agent-facing reason given when a participant denies a request.
 const DENIED: &str = "The user denied this request.";
 
@@ -46,6 +49,8 @@ pub(crate) struct State {
     current: Option<usize>,
     /// Content block indexes of the current message, mapped to part indexes.
     blocks: HashMap<u64, usize>,
+    /// Text and reasoning parts of the current message whose complete content arrived in an `assistant` record.
+    settled: HashSet<usize>,
     tools: HashSet<String>,
     /// Unresolved `can_use_tool` requests by request id, oldest first.
     pending: Vec<(String, Pending)>,
@@ -68,6 +73,7 @@ impl State {
             messages: Vec::new(),
             current: None,
             blocks: HashMap::new(),
+            settled: HashSet::new(),
             tools: HashSet::new(),
             pending: Vec::new(),
             workers: Vec::new(),
@@ -106,7 +112,7 @@ impl State {
         let uuid = uuid::Uuid::new_v4().to_string();
         let line = json!({
             "type": "user",
-            "message": {"role": "user", "content": prompt.text},
+            "message": {"role": "user", "content": message_text(&prompt.text)},
             "parent_tool_use_id": null,
             "session_id": self.session,
             "uuid": uuid,
@@ -302,24 +308,13 @@ impl State {
 
     fn stream_event(&mut self, event: &Value, effects: &mut Effects) {
         match str_field(event, "type") {
-            Some("message_start") => {
-                self.begin_turn(effects);
-                self.close_message(effects);
-                let Some(id) = str_field(&event["message"], "id") else {
-                    return;
-                };
-                self.messages.push(SnapshotMessage {
-                    id: id.into(),
-                    role: Role::Assistant,
-                    parts: Vec::new(),
-                    completed: false,
-                });
-                self.current = Some(self.messages.len() - 1);
-                effects.events.push(Event::MessageStarted {
-                    message: id.into(),
-                    role: Role::Assistant,
-                });
-            }
+            Some("message_start") => match str_field(&event["message"], "id") {
+                Some(id) => self.start_message(id, effects),
+                None => {
+                    self.begin_turn(effects);
+                    self.close_message(effects);
+                }
+            },
             Some("content_block_start") => {
                 let Some(message) = self.current.map(|index| &mut self.messages[index]) else {
                     return;
@@ -369,6 +364,9 @@ impl State {
         }
     }
 
+    /// One or more complete assistant content blocks. With partial messages, each block streams as stream events first
+    /// and the record repeats it; without them, as after Claude Code falls back to a non-streaming request, the record is
+    /// the only report of the message.
     fn assistant(&mut self, value: &Value, effects: &mut Effects) {
         let parent = str_field(value, "parent_tool_use_id");
         let message = &value["message"];
@@ -378,47 +376,137 @@ impl State {
         let Some(content) = message["content"].as_array() else {
             return;
         };
+        // Synthetic messages, such as API errors, are not replies; the turn's result reports the failure.
+        if str_field(message, "model") == Some(SYNTHETIC_MODEL)
+            || value["isApiErrorMessage"] == true
+        {
+            return;
+        }
+        if parent.is_none() && !self.messages.iter().any(|m| m.id == message_id) {
+            self.start_message(message_id, effects);
+        }
         for block in content {
-            if str_field(block, "type") != Some("tool_use") {
-                continue;
-            }
-            let (Some(id), Some(tool)) = (str_field(block, "id"), str_field(block, "name")) else {
-                continue;
-            };
-            let input = block.get("input").cloned().unwrap_or(Value::Null);
-
-            if WORKER_TOOLS.contains(&tool) && !self.workers.iter().any(|worker| worker.id == id) {
-                let title = str_field(&input, "description")
-                    .or_else(|| str_field(&input, "subagent_type"))
-                    .unwrap_or(tool);
-                self.workers.push(Worker {
-                    id: id.into(),
-                    parent: Some(parent.unwrap_or(&self.session).into()),
-                    title: title.into(),
-                    state: WorkerState::Running,
-                });
-                effects.events.push(Event::WorkersChanged {
-                    workers: self.workers.clone(),
-                });
-            }
-
-            // Only the session's own tool activity is reported; subagent activity is summarized by its worker.
-            if parent.is_none() && self.tools.insert(id.into()) {
-                if let Some(message) = self.messages.iter_mut().rev().find(|m| m.id == message_id) {
-                    message.parts.push(Part::Tool {
-                        id: id.into(),
-                        tool: tool.into(),
-                        input: input.clone(),
-                        finished: false,
-                    });
+            match str_field(block, "type") {
+                Some("text") if parent.is_none() => {
+                    let text = str_field(block, "text").unwrap_or_default();
+                    self.settle(message_id, Part::Text { text: text.into() }, effects);
                 }
-                effects.events.push(Event::ToolStarted {
-                    message: message_id.into(),
-                    tool: tool.into(),
+                Some("thinking") if parent.is_none() => {
+                    let text = str_field(block, "thinking").unwrap_or_default();
+                    self.settle(message_id, Part::Reasoning { text: text.into() }, effects);
+                }
+                Some("tool_use") => self.tool_use(parent, message_id, block, effects),
+                _ => {}
+            }
+        }
+    }
+
+    /// Reconcile a complete text or reasoning block with what streamed for it. The block completes the earliest part of
+    /// its kind not yet settled, and only text that did not stream is reported; a block that never streamed is added.
+    fn settle(&mut self, message_id: &str, block: Part, effects: &mut Effects) {
+        let Some(current) = self
+            .current
+            .filter(|index| self.messages[*index].id == message_id)
+        else {
+            // The message already completed, so its blocks have streamed.
+            return;
+        };
+        let message = &mut self.messages[current];
+        let reasoning = matches!(block, Part::Reasoning { .. });
+        let (Part::Text { text: complete } | Part::Reasoning { text: complete }) = block else {
+            unreachable!("only text and reasoning blocks are settled");
+        };
+        let found = message.parts.iter().enumerate().position(|(index, part)| {
+            !self.settled.contains(&index)
+                && match part {
+                    Part::Text { .. } => !reasoning,
+                    Part::Reasoning { .. } => reasoning,
+                    Part::Tool { .. } => false,
+                }
+        });
+        let (index, missing) = match found {
+            Some(index) => {
+                let (Part::Text { text } | Part::Reasoning { text }) = &mut message.parts[index]
+                else {
+                    unreachable!("the part has the block's kind");
+                };
+                // Streamed text is never retracted, so a block that disagrees with it adds nothing.
+                let missing = complete
+                    .strip_prefix(text.as_str())
+                    .unwrap_or_default()
+                    .to_owned();
+                text.push_str(&missing);
+                (index, missing)
+            }
+            // Claude Code omits thinking it does not display, leaving an empty block.
+            None if complete.is_empty() => return,
+            None => {
+                message.parts.push(if reasoning {
+                    Part::Reasoning {
+                        text: complete.clone(),
+                    }
+                } else {
+                    Part::Text {
+                        text: complete.clone(),
+                    }
+                });
+                (message.parts.len() - 1, complete)
+            }
+        };
+        self.settled.insert(index);
+        // Later deltas for the block are already included.
+        self.blocks.retain(|_, part| *part != index);
+        if !reasoning && !missing.is_empty() {
+            effects.events.push(Event::TextDelta {
+                message: message.id.clone(),
+                text: missing,
+            });
+        }
+    }
+
+    fn tool_use(
+        &mut self,
+        parent: Option<&str>,
+        message_id: &str,
+        block: &Value,
+        effects: &mut Effects,
+    ) {
+        let (Some(id), Some(tool)) = (str_field(block, "id"), str_field(block, "name")) else {
+            return;
+        };
+        let input = block.get("input").cloned().unwrap_or(Value::Null);
+
+        if WORKER_TOOLS.contains(&tool) && !self.workers.iter().any(|worker| worker.id == id) {
+            let title = str_field(&input, "description")
+                .or_else(|| str_field(&input, "subagent_type"))
+                .unwrap_or(tool);
+            self.workers.push(Worker {
+                id: id.into(),
+                parent: Some(parent.unwrap_or(&self.session).into()),
+                title: title.into(),
+                state: WorkerState::Running,
+            });
+            effects.events.push(Event::WorkersChanged {
+                workers: self.workers.clone(),
+            });
+        }
+
+        // Only the session's own tool activity is reported; subagent activity is summarized by its worker.
+        if parent.is_none() && self.tools.insert(id.into()) {
+            if let Some(message) = self.messages.iter_mut().rev().find(|m| m.id == message_id) {
+                message.parts.push(Part::Tool {
                     id: id.into(),
-                    input,
+                    tool: tool.into(),
+                    input: input.clone(),
+                    finished: false,
                 });
             }
+            effects.events.push(Event::ToolStarted {
+                message: message_id.into(),
+                tool: tool.into(),
+                id: id.into(),
+                input,
+            });
         }
     }
 
@@ -532,9 +620,27 @@ impl State {
         self.begin_turn(effects);
     }
 
+    /// Complete the current assistant message and start the next one.
+    fn start_message(&mut self, id: &str, effects: &mut Effects) {
+        self.begin_turn(effects);
+        self.close_message(effects);
+        self.messages.push(SnapshotMessage {
+            id: id.into(),
+            role: Role::Assistant,
+            parts: Vec::new(),
+            completed: false,
+        });
+        self.current = Some(self.messages.len() - 1);
+        effects.events.push(Event::MessageStarted {
+            message: id.into(),
+            role: Role::Assistant,
+        });
+    }
+
     fn close_message(&mut self, effects: &mut Effects) {
         if let Some(index) = self.current.take() {
             self.blocks.clear();
+            self.settled.clear();
             let message = &mut self.messages[index];
             message.completed = true;
             effects.events.push(Event::MessageCompleted {
@@ -559,6 +665,19 @@ impl State {
             .iter()
             .position(|(pending, _)| pending == id)
             .ok_or_else(|| Error::new(ErrorKind::NotFound, format!("no pending request {id:?}")))
+    }
+}
+
+/// Prompt text as sent to Claude Code, which never runs it as a slash command.
+///
+/// Claude Code 2.1 runs a user message as a slash command only when its raw text begins with `/`; it does not trim
+/// the text first. Text that would begin with `/` gains a leading space, a visible change that the model reads past.
+/// Text that already begins with whitespace is sent unchanged.
+fn message_text(text: &str) -> String {
+    if text.starts_with('/') {
+        format!(" {text}")
+    } else {
+        text.into()
     }
 }
 
@@ -649,6 +768,43 @@ mod tests {
             "request_id": id,
             "request": {"subtype": "can_use_tool", "tool_name": tool, "input": input, "tool_use_id": "toolu_1"},
         })
+    }
+
+    #[test]
+    fn prompts_never_run_slash_commands() {
+        let mut state = State::new("session".into());
+        let mut content = |text: &str| {
+            let prompt = Prompt {
+                key: text.into(),
+                text: text.into(),
+            };
+            state.prompt(prompt).unwrap()["message"]["content"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        };
+        assert_eq!(content("/model opus"), " /model opus");
+        assert_eq!(content("/model: hello"), " /model: hello");
+        assert_eq!(content("  /cost"), "  /cost");
+        assert_eq!(content("Samuel: /cost"), "Samuel: /cost");
+        assert_eq!(content("Read /etc/hosts."), "Read /etc/hosts.");
+
+        // The delivered message is reported as the participant said it.
+        let mut state = State::new("session".into());
+        let line = state
+            .prompt(Prompt {
+                key: "one".into(),
+                text: "/compact".into(),
+            })
+            .unwrap();
+        let replay = json!({"type": "user", "isReplay": true, "uuid": line["uuid"], "message": line["message"]});
+        handle(&mut state, replay);
+        assert_eq!(
+            state.snapshot().messages[0].parts,
+            vec![Part::Text {
+                text: "/compact".into()
+            }]
+        );
     }
 
     #[test]
@@ -779,6 +935,152 @@ mod tests {
             vec![
                 Event::Error {
                     message: "API Error: 529 Overloaded".into()
+                },
+                Event::Idle,
+            ]
+        );
+    }
+
+    fn stream(event: Value) -> Value {
+        json!({"type": "stream_event", "event": event, "parent_tool_use_id": null})
+    }
+
+    fn assistant(id: &str, content: Value) -> Value {
+        json!({
+            "type": "assistant",
+            "parent_tool_use_id": null,
+            "message": {"model": "claude-haiku-5-5", "id": id, "content": content},
+        })
+    }
+
+    fn text_delta(index: u64, text: &str) -> Value {
+        stream(
+            json!({"type": "content_block_delta", "index": index, "delta": {"type": "text_delta", "text": text}}),
+        )
+    }
+
+    fn deltas(events: &[Event]) -> String {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                Event::TextDelta { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn complete_records_do_not_repeat_streamed_text() {
+        let mut state = State::new("session".into());
+        let mut events = handle(
+            &mut state,
+            stream(json!({"type": "message_start", "message": {"id": "msg_1"}})),
+        );
+        for event in [
+            stream(
+                json!({"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}),
+            ),
+            text_delta(0, "Hel"),
+            // The record completes the block, including text that did not stream.
+            assistant("msg_1", json!([{"type": "text", "text": "Hello."}])),
+            // A late delta is already included.
+            text_delta(0, "lo."),
+            stream(json!({"type": "content_block_stop", "index": 0})),
+            stream(
+                json!({"type": "content_block_start", "index": 1, "content_block": {"type": "text", "text": ""}}),
+            ),
+            text_delta(1, " Bye."),
+            // A record that disagrees with streamed text cannot retract it.
+            assistant("msg_1", json!([{"type": "text", "text": " Goodbye."}])),
+            text_delta(1, " Ignored."),
+            // A block that did not stream is reported whole.
+            assistant("msg_1", json!([{"type": "text", "text": " Other."}])),
+            stream(json!({"type": "message_stop"})),
+            // A record for a completed message has streamed.
+            assistant("msg_1", json!([{"type": "text", "text": "Again."}])),
+        ] {
+            events.extend(handle(&mut state, event));
+        }
+        assert_eq!(deltas(&events), "Hello. Bye. Other.");
+        assert_eq!(
+            state.snapshot().messages[0].parts,
+            vec![
+                Part::Text {
+                    text: "Hello.".into()
+                },
+                Part::Text {
+                    text: " Bye.".into()
+                },
+                Part::Text {
+                    text: " Other.".into()
+                },
+            ]
+        );
+        assert_eq!(
+            events.last(),
+            Some(&Event::MessageCompleted {
+                message: "msg_1".into()
+            })
+        );
+    }
+
+    #[test]
+    fn a_fallback_after_a_partial_stream_starts_a_new_message() {
+        let mut state = State::new("session".into());
+        let mut events = handle(
+            &mut state,
+            stream(json!({"type": "message_start", "message": {"id": "msg_partial"}})),
+        );
+        // The stream ended without a complete block, so Claude Code retried without streaming.
+        events.extend(handle(
+            &mut state,
+            assistant(
+                "msg_full",
+                json!([{"type": "thinking", "thinking": "", "signature": "x"}]),
+            ),
+        ));
+        events.extend(handle(
+            &mut state,
+            assistant("msg_full", json!([{"type": "text", "text": "Reply."}])),
+        ));
+        assert_eq!(
+            state.snapshot().messages[1].parts,
+            vec![Part::Text {
+                text: "Reply.".into()
+            }]
+        );
+        // Synthetic messages are not replies.
+        events.extend(handle(
+            &mut state,
+            json!({
+                "type": "assistant",
+                "parent_tool_use_id": null,
+                "message": {"model": "<synthetic>", "id": "msg_error", "content": [{"type": "text", "text": "API Error"}]},
+            }),
+        ));
+        events.extend(handle(
+            &mut state,
+            json!({"type": "result", "subtype": "success", "is_error": false}),
+        ));
+        let started = |id: &str| Event::MessageStarted {
+            message: id.into(),
+            role: Role::Assistant,
+        };
+        assert_eq!(
+            events,
+            vec![
+                Event::Busy,
+                started("msg_partial"),
+                Event::MessageCompleted {
+                    message: "msg_partial".into()
+                },
+                started("msg_full"),
+                Event::TextDelta {
+                    message: "msg_full".into(),
+                    text: "Reply.".into()
+                },
+                Event::MessageCompleted {
+                    message: "msg_full".into()
                 },
                 Event::Idle,
             ]
