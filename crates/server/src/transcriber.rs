@@ -65,14 +65,28 @@ impl TranscriptSink {
 }
 
 /// A transcriber for servers without speech recognition: every utterance fails visibly when it ends.
-#[derive(Default)]
 pub struct NullTranscriber {
+    reason: String,
     sinks: Mutex<HashMap<UtteranceId, TranscriptSink>>,
+}
+
+impl Default for NullTranscriber {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl NullTranscriber {
     pub fn new() -> Self {
-        Self::default()
+        Self::with_reason("Speech recognition is not available on this server.")
+    }
+
+    /// Fail every utterance with `reason`, such as how to install the missing engine.
+    pub fn with_reason(reason: impl Into<String>) -> Self {
+        Self {
+            reason: reason.into(),
+            sinks: Mutex::default(),
+        }
     }
 }
 
@@ -86,7 +100,7 @@ impl Transcriber for NullTranscriber {
     fn end(&self, utterance: UtteranceId) {
         let sink = self.sinks.lock().unwrap().remove(&utterance);
         if let Some(sink) = sink {
-            sink.fail("Speech recognition is not available on this server.");
+            sink.fail(&self.reason);
         }
     }
 

@@ -20,14 +20,16 @@ use crate::application::Application;
 use crate::backends::{AnySession, Backends};
 use crate::hub::{CreateRequest, Hub, SpaceCommand};
 use crate::transcriber::Transcriber;
+use crate::voice::{Voice, Voices};
 
 /// A Tomori server: the HTTP application plus the supervisor that owns every space's backend session.
 ///
-/// [`run`](Self::run) serves until cancelled. All work is owned by that one future: connections are joined by the HTTP server, and space drivers by the supervisor. No detached tasks are created.
+/// [`run`](Self::run) serves until cancelled. All work is owned by that one future: connections are joined by the HTTP server, and space drivers by the supervisor. No detached tasks are created. Speech recognition and synthesis run on the speech crate's own threads, which outlive a space only to finish speech already queued.
 pub struct Server {
     hub: Arc<Hub>,
     jobs: async_channel::Receiver<CreateRequest>,
     application: Application,
+    voices: Voices,
 }
 
 /// Open a listening TCP socket.
@@ -60,7 +62,15 @@ impl Server {
             application: Application::new(hub.clone()),
             hub,
             jobs,
+            voices: Voices::default(),
         }
+    }
+
+    /// Speak each space's assistant replies with `synthesizer`, shared by every space. Without one, spaces are silent.
+    #[cfg(feature = "speech")]
+    pub fn with_synthesizer(mut self, synthesizer: impl speech::Synthesizer + 'static) -> Self {
+        self.voices = Voices::new(synthesizer);
+        self
     }
 
     /// Serve `listener` until `cancellation` is cancelled, then close every session and connection.
@@ -106,7 +116,9 @@ impl Server {
                 }
             };
             match job {
-                Ok(request) => spaces.push(run_space(self.hub.clone(), request)),
+                Ok(request) => {
+                    spaces.push(run_space(self.hub.clone(), request, self.voices.clone()))
+                }
                 Err(_) => break,
             }
         }
@@ -116,7 +128,7 @@ impl Server {
 }
 
 /// Start one space's session, then drive it until it closes or the server shuts down.
-async fn run_space(hub: Arc<Hub>, request: CreateRequest) {
+async fn run_space(hub: Arc<Hub>, request: CreateRequest, voices: Voices) {
     let Some(backend) = hub.backends.get(&request.backend) else {
         return;
     };
@@ -153,25 +165,31 @@ async fn run_space(hub: Arc<Hub>, request: CreateRequest) {
     if let Some(error) = error {
         hub.space_event(&space, Event::Error { message: error });
     }
-    let error = drive(&hub, &space, &session, receiver).await;
+    let voice = voices.start(&hub, &space);
+    let error = drive(&hub, &space, &session, receiver, voice).await;
     hub.space_ended(&space, error);
     if let Err(error) = session.close().await {
         log::warn!("Closing the session of {space} failed: {error}");
     }
 }
 
-/// Forward session events to the hub while performing the space's commands. Returns why the session stopped, if it failed.
+/// Forward session events to the hub and the space's voice while performing the space's commands. Returns why the session stopped, if it failed.
 async fn drive(
     hub: &Hub,
     space: &str,
     session: &AnySession,
     commands: async_channel::Receiver<SpaceCommand>,
+    mut voice: Option<Voice>,
 ) -> Option<String> {
     let events = async {
         loop {
             match session.next_event().await {
                 Ok(event) => {
                     let closed = matches!(event, Event::Closed { .. });
+                    // Speech segmentation and queueing never wait for synthesis, and happen outside the hub lock.
+                    if let Some(voice) = voice.as_mut() {
+                        voice.observe(&event);
+                    }
                     hub.space_event(space, event);
                     if closed {
                         return None;
