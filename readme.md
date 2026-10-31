@@ -56,12 +56,25 @@ TOMORI_SKY_PREVIEW=/tmp/opencode/tomori-sky.png cargo test --locked -p client-qu
 
 ## Join a space on a Tomori server
 
-Start the server on the PC with the Claude Code backend, in the directory its
-spaces may use (see [design/server.md](design/server.md)):
+Start the server on the PC with the Claude Code backend (see
+[design/server.md](design/server.md)). Spaces may run in the directory the
+server starts in or beneath it; give `--workspace-root PATH`, repeated as
+needed, to allow other directories instead:
 
 ```sh
 cargo run -p server --bin tomori-server -- --backend claude-code
 ```
+
+The headset joins existing spaces but can't create them yet, so create one from
+the PC with the example client: give it the server's address, then type
+`create` with the backend and a directory beneath a workspace root.
+
+```sh
+cargo run -p client --example connect -- 127.0.0.1:8765
+create claude-code /home/sam/project
+```
+
+The space stays on the server after the example quits.
 
 It advertises itself with Bonjour, so the headset lists it when both are on the
 same network. Over USB, `bash scripts/android.sh run` forwards the headset's
@@ -72,7 +85,7 @@ To skip the list, give an address:
 intent extras `tomori.server` and `tomori.name` to `am start`. Your name
 defaults to the headset's model name. The headset remembers the last server it
 connected to, and connects to it again when it finds it, unless you move the
-selection first. The headset joins existing spaces; it can't create them yet.
+selection first.
 
 ### Controls
 
