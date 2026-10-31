@@ -164,3 +164,79 @@ fn plays_a_source_that_restarts_its_sequence() {
     assert_eq!(mix(&mut mixer, 12), [2; 12]);
     assert_eq!(mixer.statistics().late_frames, 0);
 }
+
+#[test]
+fn reports_whether_each_source_is_playing() {
+    let mut mixer = mixer();
+    assert!(!mixer.is_source_playing(1));
+    mixer.push(frame(1, 0, 100));
+    mixer.push(frame(1, 1, 100));
+    assert!(!mixer.is_source_playing(1), "buffering is not playing");
+    mix(&mut mixer, 4);
+    assert!(mixer.is_source_playing(1));
+    assert!(!mixer.is_source_playing(2));
+    // Running out of audio returns the source to buffering.
+    mix(&mut mixer, 8);
+    assert!(!mixer.is_source_playing(1));
+}
+
+#[test]
+fn measures_the_level_each_source_played() {
+    let mut mixer = mixer();
+    assert_eq!(mixer.source_level(1), 0.0);
+    let loud = i16::MAX / 2;
+    for sequence in 0..4 {
+        mixer.push(frame(1, sequence, loud));
+        mixer.push(frame(2, sequence, loud / 10));
+    }
+    mix(&mut mixer, 4);
+    let first = mixer.source_level(1);
+    let second = mixer.source_level(2);
+    assert!((first - 0.5).abs() < 0.01, "{first}");
+    assert!((second - 0.05).abs() < 0.01, "{second}");
+    assert_eq!(mixer.source_level(3), 0.0);
+}
+
+#[test]
+fn levels_fall_gradually_when_a_source_goes_quiet() {
+    let mut mixer = mixer();
+    mixer.push(frame(1, 0, i16::MAX / 2));
+    mixer.push(frame(1, 1, i16::MAX / 2));
+    mix(&mut mixer, 8);
+    let playing = mixer.source_level(1);
+    // 30 ms of silence at 1 kHz, less than the release time.
+    mix(&mut mixer, 30);
+    let falling = mixer.source_level(1);
+    assert!(
+        falling > 0.0 && falling < playing,
+        "{falling} after {playing}"
+    );
+    // Long after, the level is close to zero.
+    mix(&mut mixer, 1_000);
+    assert!(mixer.source_level(1) < 0.001);
+}
+
+#[test]
+fn muted_agent_speech_plays_silently() {
+    let mut mixer = mixer();
+    mixer.set_agent_muted(true);
+    mixer.push(frame(AGENT_SOURCE, 0, 1_000));
+    mixer.push(frame(AGENT_SOURCE, 1, 1_000));
+    mix(&mut mixer, 4);
+    assert!(mixer.is_source_playing(AGENT_SOURCE));
+    assert_eq!(mixer.source_level(AGENT_SOURCE), 0.0);
+}
+
+#[test]
+fn clearing_forgets_levels() {
+    let mut mixer = mixer();
+    mixer.push(frame(1, 0, 1_000));
+    mixer.push(frame(2, 0, 1_000));
+    mix(&mut mixer, 4);
+    mixer.clear_source(1);
+    assert_eq!(mixer.source_level(1), 0.0);
+    assert!(mixer.source_level(2) > 0.0);
+    mixer.clear();
+    assert_eq!(mixer.source_level(2), 0.0);
+    assert!(!mixer.is_source_playing(2));
+}
