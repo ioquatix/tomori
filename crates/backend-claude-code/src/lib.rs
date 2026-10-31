@@ -19,6 +19,7 @@ use std::time::{Duration, SystemTime};
 
 use backend::{Capabilities, Error, ErrorKind, Result, SessionSpec, SessionSummary};
 use serde_json::Value;
+use unicode_normalization::UnicodeNormalization;
 
 pub use session::ClaudeCodeSession;
 
@@ -185,12 +186,48 @@ impl backend::Backend for ClaudeCode {
     }
 }
 
-/// Claude Code names a project's transcript directory after its path, with every other character replaced by `-`.
+/// The longest project directory name Claude Code uses before shortening it with a hash.
+const PROJECT_NAME_LENGTH_LIMIT: usize = 200;
+
+/// The name Claude Code gives a project's transcript directory, as Claude Code 2.1 computes it from the canonical path:
+/// the NFC normalized path with every UTF-16 code unit other than an ASCII letter or digit replaced by `-`, and a name
+/// longer than 200 units cut to 200 and followed by `-` and a hash of the path.
 fn project_name(directory: &str) -> String {
-    directory
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-        .collect()
+    let directory: String = directory.nfc().collect();
+    let name: String = directory
+        .encode_utf16()
+        .map(|unit| match char::from_u32(unit.into()) {
+            Some(c) if c.is_ascii_alphanumeric() => c,
+            _ => '-',
+        })
+        .collect();
+    if name.len() <= PROJECT_NAME_LENGTH_LIMIT {
+        return name;
+    }
+    format!(
+        "{}-{}",
+        &name[..PROJECT_NAME_LENGTH_LIMIT],
+        base36(path_hash(&directory).unsigned_abs())
+    )
+}
+
+/// Claude Code's path hash: the 32-bit Java string hash of the path's UTF-16 code units.
+fn path_hash(path: &str) -> i32 {
+    path.encode_utf16().fold(0i32, |hash, unit| {
+        hash.wrapping_mul(31).wrapping_add(unit.into())
+    })
+}
+
+fn base36(mut value: u32) -> String {
+    let mut digits = Vec::new();
+    loop {
+        digits.push(char::from_digit(value % 36, 36).expect("a base 36 digit"));
+        value /= 36;
+        if value == 0 {
+            break;
+        }
+    }
+    digits.iter().rev().collect()
 }
 
 /// The session's title: one set by the user, else the generated one, else its first prompt. `None` for transcripts
@@ -248,5 +285,40 @@ mod tests {
             project_name("/Users/samuel/Developer/tomori/.claude/worktrees/a_b"),
             "-Users-samuel-Developer-tomori--claude-worktrees-a-b"
         );
+    }
+
+    #[test]
+    fn project_names_replace_each_utf16_code_unit() {
+        // A decomposed accent composes to one unit; a character outside the Basic Multilingual Plane is two.
+        assert_eq!(project_name("/tmp/cafe\u{301}/\u{1F600}"), "-tmp-caf----");
+        assert_eq!(project_name("/tmp/日本"), "-tmp---");
+    }
+
+    #[test]
+    fn long_project_names_end_with_a_hash() {
+        // Values computed with Claude Code 2.1.311's own functions.
+        assert_eq!(path_hash(""), 0);
+        assert_eq!(path_hash("hello"), 99162322);
+        assert_eq!(base36(0), "0");
+        assert_eq!(base36(35), "z");
+        assert_eq!(base36(36), "10");
+
+        let directory = format!("/tmp/{}", "a".repeat(200));
+        assert_eq!(path_hash(&directory), -628621273);
+        assert_eq!(
+            project_name(&directory),
+            format!("-tmp-{}-ae9ja1", "a".repeat(195))
+        );
+        let directory = format!(
+            "/Users/samuel/{}cafe\u{301}-\u{1F600}",
+            "projects/".repeat(25)
+        );
+        assert_eq!(
+            project_name(&directory),
+            format!("-Users-samuel-{}projec-se2com", "projects-".repeat(20))
+        );
+
+        let exactly = format!("/{}", "a".repeat(199));
+        assert_eq!(project_name(&exactly).len(), 200);
     }
 }
