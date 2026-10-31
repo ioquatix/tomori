@@ -4,7 +4,11 @@
 //! Every server frame stays within the protocol's frame limit, whatever clients and the agent send. See `design/server.md`.
 
 use protocol::{ClientMessage, MAX_FRAME_BYTES, QueueState, ServerMessage};
-use server::test_support::{TIMEOUT, TestClient, TestServer};
+use std::sync::Arc;
+
+use server::Server;
+use server::fake::FakeBackend;
+use server::test_support::{TIMEOUT, TestClient, TestServer, TextTranscriber};
 
 /// The snapshot budget documented in `design/server.md`.
 const BUDGET: usize = MAX_FRAME_BYTES / 4;
@@ -88,11 +92,25 @@ fn an_oversized_hello_is_refused() {
 
 #[test]
 fn the_lobby_listing_stays_within_the_budget() {
-    let server = TestServer::start();
+    const SPACES: usize = 320;
+    let server = TestServer::with_server(FakeBackend::new(), |backends| {
+        Server::new(backends, Arc::new(TextTranscriber::default())).with_max_spaces(SPACES)
+    });
     let lobby = server.connect("lobby", "Lobby");
     let mut creator = server.connect("creator", "Creator");
-    let directory = format!("/{}", "d".repeat(4000));
-    for index in 0..100 {
+    // Spaces run in existing directories beneath the workspace roots, and a path is at most 1024 bytes on macOS, so many spaces in a long directory exceed the budget instead.
+    let mut directory = std::env::temp_dir()
+        .canonicalize()
+        .unwrap()
+        .join(format!("tomori-lobby-{}", std::process::id()));
+    let scratch = directory.clone();
+    for part in ['a', 'b', 'c', 'd'] {
+        directory.push(part.to_string().repeat(220));
+    }
+    std::fs::create_dir_all(&directory).unwrap();
+    let directory = directory.to_str().unwrap().to_owned();
+    assert!(json_len(&directory) * SPACES > BUDGET);
+    for index in 0..SPACES {
         creator.send(&ClientMessage::CreateSpace {
             title: format!("Space {index}"),
             backend: "fake".into(),
@@ -105,14 +123,17 @@ fn the_lobby_listing_stays_within_the_budget() {
     // The lobby client decodes every frame it receives, so an oversized one would fail here.
     let spaces = lobby.wait_for(|message| match message {
         ServerMessage::Spaces { spaces }
-            if spaces.iter().any(|space| space.title == "Space 99") =>
+            if spaces
+                .iter()
+                .any(|space| space.title == format!("Space {}", SPACES - 1)) =>
         {
             Some(spaces.clone())
         }
         _ => None,
     });
+    let _ = std::fs::remove_dir_all(scratch);
     assert!(json_len(&spaces) <= BUDGET);
-    assert_eq!(spaces.len(), 100);
+    assert_eq!(spaces.len(), SPACES);
 }
 
 #[test]

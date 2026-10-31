@@ -25,6 +25,10 @@ name = "spaces"
 required-features = ["fake"]
 
 [[test]]
+name = "workspaces"
+required-features = ["fake"]
+
+[[test]]
 name = "speech"
 required-features = ["fake", "speech"]
 

@@ -20,7 +20,7 @@ use protocol::{
 };
 
 use crate::fake::{FAKE_BACKEND_NAME, FakeBackend};
-use crate::{Backends, Server, Transcriber, TranscriptSink, UtteranceId};
+use crate::{Backends, Server, Transcriber, TranscriptSink, UtteranceId, WorkspaceRoots};
 
 /// How long test helpers wait for an expected message.
 pub const TIMEOUT: Duration = Duration::from_secs(5);
@@ -111,7 +111,11 @@ impl TestServer {
                     capacity: 256,
                 })
                 .expect("the scheduler starts");
-                let server = build(Backends::new().with(backend));
+                // Tests name `/tmp` or the temporary directory unless they give their own roots.
+                let roots = WorkspaceRoots::new(["/tmp".into(), std::env::temp_dir()])
+                    .expect("the temporary directories exist");
+                let server =
+                    build(Backends::new().with(backend)).with_default_workspace_roots(roots);
                 block_on(async {
                     let address = "127.0.0.1:0".parse().unwrap();
                     let listener = crate::bind(&scheduler, address, &cancellation)

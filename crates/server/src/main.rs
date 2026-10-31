@@ -1,7 +1,7 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-//! `tomori-server [--bind ADDRESS] [--backend NAME]... [--speech-root PATH] [--name NAME] [--no-advertise] [--keepalive-interval SECONDS] [--keepalive-timeout SECONDS] [--request-timeout SECONDS]`
+//! `tomori-server [--bind ADDRESS] [--backend NAME]... [--speech-root PATH] [--name NAME] [--no-advertise] [--keepalive-interval SECONDS] [--keepalive-timeout SECONDS] [--request-timeout SECONDS] [--workspace-root PATH]... [--max-spaces COUNT]`
 //!
 //! Serves Tomori clients on the local network, advertised with Bonjour as `_tomori._tcp`. There is no authentication yet: anyone who can reach the port can join a space. See `design/server.md`.
 
@@ -21,11 +21,12 @@ use base_scheduler::{Cancellation, SocketLocalAddress};
 use base_scheduler_direct::{DirectOptions, DirectScheduler};
 use futures_lite::future::block_on;
 use protocol::Keepalive;
-use server::{Backends, NullTranscriber, Server, Transcriber};
+use server::{Backends, NullTranscriber, Server, Transcriber, WorkspaceRoots};
 
 const USAGE: &str = "Usage: tomori-server [--bind ADDRESS] [--backend NAME]... [--speech-root PATH]
                      [--name NAME] [--no-advertise] [--keepalive-interval SECONDS]
                      [--keepalive-timeout SECONDS] [--request-timeout SECONDS]
+                     [--workspace-root PATH]... [--max-spaces COUNT]
 
 Options:
   --bind ADDRESS       Listen address (default 0.0.0.0:8765).
@@ -44,6 +45,10 @@ Options:
   --request-timeout SECONDS
                        Close a connection that has not sent a request, or said Hello, within this
                        long (default 10).
+  --workspace-root PATH
+                       Let spaces run in this directory or beneath it; repeat for several. Without
+                       it, the only root is your home directory. Each root must exist.
+  --max-spaces COUNT   The most spaces whose agent sessions run at once (default 8).
   --help               Show this help.";
 
 struct Arguments {
@@ -54,6 +59,9 @@ struct Arguments {
     advertise: bool,
     keepalive: Keepalive,
     request_timeout: Option<Duration>,
+    /// Empty for the default, the home directory.
+    workspace_roots: Vec<PathBuf>,
+    max_spaces: usize,
 }
 
 /// A positive number of seconds, such as `5` or `0.5`.
@@ -76,6 +84,8 @@ fn parse(mut arguments: impl Iterator<Item = String>) -> Result<Arguments, Strin
         advertise: true,
         keepalive: Keepalive::DEFAULT,
         request_timeout: None,
+        workspace_roots: Vec::new(),
+        max_spaces: server::DEFAULT_MAX_SPACES,
     };
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
@@ -107,6 +117,20 @@ fn parse(mut arguments: impl Iterator<Item = String>) -> Result<Arguments, Strin
             "--request-timeout" => {
                 parsed.request_timeout = Some(seconds(&argument, arguments.next())?)
             }
+            "--workspace-root" => parsed.workspace_roots.push(
+                arguments
+                    .next()
+                    .ok_or("--workspace-root needs a directory")?
+                    .into(),
+            ),
+            "--max-spaces" => {
+                let value = arguments.next().ok_or("--max-spaces needs a count")?;
+                parsed.max_spaces = value
+                    .parse::<usize>()
+                    .ok()
+                    .filter(|count| *count > 0)
+                    .ok_or_else(|| format!("--max-spaces needs a positive count, not {value:?}"))?;
+            }
             "--help" | "-h" => return Err(USAGE.to_owned()),
             other => return Err(format!("unknown argument {other:?}\n\n{USAGE}")),
         }
@@ -121,6 +145,23 @@ fn parse(mut arguments: impl Iterator<Item = String>) -> Result<Arguments, Strin
         parsed.backends.push("fake".to_owned());
     }
     Ok(parsed)
+}
+
+/// The canonical workspace roots: those given, or the home directory. A root that does not exist is an error.
+fn workspace_roots(roots: &[PathBuf]) -> Result<WorkspaceRoots, String> {
+    let roots = if roots.is_empty() {
+        WorkspaceRoots::home()
+    } else {
+        WorkspaceRoots::new(roots)
+    }
+    .map_err(|error| format!("Invalid --workspace-root: {error}."))?;
+    let listed: Vec<String> = roots
+        .roots()
+        .iter()
+        .map(|root| root.display().to_string())
+        .collect();
+    eprintln!("Workspace roots: {}.", listed.join(", "));
+    Ok(roots)
 }
 
 /// The default display name: the host name without its domain, such as `studio` for `studio.local`.
@@ -264,6 +305,13 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    let roots = match workspace_roots(&arguments.workspace_roots) {
+        Ok(roots) => roots,
+        Err(message) => {
+            eprintln!("{message}");
+            return ExitCode::FAILURE;
+        }
+    };
     let root = arguments.speech_root.as_deref();
     let transcriber = match transcriber(root) {
         Ok(transcriber) => transcriber,
@@ -282,7 +330,10 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let mut server = Server::new(backends, transcriber).with_keepalive(arguments.keepalive);
+    let mut server = Server::new(backends, transcriber)
+        .with_keepalive(arguments.keepalive)
+        .with_workspace_roots(roots)
+        .with_max_spaces(arguments.max_spaces);
     if let Some(timeout) = arguments.request_timeout {
         server = server.with_request_timeout(timeout);
     }
@@ -385,5 +436,56 @@ mod tests {
         ] {
             assert!(arguments(list).is_err(), "{list:?} was accepted");
         }
+    }
+
+    #[test]
+    fn workspace_roots_and_the_space_limit_are_configurable() {
+        let parsed = arguments(&[]).unwrap();
+        assert!(parsed.workspace_roots.is_empty());
+        assert_eq!(parsed.max_spaces, server::DEFAULT_MAX_SPACES);
+        assert_eq!(server::DEFAULT_MAX_SPACES, 8);
+
+        let parsed = arguments(&[
+            "--workspace-root",
+            "/srv/a",
+            "--max-spaces",
+            "3",
+            "--workspace-root",
+            "/srv/b",
+        ])
+        .unwrap();
+        assert_eq!(
+            parsed.workspace_roots,
+            [PathBuf::from("/srv/a"), PathBuf::from("/srv/b")]
+        );
+        assert_eq!(parsed.max_spaces, 3);
+    }
+
+    #[test]
+    fn invalid_workspace_options_are_refused() {
+        for list in [
+            &["--workspace-root"][..],
+            &["--max-spaces"],
+            &["--max-spaces", "0"],
+            &["--max-spaces", "-1"],
+            &["--max-spaces", "many"],
+        ] {
+            assert!(arguments(list).is_err(), "{list:?} was accepted");
+        }
+    }
+
+    #[test]
+    fn workspace_roots_must_exist() {
+        let missing =
+            std::env::temp_dir().join(format!("tomori-missing-root-{}", std::process::id()));
+        assert!(workspace_roots(&[missing]).is_err());
+        // Without any, the home directory is the only root.
+        let home = std::env::home_dir().unwrap().canonicalize().unwrap();
+        assert_eq!(workspace_roots(&[]).unwrap().roots(), [home]);
+        let roots = workspace_roots(&[std::env::temp_dir()]).unwrap();
+        assert_eq!(
+            roots.roots(),
+            [std::env::temp_dir().canonicalize().unwrap()]
+        );
     }
 }
