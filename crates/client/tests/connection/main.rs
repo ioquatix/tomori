@@ -18,6 +18,7 @@ fn options(address: SocketAddr) -> Options {
     options.backoff = Backoff {
         initial_delay: Duration::from_millis(20),
         delay_limit: Duration::from_millis(100),
+        ..Backoff::default()
     };
     options.close_timeout = Duration::from_millis(500);
     options.incoming_audio_limit = 1024;

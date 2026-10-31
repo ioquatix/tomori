@@ -43,7 +43,7 @@ impl std::error::Error for Disconnect {}
 /// The client's connection to the server.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ConnectionState {
-    /// Opening a connection. `attempt` counts from one and resets after each successful connection.
+    /// Opening a connection. `attempt` counts from one and resets after a connection that stayed up for [`crate::Backoff::stable_duration`].
     Connecting { attempt: u32 },
     /// The server has welcomed this client. Membership has been restored.
     Connected {

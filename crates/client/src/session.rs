@@ -61,14 +61,20 @@ pub(crate) async fn run(context: &Context<'_>) {
         context.set_state(ConnectionState::Connecting {
             attempt: failures + 1,
         });
-        let welcomed = Cell::new(false);
+        let welcomed = Cell::new(None);
         let reason = session(context, &welcomed).await;
         let failed = context.shared.outbox.disconnect();
         context.shared.report(failed);
         if context.shared.outbox.is_closed() {
             break;
         }
-        failures = if welcomed.get() { 1 } else { failures + 1 };
+        let welcomed_for = welcomed
+            .get()
+            .map(|since| context.scheduler.now().saturating_duration_since(since));
+        failures = context
+            .options
+            .backoff
+            .failures_after(failures, welcomed_for);
         let retry_in = context.options.backoff.delay(failures);
         context.set_state(ConnectionState::Disconnected { reason, retry_in });
         let _ = context
@@ -84,7 +90,7 @@ fn transport(error: impl std::fmt::Display) -> Disconnect {
 }
 
 /// Run one connection until it ends, returning why. Resolution and connecting share the connect timeout; each resolved address is tried in turn until one accepts the connection.
-async fn session(context: &Context<'_>, welcomed: &Cell<bool>) -> Disconnect {
+async fn session(context: &Context<'_>, welcomed: &Cell<Option<Instant>>) -> Disconnect {
     let deadline = context.scheduler.now() + context.options.connect_timeout;
     // Closing does not wait for a slow lookup.
     let resolution = or(
@@ -120,7 +126,7 @@ async fn connection(
     address: SocketAddr,
     deadline: Instant,
     opened: &Cell<bool>,
-    welcomed: &Cell<bool>,
+    welcomed: &Cell<Option<Instant>>,
 ) -> Disconnect {
     let (client, driver) = HttpClient::new(
         context.scheduler,
@@ -155,7 +161,7 @@ async fn exchange(
     lifetime: &Cancellation,
     deadline: Instant,
     opened: &Cell<bool>,
-    welcomed: &Cell<bool>,
+    welcomed: &Cell<Option<Instant>>,
 ) -> Disconnect {
     let mut metadata = RequestMetadata::new(Method::POST);
     metadata.path = Some(CONNECT_PATH.into());
@@ -232,7 +238,7 @@ async fn exchange(
                 .within(context.options.connect_timeout, reader.next())
                 .await?;
             welcome(context, first)?;
-            welcomed.set(true);
+            welcomed.set(Some(context.scheduler.now()));
             let frames = async {
                 loop {
                     let frame = reader.next().await?;
