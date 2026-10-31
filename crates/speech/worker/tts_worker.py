@@ -9,7 +9,7 @@ ordering and queueing belong to the Rust speech crate. No audio is written to
 disk.
 
 Ready:    {"ready": true, "sample_rate": 24000, "num_speakers": 54, ...}
-Request:  {"id": 1, "text": "Hello.", "voice": 37, "speed": 1.0}
+Request:  {"id": 1, "text": "Hello.", "voice": 3, "speed": 1.0}
 Chunk:    {"id": 1, "audio": "<base64 mono s16le>", "sample_rate": 24000}
 Done:     {"id": 1, "done": true}
 Failure:  {"id": 1, "error": "message"}
@@ -69,7 +69,7 @@ def synthesize(tts, request):
     text = request.get("text")
     if not isinstance(text, str) or not text.strip() or len(text) > MAXIMUM_TEXT:
         raise ValueError(f"speech requires 1 to {MAXIMUM_TEXT} characters")
-    voice = int(request.get("voice", 37))
+    voice = int(request.get("voice", 3))
     if not 0 <= voice < tts.num_speakers:
         raise ValueError(f"voice {voice} is unavailable; the model has {tts.num_speakers} voices")
     speed = float(request.get("speed", 1.0))
