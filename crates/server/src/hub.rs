@@ -91,6 +91,10 @@ struct ConnectionRecord {
     participant: Option<String>,
     last_sequence: Option<u32>,
     utterance: Option<OpenUtterance>,
+    /// Push-to-talk frames that arrived while no utterance was open, which are relayed but not transcribed.
+    stray_frames: u64,
+    /// Whether the last push-to-talk frame was stray, so that each run of them is logged once.
+    straying: bool,
     liveness: Liveness,
 }
 
@@ -139,7 +143,10 @@ struct Liveness {
 struct OpenUtterance {
     client: String,
     id: UtteranceId,
-    frames: usize,
+    /// The sequence number of the next frame on this connection: the one after the last frame before `UtteranceBegin`, then after each frame since. `None` if no frame had arrived before the utterance began.
+    ///
+    /// Frame sequence numbers increase by one per frame sent, and frames and control messages share one ordered stream, so the frame after `UtteranceBegin` must directly follow the last frame before it. A gap there means frames sent after the utterance began were lost, which would cut the start of the utterance; see `design/speech.md`.
+    expected: Option<u32>,
 }
 
 struct ParticipantRecord {
@@ -387,6 +394,8 @@ impl Hub {
                 participant: None,
                 last_sequence: None,
                 utterance: None,
+                stray_frames: 0,
+                straying: false,
                 liveness: Liveness {
                     received: received.clone(),
                     last: None,
@@ -467,6 +476,12 @@ impl Hub {
             if let Some(record) = state.connections.remove(&connection)
                 && let Some(participant) = record.participant
             {
+                if record.stray_frames > 0 {
+                    log::info!(
+                        "{participant} sent {} push-to-talk frames outside any utterance on this connection.",
+                        record.stray_frames
+                    );
+                }
                 let current = state
                     .participants
                     .get(&participant)
@@ -759,14 +774,15 @@ impl Hub {
                         space,
                     },
                 );
-                state
+                let record = state
                     .connections
                     .get_mut(&connection)
-                    .expect("checked above")
-                    .utterance = Some(OpenUtterance {
+                    .expect("checked above");
+                record.straying = false;
+                record.utterance = Some(OpenUtterance {
                     client: utterance,
                     id,
-                    frames: 0,
+                    expected: record.last_sequence.map(|last| last.wrapping_add(1)),
                 });
                 deferred.push(Deferred::Begin(id));
             }
@@ -893,6 +909,21 @@ impl Hub {
         let mut deferred = Vec::new();
         {
             let mut state = self.lock();
+            // Every frame counts towards the sequence, even outside a space, so that the next utterance's first frame can be checked.
+            let Some(record) = state.connections.get_mut(&connection) else {
+                return;
+            };
+            record.last_sequence = Some(frame.sequence);
+            let gap = match record.utterance.as_mut() {
+                Some(open) => {
+                    let gap = open
+                        .expected
+                        .is_some_and(|expected| expected != frame.sequence);
+                    open.expected = Some(frame.sequence.wrapping_add(1));
+                    gap
+                }
+                None => false,
+            };
             let Some((participant, Some(space))) = state.member(connection) else {
                 return;
             };
@@ -900,17 +931,22 @@ impl Hub {
                 .connections
                 .get_mut(&connection)
                 .expect("member has a connection");
-            let contiguous = record
-                .last_sequence
-                .is_none_or(|last| last.wrapping_add(1) == frame.sequence);
-            record.last_sequence = Some(frame.sequence);
             if frame.gate == Gate::Off {
                 return;
+            }
+            if frame.gate == Gate::Agent && record.utterance.is_none() {
+                record.stray_frames += 1;
+                if !record.straying {
+                    record.straying = true;
+                    log::warn!(
+                        "Push-to-talk audio from {participant} arrived outside an utterance; it is relayed but not transcribed."
+                    );
+                }
             }
             if frame.gate == Gate::Agent
                 && let Some(open) = record.utterance.as_mut()
             {
-                if open.frames > 0 && !contiguous {
+                if gap {
                     let open = record.utterance.take().expect("matched above");
                     state.utterances.remove(&open.id);
                     deferred.push(Deferred::Cancel(open.id));
@@ -923,7 +959,6 @@ impl Hub {
                         },
                     );
                 } else {
-                    open.frames += 1;
                     deferred.push(Deferred::Push(open.id, frame.clone()));
                 }
             }
@@ -965,6 +1000,23 @@ impl Hub {
             return;
         };
         let text = text.trim();
+        // The key makes a repeated finalization of the same client utterance idempotent: it is acknowledged with the text queued the first time, and nothing is queued again.
+        let key = format!("{}/{}", record.participant, record.client);
+        if let Some(queued) = state
+            .space(&record.space)
+            .and_then(|space| space.model.queued_text(&key))
+        {
+            let text = queued.to_owned();
+            state.send(
+                &record.participant,
+                ServerMessage::Transcript {
+                    utterance: record.client,
+                    text,
+                    finished: true,
+                },
+            );
+            return;
+        }
         let failure = if state
             .space(&record.space)
             .is_some_and(|space| space.model.is_closed())
@@ -999,10 +1051,9 @@ impl Hub {
             return;
         }
         let speaker = state.participants[&record.participant].name.clone();
-        // The key makes a repeated finalization of the same client utterance idempotent.
-        let key = format!("{}/{}", record.participant, record.client);
         if let Some(space) = state.space_mut(&record.space) {
-            space.model.enqueue(key, speaker, text.to_owned());
+            let queued = space.model.enqueue(key, speaker, text.to_owned());
+            debug_assert!(queued, "repeats are acknowledged above");
         }
         state.send(
             &record.participant,

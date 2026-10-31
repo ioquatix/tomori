@@ -248,19 +248,34 @@ fn a_creator_who_moved_on_is_not_moved_into_the_new_space() {
 fn a_repeated_utterance_is_queued_once() {
     let server = TestServer::with_backend(FakeBackend::manual());
     let (mut ada, _bob, _) = pair(&server);
+    let finished = |client: &TestClient, id: &str| {
+        client.wait_for(|message| match message {
+            ServerMessage::Transcript {
+                utterance,
+                text,
+                finished: true,
+            } if utterance == id => Some(text.clone()),
+            ServerMessage::TranscriptFailed { utterance, error } if utterance == id => {
+                panic!("{id} failed: {error}")
+            }
+            _ => None,
+        })
+    };
     ada.say("u1", "first");
     ada.say("u2", "second");
+    assert_eq!(finished(&ada, "u2"), "second");
+    // The client finalizes the same utterance again, as after a reconnect. It is acknowledged with the text queued the first time, and not queued again.
+    ada.say("u2", "second retried");
+    assert_eq!(finished(&ada, "u2"), "second");
     ada.say("u3", "third");
-    // Messages on one connection are handled in order, so this snapshot includes the repeat.
+    // Messages on one connection are handled in order, so this snapshot follows the repeat.
     let state = ada.space(|state| state.queue.iter().any(|entry| entry.text == "third"));
-    assert_eq!(
-        state
-            .queue
-            .iter()
-            .filter(|entry| entry.text == "second")
-            .count(),
-        1
-    );
+    let texts: Vec<&str> = state
+        .queue
+        .iter()
+        .map(|entry| entry.text.as_str())
+        .collect();
+    assert_eq!(texts, ["first", "second", "third"]);
 }
 
 #[test]
@@ -494,6 +509,58 @@ fn audio_is_relayed_within_the_space_with_the_server_assigned_source() {
     assert!(ada.next_audio(window).is_none());
     assert!(carol.next_audio(window).is_none());
     assert!(bob.next_audio(window).is_none());
+}
+
+#[test]
+fn a_frame_lost_before_the_first_one_received_fails_the_utterance() {
+    let server = TestServer::start();
+    let (mut ada, _bob, _) = pair(&server);
+    // Open-microphone audio before the utterance sets the sequence the utterance must continue from.
+    ada.send_audio(Gate::Live, speech("ab"));
+    ada.send(&ClientMessage::UtteranceBegin {
+        utterance: "u1".to_owned(),
+    });
+    // The utterance's first frame is lost; the next one arrives.
+    ada.skip_sequence(1);
+    ada.send_audio(Gate::Agent, speech("cd"));
+    ada.send(&ClientMessage::UtteranceEnd {
+        utterance: "u1".to_owned(),
+    });
+    let error = ada.wait_for(|message| match message {
+        ServerMessage::TranscriptFailed { utterance, error } if utterance == "u1" => {
+            Some(error.clone())
+        }
+        ServerMessage::Transcript {
+            utterance,
+            finished: true,
+            ..
+        } if utterance == "u1" => panic!("a cut utterance was queued"),
+        _ => None,
+    });
+    assert!(error.contains("lost"), "{error}");
+
+    // Audio while not in a space still counts, so a contiguous utterance after joining succeeds.
+    ada.send(&ClientMessage::Leave);
+    ada.wait_for(|message| matches!(message, ServerMessage::Left).then_some(()));
+    ada.send_audio(Gate::Live, speech("ef"));
+    let id = ada.wait_for(|message| match message {
+        ServerMessage::Spaces { spaces } if !spaces.is_empty() => Some(spaces[0].id.clone()),
+        _ => None,
+    });
+    join(&mut ada, &id, 2);
+    ada.say("u2", "again");
+    let text = ada.wait_for(|message| match message {
+        ServerMessage::Transcript {
+            utterance,
+            text,
+            finished: true,
+        } if utterance == "u2" => Some(text.clone()),
+        ServerMessage::TranscriptFailed { utterance, error } if utterance == "u2" => {
+            panic!("u2 failed: {error}")
+        }
+        _ => None,
+    });
+    assert_eq!(text, "again");
 }
 
 #[test]

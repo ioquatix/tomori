@@ -1,19 +1,22 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-use std::collections::HashSet;
+use std::collections::VecDeque;
 
 use protocol::{QueueEntry, QueueState};
 
 /// Finished entries kept visible after delivery or failure.
 const FINISHED_LIMIT: usize = 8;
 
+/// Keys remembered after queueing, so that a repeated finalization is recognized. More than the queue holds (`limits::QUEUED_ENTRIES` waiting plus [`FINISHED_LIMIT`] finished), so a key is remembered at least as long as its entry is visible, and a client retrying after a reconnect has many utterances' grace.
+const RECENT_KEYS: usize = 32;
+
 /// A space's input queue: entries in finalization order, delivered one at a time. See `design/spaces.md`.
 #[derive(Debug, Default)]
 pub struct InputQueue {
     entries: Vec<QueueEntry>,
-    /// Every key ever queued, so a repeated finalization is not delivered twice.
-    keys: HashSet<String>,
+    /// The most recently queued keys with their text, oldest first, so a repeated finalization is not delivered twice. Bounded by [`RECENT_KEYS`].
+    recent: VecDeque<(String, String)>,
 }
 
 impl InputQueue {
@@ -29,11 +32,23 @@ impl InputQueue {
             .count()
     }
 
-    /// Add an entry. Returns false if an entry with this key was already queued, in which case nothing changes.
+    /// The text queued under `key`, if it was queued recently.
+    pub fn queued_text(&self, key: &str) -> Option<&str> {
+        self.recent
+            .iter()
+            .find(|(queued, _)| queued == key)
+            .map(|(_, text)| text.as_str())
+    }
+
+    /// Add an entry. Returns false if an entry with this key was queued recently, in which case nothing changes.
     pub fn push(&mut self, key: String, speaker: String, text: String) -> bool {
-        if !self.keys.insert(key.clone()) {
+        if self.queued_text(&key).is_some() {
             return false;
         }
+        if self.recent.len() == RECENT_KEYS {
+            self.recent.pop_front();
+        }
+        self.recent.push_back((key.clone(), text.clone()));
         self.entries.push(QueueEntry {
             id: key,
             speaker,
@@ -152,6 +167,28 @@ mod tests {
         }
         assert_eq!(queue.entries().len(), FINISHED_LIMIT);
         assert_eq!(queue.entries()[0].id, "k12");
-        assert!(!queue.push("k0".into(), "Ada".into(), "text".into()));
+        assert!(!queue.push("k19".into(), "Ada".into(), "text".into()));
+    }
+
+    #[test]
+    fn remembered_keys_are_bounded() {
+        let mut queue = InputQueue::default();
+        for index in 0..RECENT_KEYS * 4 {
+            let key = format!("k{index}");
+            assert!(queue.push(key.clone(), "Ada".into(), format!("text {index}")));
+            queue.begin_next();
+            queue.finish(&key, QueueState::Delivered);
+        }
+        assert_eq!(queue.recent.len(), RECENT_KEYS);
+        let last = RECENT_KEYS * 4 - 1;
+        assert_eq!(
+            queue.queued_text(&format!("k{last}")),
+            Some(format!("text {last}").as_str())
+        );
+        // Every visible entry is still recognized.
+        for entry in queue.entries() {
+            assert!(queue.queued_text(&entry.id).is_some());
+        }
+        assert_eq!(queue.queued_text("k0"), None);
     }
 }

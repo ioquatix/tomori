@@ -3,7 +3,7 @@
 
 //! Every server frame stays within the protocol's frame limit, whatever clients and the agent send. See `design/server.md`.
 
-use protocol::{ClientMessage, MAX_FRAME_BYTES, ServerMessage};
+use protocol::{ClientMessage, MAX_FRAME_BYTES, QueueState, ServerMessage};
 use server::test_support::{TIMEOUT, TestClient, TestServer};
 
 /// The snapshot budget documented in `design/server.md`.
@@ -155,11 +155,35 @@ fn queued_input_is_bounded() {
     assert!(error.contains("too long"), "{error}");
 
     // The first entry is delivered and keeps the agent busy; the rest wait, up to the limit.
-    for index in 0..17 {
+    ada.say("u0", "entry 0");
+    ada.space(|state| {
+        state
+            .queue
+            .iter()
+            .any(|entry| entry.text == "entry 0" && entry.state == QueueState::Delivered)
+    });
+    for index in 1..=17 {
         ada.say(&format!("u{index}"), &format!("entry {index}"));
     }
-    let error = transcript_failure(&ada, "u16");
+    // Snapshots are sent when entries are queued, before the failure of the one that did not fit.
+    let mut latest = None;
+    let error = ada.wait_for(|message| match message {
+        ServerMessage::Space { state } => {
+            latest = Some(state.clone());
+            None
+        }
+        ServerMessage::TranscriptFailed { utterance, error } if utterance == "u17" => {
+            Some(error.clone())
+        }
+        _ => None,
+    });
     assert!(error.contains("queue is full"), "{error}");
-    let state = ada.space(|state| state.queue.iter().any(|entry| entry.text == "entry 15"));
-    assert!(!state.queue.iter().any(|entry| entry.text == "entry 16"));
+    let state = latest.expect("a snapshot was sent");
+    let texts: Vec<&str> = state
+        .queue
+        .iter()
+        .map(|entry| entry.text.as_str())
+        .collect();
+    assert_eq!(texts.len(), 17, "{texts:?}");
+    assert_eq!(texts.last(), Some(&"entry 16"));
 }

@@ -347,6 +347,11 @@ impl SpaceModel {
     }
 
     /// Queue finalized input. Returns false if this key was already queued.
+    /// The text queued under `key`, if it was queued recently; see [`InputQueue::queued_text`].
+    pub fn queued_text(&self, key: &str) -> Option<&str> {
+        self.queue.queued_text(key)
+    }
+
     pub fn enqueue(&mut self, key: String, speaker: String, text: String) -> bool {
         self.queue.push(key, speaker, text)
     }
