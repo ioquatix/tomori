@@ -2683,6 +2683,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "server"
+version = "0.1.0"
+dependencies = [
+ "async-channel",
+ "backend",
+ "base-http",
+ "base-http-server",
+ "base-scheduler",
+ "base-scheduler-direct",
+ "event-listener",
+ "futures-lite",
+ "futures-util",
+ "log",
+ "protocol",
+ "serde_json",
+]
+
+[[package]]
 name = "shlex"
 version = "1.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
