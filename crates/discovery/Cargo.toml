@@ -1,0 +1,13 @@
+[package]
+name = "discovery"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.93"
+description = "Bonjour (DNS-SD over multicast DNS) advertising and browsing for Tomori servers"
+repository = "https://github.com/ioquatix/tomori"
+license = "MIT"
+publish = false
+
+[dependencies]
+mdns-sd = { version = "0.21", default-features = false, features = ["logging"] }
+protocol = { path = "../protocol" }
