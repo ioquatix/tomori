@@ -7,3 +7,4 @@
 - Choose the server and display name with the intent extras `tomori.server` and `tomori.name`, `TOMORI_SERVER=host:port bash scripts/android.sh run` (with `TOMORI_SERVER_PORT` for the port forwarded over USB), or `--server` and `--name` on the desktop.
 - Add `--console`, which shows the headset's panel in the terminal for using a server without a headset or a GPU.
 - Remove on-device voice capture, spoken replies, voice preview, replay, result cards and spectator publishing from the headset for now; voice returns through the server.
+- `tomori-server` keeps serving after transient accept errors, such as running out of file descriptors, instead of silently leaving its port open with nobody accepting. When serving does end it refuses new clients at once, waits at most 5 seconds for open connections, and exits with a failure status if serving failed. It now logs to standard error, controlled by `RUST_LOG`.
