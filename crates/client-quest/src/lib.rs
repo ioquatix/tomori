@@ -24,6 +24,7 @@ mod identity;
 mod interaction;
 #[cfg(not(target_os = "android"))]
 mod pipewire_video;
+mod playback;
 mod server_choice;
 #[cfg(not(target_os = "android"))]
 mod spectator;
@@ -95,6 +96,7 @@ fn desktop_connection(
         store,
         Box::new(()),
         Box::new(capture::Desktop),
+        Box::new(playback::Desktop),
         &mut conversation,
     );
     (conversation, connection)
@@ -280,8 +282,15 @@ fn android_connection(
     let mut conversation = conversation::Conversation::new(&identity.participant, &identity.name);
     let capture = Box::new(capture::Android::new(android.clone()));
     let multicast = Box::new(android::MulticastLock::new(android));
-    let connection =
-        connection::Connection::new(identity, store, multicast, capture, &mut conversation);
+    let playback = Box::new(playback::Android);
+    let connection = connection::Connection::new(
+        identity,
+        store,
+        multicast,
+        capture,
+        playback,
+        &mut conversation,
+    );
     (conversation, connection)
 }
 

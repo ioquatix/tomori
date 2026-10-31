@@ -11,7 +11,7 @@ Tomori is the name of both the system and its conversational coordinator; see
 [naming.md](naming.md). The Rust package and executable are named `tomori`.
 The headset finds servers with Bonjour or over USB; several participants can share
 a space. Hold **X** to talk to the space's agent: the server transcribes what
-you say and queues it. Replies are not spoken yet. Sky is an early environment blockout, not finished artwork.
+you say and queues it, and the agent's replies are spoken. Sky is an early environment blockout, not finished artwork.
 Private workspace memory and session state are not included in this public
 source repository.
 
@@ -198,9 +198,15 @@ denied, allow the microphone for Tomori in the headset's Settings.
 If anything stops the words reaching the agent intact, such as lost audio, a
 dropped connection, nothing being heard or a full queue, the panel shows the
 error and nothing is sent. Losing focus, as when the system menu opens, cancels
-a recording that is still held; release **X** before holding it again. The audio is also relayed to the other
-participants in the space, though nothing plays it yet, and replies are not
-spoken yet (see [design/speech.md](design/speech.md) and
+a recording that is still held; release **X** before holding it again.
+
+The agent's replies are spoken as they stream in, and everyone in the space
+hears them and each other's push-to-talk audio through the headset or desktop
+speakers. You never hear your own recording back. While **X** is held, nothing
+plays, so that the speakers cannot be transcribed as your words; the reply
+carries on meanwhile and resumes where it has got to when you release. There is
+no open microphone for talking to other participants without the agent yet (see
+[design/speech.md](design/speech.md) and
 [design/live-audio.md](design/live-audio.md)).
 
 Recognition runs on the server with Whisper `small.en`, which needs Python 3
@@ -213,8 +219,9 @@ cargo run -p server --bin tomori-server -- --backend claude-code --speech-root .
 
 Whisper uses CUDA on Linux when it is available, and the CPU elsewhere,
 including macOS. Without `--speech-root`, or if Whisper can't start, every
-utterance fails with an error that says so. The server can also synthesize
-replies with Kokoro (another 700 MB) for when the headset plays them; see
+utterance fails with an error that says so. Replies are spoken with Kokoro,
+which needs another 700 MB; without it the server says "Speech synthesis: off"
+or "unavailable" when it starts, and replies are only shown. See
 [crates/speech/worker/readme.md](crates/speech/worker/readme.md).
 
 ## PC spectator and live audio (prototype)

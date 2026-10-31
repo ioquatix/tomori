@@ -574,3 +574,87 @@ fn a_participant_who_joins_mid_reply_hears_the_rest() {
     assert_eq!(rest.last().unwrap().sequence as usize, frames - 1);
     assert!(rest.len() < frames);
 }
+
+#[test]
+fn a_participant_hears_the_reply_to_their_question_but_never_their_own_audio() {
+    let server = speaking_server(FakeBackend::manual(), FakeSynthesizer::default());
+    let (mut ada, bob) = pair(&server);
+
+    // Ada talks to the agent and to Bob, and keeps her microphone open while the reply plays.
+    ada.send_audio(Gate::Live, vec![5; 320]);
+    ada.say("u1", "what next?");
+    ada.space(|state| state.activity == protocol::Activity::Running);
+    let session = server.backend.started()[0].clone();
+    let sentence = "Run the tests now.";
+    session.stream(&[sentence]);
+    for _ in 0..5 {
+        ada.send_audio(Gate::Live, vec![5; 320]);
+    }
+
+    // Everything Ada receives is the agent's reply, all of it.
+    let frames = words(&[sentence]) * FRAMES_PER_WORD;
+    let mut heard = Vec::new();
+    while let Some(frame) = ada.next_audio(Duration::from_millis(500)) {
+        assert_eq!(frame.source, AGENT_SOURCE, "Ada heard herself");
+        heard.push(frame);
+    }
+    assert_eq!(heard.len(), frames);
+    assert_stream(&heard);
+
+    // Bob hears all seven of Ada's frames as well as the reply.
+    let mut from_ada = 0;
+    while let Some(frame) = bob.next_audio(Duration::from_millis(200)) {
+        if frame.source == ada.source {
+            from_ada += 1;
+        }
+    }
+    assert_eq!(from_ada, 7);
+}
+
+#[test]
+fn the_client_player_plays_the_spoken_reply() {
+    let server = speaking_server(FakeBackend::manual(), FakeSynthesizer::default());
+    let mut ada = client::Client::connect(client::Options::new(
+        server.address.to_string(),
+        "ada",
+        "Ada",
+    ))
+    .unwrap();
+    let (mut player, _control) = client::playback::Player::new(
+        ada.take_audio().unwrap(),
+        client::playback::MixerOptions::default(),
+    );
+    ada.sender()
+        .send(ClientMessage::CreateSpace {
+            title: "Playback".into(),
+            backend: server::fake::FAKE_BACKEND_NAME.into(),
+            directory: "/tmp".into(),
+            session: None,
+        })
+        .unwrap();
+    let space = receive(&ada, |message| match message {
+        ServerMessage::Space { state } => Some(state.id),
+        _ => None,
+    });
+    let mut bob = server.connect("bob", "Bob");
+    bob.send(&ClientMessage::Join { space });
+    bob.space(|state| state.participants.len() == 2);
+    bob.say("u1", "say something");
+    bob.space(|state| state.activity == protocol::Activity::Running);
+    let session = server.backend.started()[0].clone();
+    session.stream(&["Something."]);
+
+    // Render as a 48 kHz device would, 10 ms at a time, until the reply plays.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut output = [0_i16; 480];
+    loop {
+        assert!(Instant::now() < deadline, "the reply never played");
+        player.render(48_000, &mut output);
+        // Bob's push-to-talk is relayed too; the fake synthesizer's samples are all 100.
+        if output.contains(&100) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    ada.close();
+}

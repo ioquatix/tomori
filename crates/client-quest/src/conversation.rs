@@ -375,9 +375,12 @@ impl Conversation {
                 // Also shown for an earlier utterance, whose words were not sent either.
                 self.error = Some(error);
             }
-            // Speech and presence come with the playback and presence work.
+            // Agent speech is heard rather than shown: its audio plays through the speaker.
+            ServerMessage::Speech { segment, text, .. } => {
+                log::info!("Agent speech {segment}: {text}");
+            }
+            // Presence comes with the presence work.
             ServerMessage::Welcome { .. }
-            | ServerMessage::Speech { .. }
             | ServerMessage::Presence { .. }
             | ServerMessage::Ping { .. }
             | ServerMessage::Pong { .. } => {}

@@ -237,12 +237,12 @@ async fn exchange(
             let first = context
                 .within(context.options.connect_timeout, reader.next())
                 .await?;
-            welcome(context, first)?;
+            let source = welcome(context, first)?;
             welcomed.set(Some(context.scheduler.now()));
             let frames = async {
                 loop {
                     let frame = reader.next().await?;
-                    deliver(context, frame)?;
+                    deliver(context, frame, source)?;
                 }
             };
             or(frames, async { Err(keepalive(context, &received).await) }).await
@@ -294,7 +294,8 @@ async fn keepalive(context: &Context<'_>, received: &Cell<Instant>) -> Disconnec
     }
 }
 
-fn welcome(context: &Context<'_>, frame: Frame) -> Result<(), Disconnect> {
+/// Check the server's Welcome, returning this client's participant number.
+fn welcome(context: &Context<'_>, frame: Frame) -> Result<u32, Disconnect> {
     let message = frame
         .to_server_message()
         .map_err(|error| Disconnect::Protocol(error.to_string()))?;
@@ -310,7 +311,7 @@ fn welcome(context: &Context<'_>, frame: Frame) -> Result<(), Disconnect> {
                 )));
             }
             context.set_state(ConnectionState::Connected { source, server });
-            Ok(())
+            Ok(source)
         }
         ServerMessage::Error { error, .. } => Err(Disconnect::Protocol(format!(
             "server refused the connection: {error}"
@@ -321,7 +322,8 @@ fn welcome(context: &Context<'_>, frame: Frame) -> Result<(), Disconnect> {
     }
 }
 
-fn deliver(context: &Context<'_>, frame: Frame) -> Result<(), Disconnect> {
+/// Hand one frame to the application. `source` is this client's participant number on this connection.
+fn deliver(context: &Context<'_>, frame: Frame, source: u32) -> Result<(), Disconnect> {
     let protocol = |error: protocol::FrameError| Disconnect::Protocol(error.to_string());
     match frame.kind {
         FrameKind::Control => match frame.to_server_message().map_err(protocol)? {
@@ -346,8 +348,13 @@ fn deliver(context: &Context<'_>, frame: Frame) -> Result<(), Disconnect> {
             }
         },
         FrameKind::Audio => {
+            let audio = frame.to_audio().map_err(protocol)?;
+            // What this participant records never plays back to them. The server does not relay it back; this guards against a server that does.
+            if audio.source == source {
+                return Ok(());
+            }
             // Playback is real time: if the application falls behind, newer audio is dropped rather than queued without bound.
-            let _ = context.audio.try_send(frame.to_audio().map_err(protocol)?);
+            let _ = context.audio.try_send(audio);
         }
     }
     Ok(())
