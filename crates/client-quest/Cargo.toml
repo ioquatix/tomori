@@ -21,15 +21,17 @@ environment-sky = { path = "../environment-sky" }
 ash = "0.38"
 bytemuck = { version = "1", features = ["derive"] }
 basisu = "0.1"
+client = { path = "../client" }
+discovery = { path = "../discovery" }
 glam = "0.30"
 gltf = { version = "1.4", default-features = false, features = ["utils", "names", "extensions"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 font8x8 = "0.3"
 log = "0.4"
 openxr = "0.22"
+protocol = { path = "../protocol" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-ureq = { version = "2.12", default-features = false, features = ["json"] }
 wgpu = { version = "30.0.1", default-features = false, features = ["std", "vulkan", "wgsl"] }
 wgpu-hal = { version = "30.0.1", features = ["vulkan"] }
 
@@ -37,11 +39,11 @@ wgpu-hal = { version = "30.0.1", features = ["vulkan"] }
 android-activity = { version = "0.6", features = ["native-activity"] }
 android_logger = "0.15"
 jni = "0.21"
-ndk = { version = "0.9", features = ["audio", "api-level-29"] }
 
 [target.'cfg(not(target_os = "android"))'.dependencies]
 env_logger = "0.11"
 pollster = "0.4"
+ureq = { version = "2.12", default-features = false, features = ["json"] }
 winit = "0.30"
 
 [target.'cfg(target_os = "linux")'.dependencies]
@@ -91,6 +93,12 @@ name = "android.permission.RECORD_AUDIO"
 
 [[package.metadata.android.uses_permission]]
 name = "android.permission.INTERNET"
+
+[[package.metadata.android.uses_permission]]
+name = "android.permission.ACCESS_WIFI_STATE"
+
+[[package.metadata.android.uses_permission]]
+name = "android.permission.CHANGE_WIFI_MULTICAST_STATE"
 
 [[package.metadata.android.uses_permission]]
 name = "com.oculus.permission.RENDER_MODEL"

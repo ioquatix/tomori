@@ -1,16 +1,14 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-//! Read-only projection of the Quest's actual scene. The headset remains the
-//! simulation authority; a bounded channel drops stale frames under load.
+//! Read-only projection of the Quest's actual scene, received from the PC bridge. The headset stopped publishing
+//! frames when it moved to the server, so the PC view waits until publishing returns there.
 use serde::{Deserialize, Serialize};
-#[cfg(not(target_os = "android"))]
-use std::sync::mpsc::Receiver;
-#[cfg(target_os = "android")]
-use std::sync::mpsc::SyncSender;
-use std::{sync::mpsc, time::Duration};
+use std::{
+    sync::mpsc::{self, Receiver},
+    time::Duration,
+};
 
-#[cfg(any(not(target_os = "android"), test))]
 pub const AGENTS: usize = crate::swarm::AGENT_COUNT;
 pub const VIDEO_INTERVAL: Duration = Duration::from_millis(50);
 
@@ -53,7 +51,6 @@ pub struct Frame {
 }
 
 impl Frame {
-    #[cfg(any(not(target_os = "android"), test))]
     pub fn valid(&self) -> bool {
         self.agents.len() == AGENTS
             && self.caption.len() <= 8192
@@ -87,40 +84,6 @@ impl Frame {
     }
 }
 
-#[cfg(target_os = "android")]
-pub fn publish_frames() -> SyncSender<Frame> {
-    let (sender, receiver) = mpsc::sync_channel::<Frame>(1);
-    std::thread::Builder::new()
-        .name("spectator-publish".into())
-        .spawn(move || {
-            let client = ureq::AgentBuilder::new()
-                .timeout_connect(Duration::from_millis(400))
-                .timeout_write(Duration::from_millis(400))
-                .timeout_read(Duration::from_millis(400))
-                .build();
-            let mut last_failure: Option<std::time::Instant> = None;
-            while let Ok(mut frame) = receiver.recv() {
-                while let Ok(newer) = receiver.try_recv() {
-                    frame = newer;
-                }
-                let result = client
-                    .post("http://127.0.0.1:8765/spectator/frame")
-                    .send_json(frame);
-                if result.is_ok() {
-                    if last_failure.take().is_some() {
-                        log::info!("Spectator scene publishing recovered");
-                    }
-                } else if last_failure.is_none_or(|last| last.elapsed() >= Duration::from_secs(5)) {
-                    log::warn!("Spectator scene publishing failed; the PC view may be stale");
-                    last_failure = Some(std::time::Instant::now());
-                }
-            }
-        })
-        .expect("start spectator publisher");
-    sender
-}
-
-#[cfg(not(target_os = "android"))]
 pub fn receive_frames() -> Receiver<Frame> {
     let (sender, receiver) = mpsc::sync_channel(2);
     let port = std::env::var("TOMORI_BRIDGE_PORT")

@@ -2,13 +2,14 @@
 // Copyright, 2026, by Samuel Williams.
 
 #[cfg(target_os = "android")]
-mod audience;
+mod android;
 mod caption;
-#[cfg(any(target_os = "android", test))]
-#[cfg_attr(not(target_os = "android"), allow(dead_code))]
-mod chat;
+mod connection;
+#[cfg(not(target_os = "android"))]
+mod console;
 mod controller;
 mod controller_graphics;
+mod conversation;
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 mod delegation;
 #[cfg(not(target_os = "android"))]
@@ -18,27 +19,21 @@ mod graphics;
 mod hands;
 #[cfg(not(target_os = "android"))]
 mod headless_spectator;
+mod identity;
 mod interaction;
 #[cfg(not(target_os = "android"))]
 mod pipewire_video;
+mod server_choice;
+#[cfg(not(target_os = "android"))]
 mod spectator;
 #[cfg(not(target_os = "android"))]
 mod spectator_view;
-#[cfg(any(target_os = "android", test))]
-mod speech;
-#[cfg(any(target_os = "android", test))]
-#[cfg_attr(not(target_os = "android"), allow(dead_code))]
-mod speech_activity;
-#[cfg(any(target_os = "android", test))]
-mod spoken;
 mod swarm;
-#[cfg(target_os = "android")]
-mod tts;
-#[cfg(target_os = "android")]
-mod voice;
 mod vulkan;
 mod workspace_graphics;
 mod xr;
+
+pub use identity::Overrides;
 
 /// Run the windowed desktop demo without an XR runtime or headset.
 #[cfg(not(target_os = "android"))]
@@ -74,8 +69,28 @@ pub fn run_spectator_pipewire_preview() -> anyhow::Result<()> {
 
 /// Run against the host's active OpenXR runtime instead of a desktop window.
 #[cfg(not(target_os = "android"))]
-pub fn run_xr() -> anyhow::Result<()> {
-    xr::run(&(), || false)
+pub fn run_xr(overrides: Overrides) -> anyhow::Result<()> {
+    let (conversation, connection) = desktop_connection(overrides);
+    xr::run(&(), || false, conversation, connection)
+}
+
+/// Show the headset's panel in the terminal, to use a server without a headset or a GPU.
+#[cfg(not(target_os = "android"))]
+pub fn run_console(overrides: Overrides) -> anyhow::Result<()> {
+    let (conversation, connection) = desktop_connection(overrides);
+    console::run(conversation, connection)
+}
+
+/// Desktop runs keep nothing, so each is a new participant.
+#[cfg(not(target_os = "android"))]
+fn desktop_connection(
+    overrides: Overrides,
+) -> (conversation::Conversation, connection::Connection) {
+    let store = identity::Store::new(None);
+    let identity = identity::Identity::new(&store, identity::host_name().as_deref(), overrides);
+    let mut conversation = conversation::Conversation::new(&identity.name);
+    let connection = connection::Connection::new(identity, store, Box::new(()), &mut conversation);
+    (conversation, connection)
 }
 
 // Bound each input batch so that a continuous input stream cannot prevent the
@@ -210,20 +225,20 @@ fn android_main(app: android_activity::AndroidApp) {
     // AndroidApp keeps these JNI references alive until android_main returns.
     let platform =
         unsafe { openxr::AndroidPlatformInfo::new(app.vm_as_ptr(), app.activity_as_ptr()) };
-    let mut voice = voice::Voice::new(&app);
-    for _ in 0..8 {
-        if pump.poll(Duration::ZERO) {
-            break;
+    let result = match android::Android::new(&app) {
+        Ok(_) if pump.destroyed => Ok(()),
+        // xr::run owns the connection, so it closes before Destroy is acknowledged.
+        Ok(android) => {
+            let (conversation, connection) = android_connection(android);
+            xr::run(
+                &platform,
+                || pump.poll(Duration::ZERO),
+                conversation,
+                connection,
+            )
         }
-    }
-    let result = if pump.destroyed {
-        Ok(())
-    } else {
-        xr::run(&platform, || pump.poll(Duration::ZERO), &mut voice)
+        Err(error) => Err(error.context("reaching the Android activity")),
     };
-    // Poll before potentially blocking cleanup, unless Destroy already arrived.
-    pump.poll(Duration::ZERO);
-    drop(voice); // release mic/recognizer before waiting for Activity destruction
     if let Err(error) = result {
         log::error!("tomori stopped: {error:#}");
     }
@@ -232,6 +247,33 @@ fn android_main(app: android_activity::AndroidApp) {
     while !pump.destroyed {
         pump.poll(Duration::from_millis(100));
     }
+}
+
+/// The intent extras `tomori.server` and `tomori.name` override the defaults, as with `am start -e tomori.server 10.0.0.2`.
+#[cfg(target_os = "android")]
+fn android_connection(
+    android: std::sync::Arc<android::Android>,
+) -> (conversation::Conversation, connection::Connection) {
+    let extra = |name| {
+        android.intent_extra(name).unwrap_or_else(|error| {
+            log::warn!("Cannot read the {name} intent extra: {error:#}");
+            None
+        })
+    };
+    let overrides = Overrides {
+        server: extra("tomori.server"),
+        name: extra("tomori.name"),
+    };
+    let device = android.device_name().unwrap_or_else(|error| {
+        log::warn!("Cannot read the device name: {error:#}");
+        None
+    });
+    let store = identity::Store::new(android.data());
+    let identity = identity::Identity::new(&store, device.as_deref(), overrides);
+    let mut conversation = conversation::Conversation::new(&identity.name);
+    let multicast = Box::new(android::MulticastLock::new(android));
+    let connection = connection::Connection::new(identity, store, multicast, &mut conversation);
+    (conversation, connection)
 }
 
 #[cfg(test)]

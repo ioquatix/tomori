@@ -44,7 +44,6 @@ impl Swarm {
     }
 
     /// Smooth the audio envelope, but never smooth away a discrete turn state.
-    #[cfg(any(target_os = "android", test))]
     pub fn set_visual(&mut self, mut visual: Visual, dt: f32) {
         visual.time = self.visual.time + dt.clamp(0.0, 0.1);
         let rate = if visual.level > self.visual.level {

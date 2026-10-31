@@ -18,7 +18,8 @@ const BLEND: xr::EnvironmentBlendMode = xr::EnvironmentBlendMode::OPAQUE;
 pub fn run(
     platform: &impl xr::PlatformInfo,
     mut destroyed: impl FnMut() -> bool,
-    #[cfg(target_os = "android")] voice: &mut crate::voice::Voice,
+    mut conversation: crate::conversation::Conversation,
+    mut connection: crate::connection::Connection,
 ) -> Result<()> {
     let entry = unsafe { xr::Entry::load(platform) }
         .context("loading OpenXR (is an OpenXR runtime installed?)")?;
@@ -146,16 +147,6 @@ pub fn run(
         ControllerModels::new(supported.fb_render_model, &instance, &session);
     let mut caption = Caption::new(&gpu.device, format);
     caption.set_recording_progress(&gpu.queue, None, Duration::ZERO);
-    #[cfg(target_os = "android")]
-    let mut chat = crate::chat::Chat::new();
-    #[cfg(target_os = "android")]
-    let mut speaker = crate::tts::Speaker::new(voice.audio_sender());
-    #[cfg(target_os = "android")]
-    let spectator = crate::spectator::publish_frames();
-    #[cfg(target_os = "android")]
-    let mut last_spectator_frame = Instant::now() - crate::spectator::VIDEO_INTERVAL;
-    #[cfg(not(target_os = "android"))]
-    caption.set_text(&gpu.queue, "TOMORI\nVoice-to-text is available on Quest.\n\nHold X on the Quest's left controller to speak. Release to transcribe offline.");
     // Runs on every return/unwind, before imported image wrappers and the XR
     // swapchain are dropped, including if a frame fails after queue submission.
     let _gpu_idle = WaitForGpu(&gpu.device);
@@ -167,13 +158,8 @@ pub fn run(
     let mut frames = 0_u64;
     let mut stick_latched = false;
     let mut environment_latched = false;
-    #[cfg(target_os = "android")]
-    let mut audience_latched = false;
-    #[cfg(target_os = "android")]
+    let mut choice_latched = false;
     let mut was_talking = false;
-    #[cfg(target_os = "android")]
-    let mut was_focused = false;
-    #[cfg(target_os = "android")]
     let mut signals = crate::interaction::Signals::default();
     #[cfg(target_os = "android")]
     let mut delegation_scene = crate::delegation::Scene::new();
@@ -182,7 +168,7 @@ pub fn run(
     #[cfg(target_os = "android")]
     let mut presentation_navigation = crate::workspace_graphics::CardNavigation::default();
     log::info!(
-        "Ready: {width}x{height} per eye, {} swapchain images. Right trigger: attract; A: reset; hold X: talk.",
+        "Ready: {width}x{height} per eye, {} swapchain images. Right trigger: attract; A: choose or reset.",
         images.len()
     );
     'main: loop {
@@ -199,14 +185,10 @@ pub fn run(
                         // runtime also queues a refocus in this poll batch.
                         stick_latched = false;
                         environment_latched = false;
+                        choice_latched = false;
+                        was_talking = false;
                         #[cfg(target_os = "android")]
-                        {
-                            voice.poll(false);
-                            speaker.stop();
-                            was_talking = false;
-                            audience_latched = false;
-                            presentation_navigation.release();
-                        }
+                        presentation_navigation.release();
                     }
                     focused = state == xr::SessionState::FOCUSED;
                     match state {
@@ -240,31 +222,14 @@ pub fn run(
                 _ => {}
             }
         }
-        #[cfg(target_os = "android")]
-        {
-            voice.poll(focused && running);
-            chat.poll();
-            speaker.poll();
-            if !focused || !running {
-                let _ = chat.take_speech(false, false, speaker.enabled());
-            }
-            if was_focused && !focused {
-                speaker.stop();
-            }
-            was_focused = focused;
-            if let Some(transcript) = voice.take_transcript() {
-                chat.transcript(transcript);
-            }
-        }
+        connection.poll(focused && running, &mut conversation);
         if !focused || !running {
             stick_latched = false;
             environment_latched = false;
+            choice_latched = false;
+            was_talking = false;
             #[cfg(target_os = "android")]
-            {
-                audience_latched = false;
-                was_talking = false;
-                presentation_navigation.release();
-            }
+            presentation_navigation.release();
         }
         if !running {
             std::thread::sleep(Duration::from_millis(10));
@@ -291,97 +256,47 @@ pub fn run(
         let moving = stick.x.abs() > 0.6 || stick.y.abs() > 0.6;
         let navigate = moving && !stick_latched;
         stick_latched = moving;
-        #[cfg(target_os = "android")]
-        let reset = {
-            let grip_pressed = controls.audience_grip > 0.75;
-            if grip_pressed && !audience_latched {
-                voice.toggle_audience();
+        if navigate {
+            if stick.y.abs() >= stick.x.abs() {
+                conversation.navigate(0, if stick.y > 0.0 { -1 } else { 1 });
+            } else {
+                conversation.navigate(if stick.x > 0.0 { 1 } else { -1 }, 0);
             }
-            audience_latched = grip_pressed;
-            if navigate {
-                if stick.y.abs() >= stick.x.abs() {
-                    chat.navigate(0, if stick.y > 0.0 { -1 } else { 1 });
-                } else {
-                    chat.navigate(if stick.x > 0.0 { 1 } else { -1 }, 0);
-                }
-            }
-            if controls.back {
-                speaker.stop();
-                chat.back();
-            }
-            if controls.refresh {
-                speaker.stop();
-                chat.refresh();
-            }
-            if controls.sound_toggle {
-                speaker.toggle();
-            }
-            if controls.replay
-                && let Some(text) = chat.replay_speech()
-            {
-                speaker.stop();
-                speaker.speak(text);
-            }
-            let reset = controls.reset && chat.accept();
-            let empty_workspace = crate::delegation::Workspace::default();
-            let (root, workspace) = chat
-                .workspace()
-                .map_or((None, &empty_workspace), |(root, workspace)| {
-                    (Some(root), workspace)
-                });
-            presentation_navigation.update(
-                root,
-                workspace,
-                controls.presentation_navigation.x,
-                controls.presentation_navigation.y,
-            );
-            reset
-        };
-        #[cfg(not(target_os = "android"))]
-        let reset = {
-            let _ = (
-                navigate,
-                controls.back,
-                controls.refresh,
-                controls.sound_toggle,
-                controls.replay,
-                controls.audience_grip,
-                controls.presentation_navigation,
-            );
-            controls.reset
-        };
-        #[cfg(target_os = "android")]
-        {
-            if controls.talk && !was_talking {
-                speaker.stop();
-            }
-            was_talking = controls.talk;
-            // Wait at most a few audio-buffer periods for output to stop so
-            // the microphone doesn't capture the tail of the assistant reply.
-            let can_record = controls.talk && !speaker.is_playing();
-            if voice.update(can_record, focused) {
-                chat.begin_utterance();
-            }
-            for text in chat.take_speech(focused, controls.talk, speaker.enabled()) {
-                speaker.speak(text);
-            }
-            chat.set_tts_enabled(speaker.enabled());
-            chat.set_tts_notice(speaker.notice());
-            chat.set_audience_label(voice.audience_label());
-            caption.set_text(
-                &gpu.queue,
-                &chat.text(
-                    voice.status(),
-                    &voice.text(),
-                    voice.recording_elapsed().map(|_| voice.draft()),
-                ),
-            );
-            caption.set_recording_progress(&gpu.queue, voice.recording_elapsed(), Duration::ZERO);
         }
-        #[cfg(not(target_os = "android"))]
-        if controls.talk {
-            caption.set_text(&gpu.queue, "VOICE TO TEXT\nUse the Quest app for offline microphone recognition.\n\nHold X to talk on Quest.");
+        if controls.back {
+            conversation.back();
         }
+        if controls.refresh {
+            conversation.refresh();
+        }
+        // While an approval offers standing options, the right stick chooses
+        // among them instead of paging presentation cards.
+        let choosing = conversation.is_choosing();
+        let right = controls.presentation_navigation;
+        let choice_moving = choosing && right.x.abs() > 0.6;
+        if choice_moving && !choice_latched {
+            conversation.choose(if right.x > 0.0 { 1 } else { -1 });
+        }
+        choice_latched = choice_moving;
+        let reset = controls.reset && conversation.accept();
+        if controls.talk && !was_talking {
+            conversation.talk();
+        }
+        was_talking = controls.talk;
+        // Spoken replies and the audience microphone return with server playback.
+        let _ = (
+            controls.sound_toggle,
+            controls.replay,
+            controls.audience_grip,
+        );
+        #[cfg(target_os = "android")]
+        presentation_navigation.update(
+            None,
+            &crate::delegation::Workspace::default(),
+            if choosing { 0.0 } else { right.x },
+            if choosing { 0.0 } else { right.y },
+        );
+        caption.set_text(&gpu.queue, &conversation.text());
         if reset {
             swarm = Swarm::new();
         }
@@ -407,20 +322,15 @@ pub fn run(
                 &mut controls,
             );
         }
-        #[cfg(target_os = "android")]
         {
             let visual = signals.update(
                 crate::interaction::Inputs {
                     session: if focused {
-                        chat.activity()
+                        conversation.activity()
                     } else {
                         crate::interaction::SessionActivity::Unknown
                     },
-                    speech: speaker.activity(),
-                    recording: voice.recording_elapsed().is_some(),
-                    voice_busy: voice.is_busy(),
-                    voice_error: voice.has_error(),
-                    pending_text: chat.has_pending_speech(),
+                    ..Default::default()
                 },
                 dt,
             );
@@ -457,14 +367,9 @@ pub fn run(
             },
             controls.attracting,
         );
+        // Workers arrive with the space state once the scene reads it.
         #[cfg(target_os = "android")]
-        let empty_workspace = crate::delegation::Workspace::default();
-        #[cfg(target_os = "android")]
-        let (root, current_workspace) = chat
-            .workspace()
-            .map_or((None, &empty_workspace), |(root, workspace)| {
-                (Some(root), workspace)
-            });
+        let (root, current_workspace) = (None, &crate::delegation::Workspace::default());
         #[cfg(target_os = "android")]
         {
             renderer.set_presentation_page(presentation_navigation.card);
@@ -482,36 +387,6 @@ pub fn run(
             );
         }
         renderer.update_controllers(&gpu.queue, controller_poses, tracked_hands);
-        #[cfg(target_os = "android")]
-        if last_spectator_frame.elapsed() >= crate::spectator::VIDEO_INTERVAL {
-            let frame = crate::spectator::Frame {
-                sequence: frames,
-                environment: renderer.environment(),
-                projection: view_projection(&views[0]).to_cols_array(),
-                scene_to_space: scene_anchor.transform().to_cols_array(),
-                head: head_pose(&views).to_cols_array(),
-                view_aspect: width as f32 / height as f32,
-                agents: swarm
-                    .agents
-                    .iter()
-                    .map(|agent| agent.position.to_array())
-                    .collect(),
-                controller: controller.map(|p| p.to_array()),
-                controllers: controller_poses,
-                hands: tracked_hands,
-                attracting: controls.attracting,
-                caption: caption.text().to_owned(),
-                recording_ms: voice.recording_elapsed().map(|d| d.as_millis() as u64),
-                interaction: swarm.visual,
-                worker_cubes: delegation_scene.cubes().to_vec(),
-                worker_stations: delegation_scene.stations().to_vec(),
-                workspace: current_workspace.clone(),
-                presentation_page: presentation_navigation.card,
-                presentation_content_page: presentation_navigation.content,
-            };
-            let _ = spectator.try_send(frame);
-            last_spectator_frame = Instant::now();
-        }
         let image = swapchain.acquire_image()? as usize;
         swapchain.wait_image(xr::Duration::INFINITE)?;
         let submission = renderer.render(
