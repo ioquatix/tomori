@@ -248,7 +248,10 @@ fn main() -> ExitCode {
     let _signals = {
         use base_scheduler::Signals;
         scheduler
-            .signal_subscribe(&[libc::SIGINT, libc::SIGTERM], cancellation.clone())
+            .signal_subscribe(
+                &[libc::SIGINT, libc::SIGTERM],
+                Shutdown(cancellation.clone()),
+            )
             .inspect_err(|error| eprintln!("Could not handle signals: {error}"))
             .ok()
     };
@@ -276,6 +279,21 @@ fn main() -> ExitCode {
         Err(message) => {
             eprintln!("{message}");
             ExitCode::FAILURE
+        }
+    }
+}
+
+/// Shut down in order on the first signal, and exit immediately on a repeated one in case shutdown hangs.
+#[cfg(unix)]
+struct Shutdown(Cancellation);
+
+#[cfg(unix)]
+impl base_scheduler::Notify<libc::c_int> for Shutdown {
+    fn notify(&self, signal: libc::c_int) {
+        if self.0.cancel() {
+            eprintln!("Shutting down; signal again to exit immediately.");
+        } else {
+            std::process::exit(128 + signal);
         }
     }
 }
