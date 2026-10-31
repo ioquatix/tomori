@@ -519,8 +519,7 @@ curl -fL https://raw.githubusercontent.com/ggml-org/whisper.cpp/master/samples/j
 ```
 
 It checks partial results, finalization, out-of-order rejection, and a recording
-longer than a minute. The legacy local-Quest Whisper model comparison tests
-remain optional and require the old `android/assets/` and `android/voice-assets/` models.
+longer than a minute.
 
 A USB-connected Quest does **not** provide a Linux desktop OpenXR runtime:
 build the Android APK for standalone Quest use. Desktop execution requires its

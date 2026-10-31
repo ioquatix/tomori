@@ -48,8 +48,6 @@ libc = "0.2"
 
 [dev-dependencies]
 pollster = "0.4"
-whisper-rs = "0.16"
-hound = "3.5"
 
 [profile.release]
 lto = "thin"
