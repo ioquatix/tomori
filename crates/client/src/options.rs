@@ -24,8 +24,10 @@ pub struct Options {
     pub close_timeout: Duration,
     /// When to ping a quiet server and when to give up on a silent one. A connection that receives nothing for [`protocol::Keepalive::timeout`] ends with [`crate::Disconnect::Timeout`] and reconnects.
     pub keepalive: Keepalive,
-    /// Outgoing audio frames queued while the link is congested; older frames beyond this are dropped. At 20 ms per frame the default is 160 ms.
+    /// Outgoing live audio frames queued while the link is congested; older frames beyond this are dropped. At 20 ms per frame the default is 160 ms. Frames of an open utterance are not counted or dropped; see [`Self::outgoing_utterance_limit`].
     pub outgoing_audio_limit: usize,
+    /// Outgoing frames of the open utterance queued while the link is congested. They are never dropped individually, because recognition needs every one; beyond this limit the utterance fails with [`crate::UtteranceFailure::Congested`]. At 20 ms per frame the default is 30 seconds.
+    pub outgoing_utterance_limit: usize,
     /// Received audio frames held for the application; newer frames are dropped when it falls this far behind.
     pub incoming_audio_limit: usize,
 }
@@ -46,6 +48,7 @@ impl Options {
             close_timeout: Duration::from_secs(1),
             keepalive: Keepalive::default(),
             outgoing_audio_limit: 8,
+            outgoing_utterance_limit: 1500,
             incoming_audio_limit: 256,
         }
     }

@@ -191,6 +191,27 @@ fn orders_across_sequence_wraparound() {
 }
 
 #[test]
+fn starts_over_when_the_source_restarts_its_sequence() {
+    let mut statistics = PlaybackStatistics::default();
+    let mut buffer = JitterBuffer::new(RATE, options());
+    for sequence in 1000..1004 {
+        buffer.push(frame(sequence, 1), &mut statistics);
+        pull(&mut buffer, 4, &mut statistics);
+    }
+    // A reconnected source counts from zero again: its audio plays at once instead of being dropped as late until the sequence catches up.
+    for sequence in 0..3 {
+        buffer.push(frame(sequence, 2), &mut statistics);
+    }
+    assert_eq!(statistics.late_frames, 0);
+    assert_eq!(&pull(&mut buffer, 12, &mut statistics), &[2.0; 12]);
+
+    // A frame only slightly behind is still late, not a restart.
+    buffer.push(frame(0, 3), &mut statistics);
+    assert_eq!(statistics.late_frames, 1);
+    assert_eq!(buffer.buffered_samples(), 0);
+}
+
+#[test]
 fn resamples_to_the_device_rate() {
     let mut statistics = PlaybackStatistics::default();
     let options = JitterOptions {

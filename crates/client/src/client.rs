@@ -10,21 +10,28 @@ use base_scheduler::Cancellation;
 use base_scheduler_direct::DirectScheduler;
 use protocol::{AudioFrame, ClientMessage};
 
-use crate::outbox::{Membership, Outbox};
-use crate::{ConnectionState, Event, Options, SendError, session};
+use crate::outbox::{FailedUtterance, Membership, Outbox};
+use crate::{ConnectionState, Event, Events, Options, SendError, session};
 
 /// State shared by the application handles and the connection thread.
 pub(crate) struct Shared {
     pub outbox: Outbox,
     pub state: Mutex<ConnectionState>,
+    pub events: Events,
     /// Cancelled when the client closes, to interrupt reconnection delays and bound the final connection.
     pub closing: Cancellation,
 }
 
 impl Shared {
-    pub fn set_state(&self, state: ConnectionState, events: &mpsc::Sender<Event>) {
+    pub fn set_state(&self, state: ConnectionState) {
         *self.state.lock().unwrap_or_else(PoisonError::into_inner) = state.clone();
-        let _ = events.send(Event::State(state));
+        self.events.push(Event::State(state));
+    }
+
+    pub fn report(&self, failed: impl IntoIterator<Item = FailedUtterance>) {
+        for failed in failed {
+            self.events.push(Event::UtteranceFailed(failed));
+        }
     }
 }
 
@@ -35,14 +42,22 @@ pub struct Sender {
 }
 
 impl Sender {
-    /// Queue a control message. Control messages are never dropped while the client is open: those sent while disconnected are delivered after the next connection's Hello and restored membership. `Join`, `Leave` and `Gate` also update the membership restored on reconnection; while disconnected they, and `Presence`, only update local state.
+    /// Queue a control message. Those sent while disconnected are delivered after the next connection's Hello and restored membership. `Join`, `Leave` and `Gate` also update the membership restored on reconnection; while disconnected they, and `Presence`, only update local state.
+    ///
+    /// Utterance messages stay in order with the audio sent by [`Self::send_audio`]. An utterance that cannot reach recognition intact, because it began while disconnected, the connection ended before it was sent, or the link was too congested, is reported as [`Event::UtteranceFailed`], and its later end is not sent.
+    ///
+    /// Delivery is at most once: a message already written to a connection that then fails may be lost. The application sees that connection end as [`Event::State`].
     pub fn send(&self, message: ClientMessage) -> Result<(), SendError> {
-        self.shared.outbox.send(message)
+        let failed = self.shared.outbox.send(message)?;
+        self.shared.report(failed);
+        Ok(())
     }
 
-    /// Queue a microphone frame. Live audio is dropped while disconnected and, when the link is congested, the oldest queued frames are dropped first. Frames with [`protocol::Gate::Off`] are ignored.
+    /// Queue a microphone frame. Live audio is dropped while disconnected and, when the link is congested, the oldest queued frames are dropped first. `Agent` frames of an open utterance are never dropped individually; see [`Options::outgoing_utterance_limit`]. Frames with [`protocol::Gate::Off`] are ignored.
     pub fn send_audio(&self, frame: AudioFrame) -> Result<(), SendError> {
-        self.shared.outbox.send_audio(frame)
+        let failed = self.shared.outbox.send_audio(frame)?;
+        self.shared.report(failed);
+        Ok(())
     }
 
     pub fn state(&self) -> ConnectionState {
@@ -75,7 +90,6 @@ impl Sender {
 /// The client keeps one duplex `POST /connect` exchange open, sends Hello on every connection, restores the joined space and microphone gate after reconnecting, and reconnects with backoff. Nothing here blocks: poll [`Self::try_event`] from the application loop and drain audio with [`Self::try_audio`] or move the receiver from [`Self::take_audio`] to the audio thread.
 pub struct Client {
     sender: Sender,
-    events: Receiver<Event>,
     audio: Option<Receiver<AudioFrame>>,
     thread: Option<JoinHandle<()>>,
 }
@@ -85,11 +99,14 @@ impl Client {
     pub fn connect(options: Options) -> io::Result<Self> {
         let scheduler = DirectScheduler::new(Default::default())?;
         let shared = Arc::new(Shared {
-            outbox: Outbox::new(options.outgoing_audio_limit),
+            outbox: Outbox::new(
+                options.outgoing_audio_limit,
+                options.outgoing_utterance_limit,
+            ),
             state: Mutex::new(ConnectionState::Connecting { attempt: 1 }),
+            events: Events::new(),
             closing: Cancellation::new(),
         });
-        let (events_sender, events) = mpsc::channel();
         let (audio_sender, audio): (SyncSender<AudioFrame>, _) =
             mpsc::sync_channel(options.incoming_audio_limit.max(1));
         let thread_shared = shared.clone();
@@ -100,15 +117,14 @@ impl Client {
                     scheduler: &scheduler,
                     shared: &thread_shared,
                     options: &options,
-                    events: &events_sender,
                     audio: &audio_sender,
                 };
                 futures_lite::future::block_on(session::run(&context));
                 futures_lite::future::block_on(scheduler.shutdown());
+                thread_shared.events.finish();
             })?;
         Ok(Self {
             sender: Sender { shared },
-            events,
             audio: Some(audio),
             thread: Some(thread),
         })
@@ -134,14 +150,14 @@ impl Client {
         self.sender.state()
     }
 
-    /// Connection state changes and server messages, in order.
-    pub fn events(&self) -> &Receiver<Event> {
-        &self.events
+    /// Connection state changes and server messages, in order. See [`Events`] for how presence is coalesced when the application falls behind.
+    pub fn events(&self) -> &Events {
+        &self.sender.shared.events
     }
 
     /// The next event, if one is waiting.
     pub fn try_event(&self) -> Option<Event> {
-        self.events.try_recv().ok()
+        self.events().try_recv().ok()
     }
 
     /// Move received audio to another thread, typically the one feeding a [`crate::playback::Mixer`]. Returns `None` if already taken.

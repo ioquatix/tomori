@@ -11,6 +11,9 @@ use super::PlaybackStatistics;
 /// The most consecutive missing frames replaced with silence before playback skips to the next available frame.
 const CONCEALMENT_LIMIT: u64 = 3;
 
+/// A frame this many sequence numbers behind the latest one is not reordered or late: the source has restarted its sequence, for example after reconnecting. At 20 ms per frame this is one second, well beyond any latency limit, so such a frame could never be played in order anyway.
+const RESTART_LIMIT: u64 = 50;
+
 /// Jitter buffer timing, shared by every source in a [`super::Mixer`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct JitterOptions {
@@ -38,7 +41,7 @@ enum State {
 
 /// Reorders one source's frames by sequence and converts them to the device rate.
 ///
-/// Playback never waits for a missing frame: when the next expected frame is absent but later frames are buffered, its slot is filled with silence (up to [`CONCEALMENT_LIMIT`] frames, then playback skips ahead). A frame arriving after its slot has been played or concealed is dropped. When the buffer runs dry the source contributes silence and buffers to the target latency again.
+/// Playback never waits for a missing frame: when the next expected frame is absent but later frames are buffered, its slot is filled with silence (up to [`CONCEALMENT_LIMIT`] frames, then playback skips ahead). A frame arriving after its slot has been played or concealed is dropped, unless it is more than [`RESTART_LIMIT`] frames behind the latest, which means the source restarted its sequence: the buffer then starts over from that frame. When the buffer runs dry the source contributes silence and buffers to the target latency again.
 pub struct JitterBuffer {
     options: JitterOptions,
     sample_rate: u32,
@@ -117,7 +120,14 @@ impl JitterBuffer {
     pub fn push(&mut self, frame: AudioFrame, statistics: &mut PlaybackStatistics) {
         debug_assert_eq!(frame.sample_rate, self.sample_rate);
         self.idle_samples = 0;
-        let sequence = self.extend(frame.sequence);
+        let mut sequence = self.extend(frame.sequence);
+        if self
+            .latest
+            .is_some_and(|latest| latest.saturating_sub(sequence) > RESTART_LIMIT)
+        {
+            self.restart();
+            sequence = self.extend(frame.sequence);
+        }
         if self.next.is_some_and(|next| sequence < next) || self.frames.contains_key(&sequence) {
             statistics.late_frames += 1;
             return;
@@ -133,6 +143,16 @@ impl JitterBuffer {
         if self.buffered_samples() > self.samples(self.options.latency_limit) {
             self.trim(statistics);
         }
+    }
+
+    /// Forget the source's sequence and buffered audio, and buffer again from the next frame.
+    fn restart(&mut self) {
+        self.frames.clear();
+        self.latest = None;
+        self.next = None;
+        self.pending.clear();
+        self.position = 0.0;
+        self.state = State::Buffering;
     }
 
     /// Discard the oldest audio until the buffer is back at the target latency.

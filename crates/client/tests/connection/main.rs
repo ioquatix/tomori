@@ -18,6 +18,7 @@ fn options(address: SocketAddr) -> Options {
     options.backoff = Backoff {
         initial_delay: Duration::from_millis(20),
         delay_limit: Duration::from_millis(100),
+        ..Backoff::default()
     };
     options.close_timeout = Duration::from_millis(500);
     options.incoming_audio_limit = 1024;
@@ -183,8 +184,11 @@ fn reconnects_and_restores_the_joined_space_and_gate() {
         }
     );
 
-    // Leaving clears what is restored next time.
+    // Leaving, once the server confirms it, clears what is restored next time.
     client.send(ClientMessage::Leave).unwrap();
+    wait_for(&client, |event| {
+        matches!(event, Event::Message(ServerMessage::Left))
+    });
     client.send(kick()).unwrap();
     assert_eq!(wait_connected(&client), 3);
     client.send(ClientMessage::ListSpaces).unwrap();
@@ -235,6 +239,25 @@ fn retries_until_the_server_is_listening() {
         matches!(event, Event::Message(ServerMessage::Spaces { .. }))
     });
     drop(server);
+}
+
+#[test]
+fn tries_each_resolved_address_in_turn() {
+    // `localhost` can resolve to `::1` before `127.0.0.1`, where nothing listens on this port.
+    let server = MiniServer::start(localhost(), Mode::Normal);
+    let mut options = options(server.address);
+    options.address = format!("localhost:{}", server.address.port());
+    let client = Client::connect(options).unwrap();
+    let first = wait_for(&client, |event| {
+        matches!(
+            event,
+            Event::State(ConnectionState::Connected { .. } | ConnectionState::Disconnected { .. })
+        )
+    });
+    assert!(
+        matches!(first, Event::State(ConnectionState::Connected { .. })),
+        "{first:?}"
+    );
 }
 
 #[test]

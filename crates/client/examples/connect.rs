@@ -157,6 +157,9 @@ fn main() -> std::io::Result<()> {
         match client.events().recv_timeout(Duration::from_millis(100)) {
             Ok(Event::State(state)) => println!("state: {state:?}"),
             Ok(Event::Message(message)) => println!("message: {}", describe(&message)),
+            Ok(Event::UtteranceFailed(failed)) => {
+                println!("utterance {} failed: {}", failed.utterance, failed.failure)
+            }
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => break,
         }

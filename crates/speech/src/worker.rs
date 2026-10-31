@@ -5,16 +5,16 @@
 //!
 //! The worker prints `{"ready": true, ...}` once its model is loaded, then answers each request line, which carries an `id`, with one or more response lines carrying the same `id`. A response with an `error` field fails that request; otherwise the caller decides which response completes it.
 //!
-//! The process is started on first use and again after any failure: exit, malformed output, a write error or a timeout. A failure is returned to the request that observed it and is never retried silently. Pipes are read by standard threads; this can move to the scheduler's pipe adoption when it is available.
+//! The process is started on first use and again after any failure: exit, malformed output (including output that is not UTF-8), a write error or a timeout. A failure is returned to the request that observed it and is never retried silently. A failed process is killed and reaped within a bound, so no failure can block the caller indefinitely. Pipes are read by standard threads; this can move to the scheduler's pipe adoption when it is available.
 
 use std::{
     ffi::OsString,
-    io::{BufRead, BufReader, Write},
+    io::{BufRead, BufReader, Read, Write},
     path::PathBuf,
-    process::{Child, ChildStdin, Command, Stdio},
+    process::{Child, ChildStdin, Command, ExitStatus, Stdio},
     sync::mpsc::{self, Receiver, RecvTimeoutError},
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use serde_json::{Value, json};
@@ -28,9 +28,9 @@ pub struct WorkerCommand {
     pub arguments: Vec<OsString>,
     pub environment: Vec<(OsString, OsString)>,
     pub directory: Option<PathBuf>,
-    /// How long to wait for the ready line after starting.
+    /// How long to wait for the ready line after starting, however much other output arrives first.
     pub startup_timeout: Duration,
-    /// How long to wait for each response line.
+    /// How long to wait for each response line. It always applies: a worker that stops writing without exiting is killed.
     pub response_timeout: Duration,
     /// A short name used in log messages and errors.
     pub name: String,
@@ -75,7 +75,59 @@ struct Running {
 impl Drop for Running {
     fn drop(&mut self) {
         let _ = self.child.kill();
-        let _ = self.child.wait();
+        reap(&mut self.child, REAP_LIMIT);
+    }
+}
+
+/// How long a worker that closed its output may take to exit by itself before it is killed.
+const EXIT_GRACE: Duration = Duration::from_millis(200);
+
+/// How long to wait for a killed worker to be reaped. A process that cannot be reaped in this time is left to the operating system rather than blocking the caller.
+const REAP_LIMIT: Duration = Duration::from_secs(2);
+
+/// Wait up to `limit` for `child` to exit, returning its status if it did.
+fn reap(child: &mut Child, limit: Duration) -> Option<ExitStatus> {
+    let deadline = Instant::now() + limit;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Some(status),
+            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
+            Ok(None) | Err(_) => return None,
+        }
+    }
+}
+
+/// Stop a worker whose output has ended: let it exit by itself briefly, then kill it. Returns its exit status if it could be reaped.
+fn stop(child: &mut Child) -> Option<ExitStatus> {
+    if let Some(status) = reap(child, EXIT_GRACE) {
+        return Some(status);
+    }
+    let _ = child.kill();
+    reap(child, REAP_LIMIT)
+}
+
+/// Each line of `input` up to its end, without the line ending. Bytes that are not UTF-8 are replaced rather than ending the stream, so the reader keeps draining the pipe.
+fn lines_lossy(input: impl Read, mut line: impl FnMut(String) -> bool) {
+    let mut input = BufReader::new(input);
+    let mut buffer = Vec::new();
+    loop {
+        buffer.clear();
+        match input.read_until(b'\n', &mut buffer) {
+            Ok(0) => return,
+            Ok(_) => {
+                if buffer.last() == Some(&b'\n') {
+                    buffer.pop();
+                    if buffer.last() == Some(&b'\r') {
+                        buffer.pop();
+                    }
+                }
+                if !line(String::from_utf8_lossy(&buffer).into_owned()) {
+                    return;
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => return,
+        }
     }
 }
 
@@ -134,16 +186,8 @@ impl Worker {
         thread::Builder::new()
             .name(format!("{name}-stdout"))
             .spawn(move || {
-                for line in BufReader::new(stdout).lines() {
-                    match line {
-                        Ok(line) => {
-                            if sender.send(Some(line)).is_err() {
-                                return;
-                            }
-                        }
-                        Err(_) => break,
-                    }
-                }
+                // Output that is not valid UTF-8 arrives as a line that does not parse, which fails the request rather than ending the stream.
+                lines_lossy(stdout, |line| sender.send(Some(line)).is_ok());
                 let _ = sender.send(None);
             })
             .expect("spawn worker reader");
@@ -151,9 +195,11 @@ impl Worker {
         thread::Builder::new()
             .name(format!("{name}-stderr"))
             .spawn(move || {
-                for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                // Drain until the end, whatever the bytes, so the worker never blocks writing diagnostics.
+                lines_lossy(stderr, |line| {
                     log::warn!("{name} worker: {line}");
-                }
+                    true
+                });
             })
             .expect("spawn worker stderr reader");
 
@@ -162,8 +208,9 @@ impl Worker {
             stdin,
             lines,
         };
-        let timeout = self.command.startup_timeout;
+        let deadline = Instant::now() + self.command.startup_timeout;
         loop {
+            let timeout = deadline.saturating_duration_since(Instant::now());
             let line = receive(&mut running, timeout, &self.command.name, "startup")?;
             let Ok(message) = serde_json::from_str::<Value>(&line) else {
                 log::warn!("{} worker: ignoring output {line:?}", self.command.name);
@@ -254,13 +301,12 @@ fn receive(
     match running.lines.recv_timeout(timeout) {
         Ok(Some(line)) => Ok(line),
         Ok(None) | Err(RecvTimeoutError::Disconnected) => {
-            let status = running
-                .child
-                .wait()
-                .map(|status| status.to_string())
-                .unwrap_or_else(|error| error.to_string());
+            let status = match stop(&mut running.child) {
+                Some(status) => format!("exited ({status})"),
+                None => "closed its output and could not be stopped".to_owned(),
+            };
             Err(Error::Worker(format!(
-                "{name} worker exited ({status}) while waiting for {waiting}"
+                "{name} worker {status} while waiting for {waiting}"
             )))
         }
         Err(RecvTimeoutError::Timeout) => Err(Error::Worker(format!(
@@ -352,5 +398,92 @@ done
             call(&mut worker, "hello"),
             Err(Error::Unavailable(_))
         ));
+    }
+
+    /// Call `operation` on a fresh worker running `script`, asserting that it fails as a worker error well before the response timeout.
+    fn fails_promptly(script: &str) -> String {
+        let mut command = shell(script);
+        command.response_timeout = Duration::from_secs(20);
+        let mut worker = Worker::new(command);
+        let started = Instant::now();
+        let result = call(&mut worker, "hello");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "took {:?}",
+            started.elapsed()
+        );
+        assert!(worker.running.is_none());
+        match result {
+            Err(Error::Worker(message)) => message,
+            other => panic!("expected a worker error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn output_that_is_not_utf8_fails_the_request_instead_of_hanging() {
+        let message = fails_promptly(
+            r#"
+echo '{"ready": true}'
+read -r line
+printf '\377\n'
+exec sleep 1000
+"#,
+        );
+        assert!(message.contains("wrote"), "{message}");
+    }
+
+    #[test]
+    fn a_worker_that_closes_its_output_without_exiting_is_killed() {
+        let message = fails_promptly(
+            r#"
+echo '{"ready": true}'
+read -r line
+exec 1>&-
+exec sleep 1000
+"#,
+        );
+        assert!(
+            message.contains("while waiting for a response"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn a_worker_that_exits_reports_its_status() {
+        let message = fails_promptly(
+            r#"
+echo '{"ready": true}'
+read -r line
+exit 3
+"#,
+        );
+        assert!(message.contains("exited"), "{message}");
+    }
+
+    #[test]
+    fn startup_output_that_is_not_utf8_is_ignored() {
+        let mut worker = Worker::new(shell(&format!("printf '\\377\\n'\n{ECHO}")));
+        assert_eq!(call(&mut worker, "hello"), Ok(1));
+    }
+
+    #[test]
+    fn startup_is_bounded_however_much_other_output_arrives() {
+        let mut command = shell("while true; do echo noise; sleep 0.05; done");
+        command.startup_timeout = Duration::from_millis(300);
+        let mut worker = Worker::new(command);
+        let started = Instant::now();
+        assert!(matches!(worker.start(), Err(Error::Worker(_))));
+        assert!(started.elapsed() < Duration::from_secs(3));
+    }
+
+    #[test]
+    fn diagnostics_that_are_not_utf8_are_still_drained() {
+        // More than a pipe buffer of diagnostics after an invalid byte: the worker blocks unless stderr is drained to the end.
+        let script =
+            format!("printf '\\377\\n' >&2\nhead -c 300000 /dev/zero | tr '\\0' 'x' >&2\n{ECHO}");
+        let mut command = shell(&script);
+        command.startup_timeout = Duration::from_secs(10);
+        let mut worker = Worker::new(command);
+        assert_eq!(call(&mut worker, "hello"), Ok(1));
     }
 }
