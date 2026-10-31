@@ -1,3 +1,6 @@
+// Released under the MIT License.
+// Copyright, 2026, by Samuel Williams.
+
 use bytemuck::{Pod, Zeroable};
 use glam::{Mat3, Vec3};
 

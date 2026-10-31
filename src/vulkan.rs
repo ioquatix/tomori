@@ -1,3 +1,6 @@
+// Released under the MIT License.
+// Copyright, 2026, by Samuel Williams.
+
 //! The only raw graphics interop: OpenXR chooses/creates Vulkan objects, wgpu
 //! owns the instance/device and renders into borrowed runtime swapchain images.
 use anyhow::{Context, Result, ensure};

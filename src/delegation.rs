@@ -1,3 +1,6 @@
+// Released under the MIT License.
+// Copyright, 2026, by Samuel Williams.
+
 //! Bounded worker geometry. Positions belong to this client, never to the bridge.
 //!
 //! Live anchors do not move when metadata, ordering, or membership changes. Slots

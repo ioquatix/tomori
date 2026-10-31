@@ -1,3 +1,6 @@
+// Released under the MIT License.
+// Copyright, 2026, by Samuel Williams.
+
 //! Quest playback of PC-synthesized audio; all network/audio work stays off XR.
 use crate::{
     speech::audio_frame_count,

@@ -1,3 +1,6 @@
+// Released under the MIT License.
+// Copyright, 2026, by Samuel Williams.
+
 //! Periodic shape/detail noise baked at build time, not on the headset or per frame.
 pub const SIZE: usize = 64;
 

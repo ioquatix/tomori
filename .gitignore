@@ -9,8 +9,6 @@
 
 # Private local workspace context; publish source, not coordinator/session history.
 /memory/
-/design/
-/AGENTS.md
 /SPACE.md
 
 # Local credentials, recordings, logs and interpreter caches.

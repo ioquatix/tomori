@@ -557,11 +557,10 @@ space changes take effect at the runtime's specified frame time. Recentering
 doesn't reset the agents, chat, or interaction state. This is opaque VR, not
 passthrough; optional tracked-hand skeletons are described above.
 
-## License
+## Third-Party Components
 
-Original project code is licensed under either the [MIT license](LICENSE-MIT)
-or the [Apache License 2.0](LICENSE-APACHE), at your option, matching the Cargo
-package declaration. Third-party components retain their own licenses:
+Original project code is released under the MIT License; see `license.md`.
+Third-party components retain their own licenses:
 
 - Bundled controller assets: [MIT](assets/controllers/LICENSE.md).
 - Basis Universal notices and test fixtures:

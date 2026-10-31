@@ -1,3 +1,6 @@
+// Released under the MIT License.
+// Copyright, 2026, by Samuel Williams.
+
 //! Validated OpenXR hand joint positions for the optional skeleton view.
 use serde::{Deserialize, Serialize};
 

@@ -1,3 +1,6 @@
+// Released under the MIT License.
+// Copyright, 2026, by Samuel Williams.
+
 //! New completed assistant text only; never replay existing session history.
 use std::collections::HashSet;
 

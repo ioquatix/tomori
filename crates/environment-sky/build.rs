@@ -1,3 +1,6 @@
+// Released under the MIT License.
+// Copyright, 2026, by Samuel Williams.
+
 #[path = "src/cloud_noise.rs"]
 mod cloud_noise;
 #[path = "src/light_bake.rs"]

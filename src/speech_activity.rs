@@ -1,3 +1,6 @@
+// Released under the MIT License.
+// Copyright, 2026, by Samuel Williams.
+
 //! Platform-independent speech lifecycle; guards outlive queueing and synthesis.
 use std::{
     collections::BTreeMap,

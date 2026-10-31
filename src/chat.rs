@@ -1,3 +1,6 @@
+// Released under the MIT License.
+// Copyright, 2026, by Samuel Williams.
+
 //! Headset session browser and a background HTTP client for the loopback bridge.
 use crate::caption::{COLUMNS, ROWS, wrapped_lines};
 use anyhow::{Context, Result};

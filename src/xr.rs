@@ -1,3 +1,6 @@
+// Released under the MIT License.
+// Copyright, 2026, by Samuel Williams.
+
 use crate::{caption::Caption, controller, graphics::Renderer, hands, swarm::Swarm, vulkan::Gpu};
 use anyhow::{Context, Result, ensure};
 use ash::vk;

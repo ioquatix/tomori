@@ -1,3 +1,6 @@
+// Released under the MIT License.
+// Copyright, 2026, by Samuel Williams.
+
 //! A fixed moonlit cloudscape, independent of Tomori's sessions and simulation.
 //! Geometry/noise textures are uploaded once; each eye ray-marches a bounded,
 //! low-resolution cloud volume and composites it over the opaque scene.

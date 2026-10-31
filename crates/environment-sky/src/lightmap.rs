@@ -1,3 +1,6 @@
+// Released under the MIT License.
+// Copyright, 2026, by Samuel Williams.
+
 //! Build-time AO (alpha) and occluded lantern irradiance (RGB), sampled in linear space.
 use wgpu::util::DeviceExt;
 

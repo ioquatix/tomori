@@ -1,3 +1,6 @@
+// Released under the MIT License.
+// Copyright, 2026, by Samuel Williams.
+
 use crate::interaction::{Mode, Visual};
 use glam::Vec3;
 

@@ -1,3 +1,6 @@
+// Released under the MIT License.
+// Copyright, 2026, by Samuel Williams.
+
 //! Portable CPU-only recognition; Android capture/lifecycle lives in voice.rs.
 use anyhow::{Result, ensure};
 #[cfg(test)]

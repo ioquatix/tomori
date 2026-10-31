@@ -1,3 +1,6 @@
+// Released under the MIT License.
+// Copyright, 2026, by Samuel Williams.
+
 //! Bounded, world-space task labels and coordinator-published result pages.
 //! This deliberately has no dependency on the head-locked caption renderer.
 use crate::delegation::{Kind, Presentation, State, Station, Workspace};
