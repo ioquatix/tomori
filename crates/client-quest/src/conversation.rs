@@ -170,6 +170,8 @@ impl Conversation {
     pub fn connect(&mut self, choice: Choice) {
         log::info!("Connecting to {} at {}", choice.label, choice.address);
         self.automatic = false;
+        // The server being connected is the one to select on return, not one that went missing earlier.
+        self.missing = None;
         self.actions.push(Action::Connect(choice.clone()));
         self.connected = Some(choice);
         self.state = None;
@@ -260,6 +262,10 @@ impl Conversation {
                     self.leaving = true;
                     self.send(ClientMessage::Leave);
                 } else {
+                    if self.mode == Mode::Lobby {
+                        // A join refused without naming the space is not taken as the space being gone, but it is no longer awaited.
+                        self.joining = None;
+                    }
                     self.error = Some(error);
                 }
                 // A refused decision can be tried again.
@@ -577,7 +583,7 @@ impl Conversation {
 
     /// Whether the lobby shows an error or an ended space, which B dismisses before it returns to the server list.
     fn dismissable(&self) -> bool {
-        self.error.is_some() || self.ended.is_some()
+        self.error.is_some() || (self.ended.is_some() && self.status().is_none())
     }
 
     fn status(&self) -> Option<String> {
@@ -1304,6 +1310,21 @@ mod tests {
     }
 
     #[test]
+    fn an_ended_space_hidden_by_the_connection_status_is_not_offered_for_dismissal() {
+        let mut conversation = joined(|_| {});
+        conversation.apply(connected());
+        conversation.apply(refused(SPACE));
+        conversation.apply(Event::Message(ServerMessage::Left));
+        assert!(conversation.text().contains("B dismiss"));
+        conversation.apply(Event::State(ConnectionState::Connecting { attempt: 2 }));
+        let text = conversation.text();
+        assert!(
+            !text.contains("has ended") && text.contains("B servers"),
+            "{text}"
+        );
+    }
+
+    #[test]
     fn another_error_while_rejoining_stays_in_the_space() {
         let mut conversation = joined(|_| {});
         conversation.apply(Event::State(ConnectionState::Disconnected {
@@ -1640,8 +1661,28 @@ mod tests {
         conversation.back();
         conversation.set_servers(vec![usb.clone()]);
         conversation.navigate(0, 1);
-        conversation.set_servers(vec![usb, Choice::new("B", "b", Source::Discovered)]);
+        conversation.set_servers(vec![usb.clone(), Choice::new("B", "b", Source::Discovered)]);
         assert!(conversation.text().contains("> USB"));
+    }
+
+    #[test]
+    fn connecting_to_another_server_while_the_chosen_one_is_missing_forgets_it() {
+        let mut conversation = Conversation::new("ada", "Ada");
+        let usb = Choice::new("USB", USB, Source::Usb);
+        let b = Choice::new("B", "b", Source::Discovered);
+        conversation.set_servers(vec![usb.clone(), b.clone()]);
+        conversation.navigate(0, 1);
+        conversation.accept();
+        conversation.back();
+        // B is missing when browsing restarts, and A connects to USB instead.
+        conversation.set_servers(vec![usb.clone()]);
+        conversation.accept();
+        conversation.back();
+        conversation.take_actions();
+        conversation.set_servers(vec![usb.clone()]);
+        conversation.set_servers(vec![b, usb]);
+        let text = conversation.text();
+        assert!(text.contains("> USB"), "{text}");
     }
 
     fn remembered() -> Choice {
