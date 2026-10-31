@@ -12,7 +12,7 @@ mod protocol;
 mod session;
 
 use std::fs;
-use std::io::{BufRead, BufReader};
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, SystemTime};
@@ -116,43 +116,17 @@ impl backend::Backend for ClaudeCode {
         let Some(transcripts) = self.transcripts(directory) else {
             return Ok(Vec::new());
         };
-        let Ok(entries) = fs::read_dir(&transcripts) else {
-            return Ok(Vec::new());
-        };
-
-        let mut sessions = Vec::new();
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path
-                .extension()
-                .is_none_or(|extension| extension != "jsonl")
-            {
-                continue;
-            }
-            let Some(id) = path.file_stem().and_then(|stem| stem.to_str()) else {
-                continue;
-            };
-            if uuid::Uuid::parse_str(id).is_err() {
-                continue;
-            }
-            let Some(title) = transcript_title(&path) else {
-                continue;
-            };
-            let modified = entry
-                .metadata()
-                .and_then(|metadata| metadata.modified())
-                .unwrap_or(SystemTime::UNIX_EPOCH);
-            sessions.push((
-                modified,
-                SessionSummary {
-                    id: id.into(),
-                    title,
-                    directory: directory.into(),
-                },
-            ));
-        }
-        sessions.sort_by_key(|(modified, _)| std::cmp::Reverse(*modified));
-        Ok(sessions.into_iter().map(|(_, summary)| summary).collect())
+        // Listing reads every transcript, so it runs on its own thread rather than blocking the executor.
+        let directory = directory.to_owned();
+        let (sender, receiver) = async_channel::bounded(1);
+        let failed = |_| Error::new(ErrorKind::Other, "could not list Claude Code sessions");
+        std::thread::Builder::new()
+            .name("claude-code-sessions".into())
+            .spawn(move || {
+                let _ = sender.send_blocking(list_sessions(&transcripts, &directory));
+            })
+            .map_err(|error| Error::new(ErrorKind::Other, error.to_string()))?;
+        receiver.recv().await.map_err(failed)
     }
 
     async fn create(&self, spec: SessionSpec) -> Result<ClaudeCodeSession> {
@@ -230,25 +204,111 @@ fn base36(mut value: u32) -> String {
     digits.iter().rev().collect()
 }
 
+/// Summaries of the sessions with transcripts in `transcripts`, most recently modified first. Blocks on file I/O.
+fn list_sessions(transcripts: &Path, directory: &str) -> Vec<SessionSummary> {
+    let Ok(entries) = fs::read_dir(transcripts) else {
+        return Vec::new();
+    };
+
+    let mut sessions = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path
+            .extension()
+            .is_none_or(|extension| extension != "jsonl")
+        {
+            continue;
+        }
+        let Some(id) = path.file_stem().and_then(|stem| stem.to_str()) else {
+            continue;
+        };
+        if uuid::Uuid::parse_str(id).is_err() {
+            continue;
+        }
+        let Some(title) = transcript_title(&path) else {
+            continue;
+        };
+        let modified = entry
+            .metadata()
+            .and_then(|metadata| metadata.modified())
+            .unwrap_or(SystemTime::UNIX_EPOCH);
+        sessions.push((
+            modified,
+            SessionSummary {
+                id: id.into(),
+                title,
+                directory: directory.into(),
+            },
+        ));
+    }
+    sessions.sort_by_key(|(modified, _)| std::cmp::Reverse(*modified));
+    sessions.into_iter().map(|(_, summary)| summary).collect()
+}
+
+/// How much of each end of a transcript is read for its title, the same as Claude Code's own session list.
+const TRANSCRIPT_WINDOW: u64 = 64 * 1024;
+
 /// The session's title: one set by the user, else the generated one, else its first prompt. `None` for transcripts
 /// without a conversation.
+///
+/// Like Claude Code, it reads only the first and last [`TRANSCRIPT_WINDOW`] bytes of a long transcript. The first
+/// prompt is near the start, and the latest title is near the end because Claude Code appends its title records again
+/// when it exits and after compacting. A title recorded only in the middle of a long transcript, from a session that is
+/// still running, is not found until then.
 fn transcript_title(path: &Path) -> Option<String> {
-    let file = fs::File::open(path).ok()?;
+    let mut file = fs::File::open(path).ok()?;
+    let (head, tail) = transcript_ends(&mut file).ok()?;
     let mut custom = None;
     let mut generated = None;
-    let mut prompt = None;
-    for line in BufReader::new(file).lines() {
-        let Ok(line) = line else { break };
-        // Only parse the few record types that matter; transcripts can be large.
+    // Later title records replace earlier ones, so the tail is read after the head. Only the few record types that
+    // matter are parsed.
+    for line in head.lines().chain(tail.lines()) {
         if line.starts_with(r#"{"type":"custom-title""#) {
-            custom = record_field(&line, "customTitle");
+            custom = record_field(line, "customTitle").or(custom);
         } else if line.starts_with(r#"{"type":"ai-title""#) {
-            generated = record_field(&line, "aiTitle");
-        } else if prompt.is_none() && line.contains(r#""type":"user""#) {
-            prompt = first_prompt(&line);
+            generated = record_field(line, "aiTitle").or(generated);
         }
     }
-    custom.or(generated).or(prompt)
+    custom.or(generated).or_else(|| {
+        head.lines()
+            .filter(|line| line.contains(r#""type":"user""#))
+            .find_map(first_prompt)
+    })
+}
+
+/// The complete lines in the first and last [`TRANSCRIPT_WINDOW`] bytes of `file`. A transcript short enough to read
+/// whole is returned entirely as the head.
+fn transcript_ends(file: &mut fs::File) -> std::io::Result<(String, String)> {
+    let length = file.metadata()?.len();
+    if length <= 2 * TRANSCRIPT_WINDOW {
+        let mut whole = Vec::new();
+        file.read_to_end(&mut whole)?;
+        return Ok((String::from_utf8_lossy(&whole).into_owned(), String::new()));
+    }
+
+    let mut head = vec![0; TRANSCRIPT_WINDOW as usize];
+    file.read_exact(&mut head)?;
+    // Drop the line cut off by the end of the window.
+    let end = head
+        .iter()
+        .rposition(|&byte| byte == b'\n')
+        .map_or(0, |end| end + 1);
+    head.truncate(end);
+
+    let mut tail = vec![0; TRANSCRIPT_WINDOW as usize];
+    file.seek(SeekFrom::Start(length - TRANSCRIPT_WINDOW))?;
+    file.read_exact(&mut tail)?;
+    // Drop the line cut off by the start of the window.
+    let start = tail
+        .iter()
+        .position(|&byte| byte == b'\n')
+        .map_or(tail.len(), |end| end + 1);
+    tail.drain(..start);
+
+    Ok((
+        String::from_utf8_lossy(&head).into_owned(),
+        String::from_utf8_lossy(&tail).into_owned(),
+    ))
 }
 
 fn record_field(line: &str, key: &str) -> Option<String> {
@@ -320,5 +380,59 @@ mod tests {
 
         let exactly = format!("/{}", "a".repeat(199));
         assert_eq!(project_name(&exactly).len(), 200);
+    }
+
+    #[test]
+    fn long_transcripts_are_titled_from_their_ends() {
+        let directory = std::env::temp_dir().join(format!("transcript-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("transcript.jsonl");
+        let filler = format!(
+            "{{\"type\":\"assistant\",\"message\":{{\"content\":[{{\"type\":\"text\",\"text\":\"{}\"}}]}}}}\n",
+            "x".repeat(1000)
+        );
+        let write = |title: &str, middle: &str, end: &str| {
+            let mut contents = String::new();
+            contents.push_str(
+                "{\"type\":\"user\",\"isMeta\":true,\"message\":{\"content\":\"Caveat\"}}\n",
+            );
+            contents.push_str("{\"type\":\"user\",\"message\":{\"content\":\"Run the tests.\"}}\n");
+            contents.push_str(title);
+            for _ in 0..200 {
+                contents.push_str(&filler);
+            }
+            contents.push_str(middle);
+            for _ in 0..200 {
+                contents.push_str(&filler);
+            }
+            contents.push_str(end);
+            fs::write(&path, contents).unwrap();
+        };
+        let early = "{\"type\":\"ai-title\",\"aiTitle\":\"Early\"}\n";
+
+        // The latest title is in the tail.
+        write(
+            early,
+            "{\"type\":\"ai-title\",\"aiTitle\":\"Middle\"}\n",
+            "{\"type\":\"custom-title\",\"customTitle\":\"Colour preference\"}\n",
+        );
+        assert_eq!(
+            transcript_title(&path).as_deref(),
+            Some("Colour preference")
+        );
+
+        // A title in the head counts; one only in the middle is not read.
+        write(
+            early,
+            "{\"type\":\"custom-title\",\"customTitle\":\"Middle\"}\n",
+            "",
+        );
+        assert_eq!(transcript_title(&path).as_deref(), Some("Early"));
+
+        // Without a title, the first prompt in the head stands in.
+        write("", "", "");
+        assert_eq!(transcript_title(&path).as_deref(), Some("Run the tests."));
+
+        fs::remove_dir_all(&directory).unwrap();
     }
 }
