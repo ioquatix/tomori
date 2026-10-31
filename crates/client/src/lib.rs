@@ -16,6 +16,7 @@ mod connection_state;
 mod events;
 mod options;
 mod outbox;
+mod resolve;
 mod session;
 
 pub use backoff::Backoff;

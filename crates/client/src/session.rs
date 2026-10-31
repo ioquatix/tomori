@@ -6,7 +6,7 @@
 use std::cell::Cell;
 use std::convert::Infallible;
 use std::future::Future;
-use std::net::{SocketAddr, ToSocketAddrs};
+use std::net::SocketAddr;
 use std::sync::mpsc::SyncSender;
 use std::time::{Duration, Instant};
 
@@ -17,12 +17,13 @@ use base_scheduler::{Cancellation, Clock, Timers};
 use base_scheduler_direct::DirectScheduler;
 use futures_lite::future::{or, zip};
 use protocol::{
-    AudioFrame, CONNECT_PATH, CONTENT_TYPE, ClientMessage, DEFAULT_PORT, Frame, FrameDecoder,
-    FrameKind, PROTOCOL_VERSION, ServerMessage,
+    AudioFrame, CONNECT_PATH, CONTENT_TYPE, ClientMessage, Frame, FrameDecoder, FrameKind,
+    PROTOCOL_VERSION, ServerMessage,
 };
 
 use crate::client::Shared;
 use crate::outbox::Batch;
+use crate::resolve::resolve;
 use crate::{ConnectionState, Disconnect, Event, Options};
 
 /// The most encoded bytes written to the request body at once.
@@ -78,28 +79,38 @@ pub(crate) async fn run(context: &Context<'_>) {
     context.set_state(ConnectionState::Closed);
 }
 
-fn resolve(address: &str) -> Result<SocketAddr, Disconnect> {
-    let addresses = if address.contains(':') {
-        address.to_socket_addrs()
-    } else {
-        (address, DEFAULT_PORT).to_socket_addrs()
-    };
-    addresses
-        .map_err(|error| Disconnect::Address(error.to_string()))?
-        .next()
-        .ok_or_else(|| Disconnect::Address(format!("{address} has no addresses")))
-}
-
 fn transport(error: impl std::fmt::Display) -> Disconnect {
     Disconnect::Transport(error.to_string())
 }
 
-/// Run one connection until it ends, returning why.
+/// Run one connection until it ends, returning why. Each resolved address is tried in turn until one accepts the connection, all within the connect timeout.
 async fn session(context: &Context<'_>, welcomed: &Cell<bool>) -> Disconnect {
-    let address = match resolve(&context.options.address) {
-        Ok(address) => address,
+    let addresses = match resolve(&context.options.address) {
+        Ok(addresses) => addresses,
         Err(reason) => return reason,
     };
+    let deadline = context.scheduler.now() + context.options.connect_timeout;
+    let mut reason = Disconnect::Timeout;
+    for address in addresses {
+        let opened = Cell::new(false);
+        reason = connection(context, address, deadline, &opened, welcomed).await;
+        // Only an address that refused the connection is skipped: once the request is open, queued messages may have been taken for it.
+        let refused = !opened.get() && matches!(reason, Disconnect::Transport(_));
+        if !refused || context.shared.outbox.is_closed() || context.scheduler.now() >= deadline {
+            break;
+        }
+    }
+    reason
+}
+
+/// Run one connection to `address` until it ends, returning why. `opened` is set once the request is open.
+async fn connection(
+    context: &Context<'_>,
+    address: SocketAddr,
+    deadline: Instant,
+    opened: &Cell<bool>,
+    welcomed: &Cell<bool>,
+) -> Disconnect {
     let (client, driver) = HttpClient::new(
         context.scheduler,
         Endpoint::new(address),
@@ -108,7 +119,8 @@ async fn session(context: &Context<'_>, welcomed: &Cell<bool>) -> Disconnect {
     .expect("the default HTTP client options are valid");
     let lifetime = Cancellation::new();
     let exchange = async {
-        let reason = or(exchange(context, &client, &lifetime, welcomed), async {
+        let exchange = exchange(context, &client, &lifetime, deadline, opened, welcomed);
+        let reason = or(exchange, async {
             // Closing lets the exchange deliver queued control messages, but only for so long.
             context.shared.closing.cancelled().await;
             let _ = context
@@ -130,6 +142,8 @@ async fn exchange(
     context: &Context<'_>,
     client: &HttpClient<'_>,
     lifetime: &Cancellation,
+    deadline: Instant,
+    opened: &Cell<bool>,
     welcomed: &Cell<bool>,
 ) -> Disconnect {
     let mut metadata = RequestMetadata::new(Method::POST);
@@ -142,8 +156,9 @@ async fn exchange(
         .fields
         .set("accept", CONTENT_TYPE)
         .expect("the content type is a valid field value");
+    let remaining = deadline.saturating_duration_since(context.scheduler.now());
     let request = context
-        .within(context.options.connect_timeout, async {
+        .within(remaining, async {
             client
                 .open_request(metadata, lifetime)
                 .await
@@ -154,6 +169,7 @@ async fn exchange(
         Ok(request) => request.split(),
         Err(reason) => return reason,
     };
+    opened.set(true);
 
     let upload = async {
         let options = context.options;
@@ -352,26 +368,5 @@ impl FrameReader<'_, '_> {
                 BodyFrame::End => true,
             };
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn resolves_addresses_with_the_default_port() {
-        assert_eq!(
-            resolve("127.0.0.1").unwrap(),
-            SocketAddr::from(([127, 0, 0, 1], DEFAULT_PORT))
-        );
-        assert_eq!(
-            resolve("127.0.0.1:9").unwrap(),
-            SocketAddr::from(([127, 0, 0, 1], 9))
-        );
-        assert!(matches!(
-            resolve("invalid host name"),
-            Err(Disconnect::Address(_))
-        ));
     }
 }

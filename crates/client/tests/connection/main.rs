@@ -241,6 +241,25 @@ fn retries_until_the_server_is_listening() {
 }
 
 #[test]
+fn tries_each_resolved_address_in_turn() {
+    // `localhost` can resolve to `::1` before `127.0.0.1`, where nothing listens on this port.
+    let server = MiniServer::start(localhost(), Mode::Normal);
+    let mut options = options(server.address);
+    options.address = format!("localhost:{}", server.address.port());
+    let client = Client::connect(options).unwrap();
+    let first = wait_for(&client, |event| {
+        matches!(
+            event,
+            Event::State(ConnectionState::Connected { .. } | ConnectionState::Disconnected { .. })
+        )
+    });
+    assert!(
+        matches!(first, Event::State(ConnectionState::Connected { .. })),
+        "{first:?}"
+    );
+}
+
+#[test]
 fn closing_delivers_queued_control_messages() {
     let server = MiniServer::start(localhost(), Mode::Normal);
     let client = Client::connect(options(server.address)).unwrap();
