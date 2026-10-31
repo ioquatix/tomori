@@ -969,15 +969,24 @@ impl Hub {
         participant: &str,
         result: backend::Result<()>,
     ) {
+        let mut state = self.lock();
         let Err(error) = result else {
+            if let Some(record) = state.space_mut(space) {
+                record.model.decided(request);
+            }
+            state.pump(space);
+            state.touch_space(space);
             return;
         };
-        let mut state = self.lock();
-        if let Some(record) = state.space_mut(space)
-            && !matches!(error.kind, ErrorKind::NotFound | ErrorKind::Closed)
-        {
-            record.model.restore_approval(request);
+        if let Some(record) = state.space_mut(space) {
+            if matches!(error.kind, ErrorKind::NotFound | ErrorKind::Closed) {
+                // The request is gone, so nothing is pending any more.
+                record.model.decided(request);
+            } else {
+                record.model.restore_approval(request);
+            }
         }
+        state.pump(space);
         state.error(
             participant,
             format!("The decision was not accepted: {}", error.message),
@@ -992,15 +1001,24 @@ impl Hub {
         participant: &str,
         result: backend::Result<()>,
     ) {
+        let mut state = self.lock();
         let Err(error) = result else {
+            if let Some(record) = state.space_mut(space) {
+                record.model.answered(question);
+            }
+            state.pump(space);
+            state.touch_space(space);
             return;
         };
-        let mut state = self.lock();
-        if let Some(record) = state.space_mut(space)
-            && !matches!(error.kind, ErrorKind::NotFound | ErrorKind::Closed)
-        {
-            record.model.restore_question(question);
+        if let Some(record) = state.space_mut(space) {
+            if matches!(error.kind, ErrorKind::NotFound | ErrorKind::Closed) {
+                // The request is gone, so nothing is pending any more.
+                record.model.answered(question);
+            } else {
+                record.model.restore_question(question);
+            }
         }
+        state.pump(space);
         state.error(
             participant,
             format!("The answer was not accepted: {}", error.message),

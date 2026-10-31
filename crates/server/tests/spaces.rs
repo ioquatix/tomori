@@ -181,6 +181,51 @@ fn the_first_decision_wins() {
 }
 
 #[test]
+fn parallel_permissions_are_decided_in_turn() {
+    let server = TestServer::start();
+    let (mut ada, bob, _) = pair(&server);
+    let session = server.backend.started()[0].clone();
+    for id in ["p1", "p2"] {
+        session.emit(Event::PermissionRequested(Permission {
+            id: id.to_owned(),
+            tool: "Bash".to_owned(),
+            input: serde_json::Value::Null,
+            description: None,
+        }));
+    }
+
+    // The oldest request is presented first, and the second waits its turn.
+    let state = bob.space(|state| state.approval.as_ref().is_some_and(|a| a.id == "p1"));
+    assert_eq!(state.activity, Activity::Waiting);
+    ada.send(&ClientMessage::Decide {
+        request: "p2".to_owned(),
+        decision: Decision::Deny,
+    });
+    assert_eq!(ada.error(), "That approval is no longer pending.");
+
+    ada.send(&ClientMessage::Decide {
+        request: "p1".to_owned(),
+        decision: Decision::AllowOnce,
+    });
+    let state = bob.space(|state| state.approval.as_ref().is_some_and(|a| a.id == "p2"));
+    assert_eq!(state.activity, Activity::Waiting);
+    ada.send(&ClientMessage::Decide {
+        request: "p2".to_owned(),
+        decision: Decision::Deny,
+    });
+    // Once the backend confirms the last decision, nothing is pending.
+    bob.space(|state| state.approval.is_none() && state.activity != Activity::Waiting);
+
+    assert_eq!(
+        session.log().decisions,
+        [
+            ("p1".to_owned(), backend::Decision::AllowOnce),
+            ("p2".to_owned(), backend::Decision::Deny)
+        ]
+    );
+}
+
+#[test]
 fn a_question_is_answered_by_any_participant() {
     let server = TestServer::start();
     let (mut ada, mut bob, _) = pair(&server);

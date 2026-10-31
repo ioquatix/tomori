@@ -13,6 +13,7 @@ Shared space state is held by the server and is the same for every participant: 
 When participants act concurrently:
 
 - The first decision on a pending approval or question resolves it. Later decisions on the same request are rejected without effect, and every participant observes the resolution.
+- An agent may have several approvals or questions pending at once, such as for parallel tool calls. Each is kept until it is resolved; none replaces another. They are presented one at a time, oldest first, and a decision applies only to the presented request. If the backend rejects a decision for a reason other than the request being gone, that request is presented again ahead of later ones. While any request is pending or its decision is being delivered, the space is waiting and no queued input is sent to the agent.
 - Finalized utterances enter a per-space queue in finalization order. Each entry records its speaker and state (queued, sending, then delivered or failed). Every participant can see the queue, and any participant can cancel an entry until it is sent to the agent.
 - Messages delivered to the agent identify their speaker. Attribution is a per-space setting that defaults to on. With attribution on, the delivered text is the speaker's display name, a colon and a space, then the transcript (`Ada: run the tests`); with it off, the transcript is delivered unchanged. The queue shows the transcript without the prefix.
 
@@ -27,7 +28,7 @@ The server's space registry, the client protocol for joining and leaving spaces,
 ## Validation
 
 - Inspect the space model: a space has exactly one session binding, and per-space stores are keyed by space.
-- Test two participants in one space: both observe the same conversation, queue and pending requests; concurrent decisions on one approval result in exactly one decision reaching the backend.
+- Test two participants in one space: both observe the same conversation, queue and pending requests; concurrent decisions on one approval result in exactly one decision reaching the backend. Test two parallel approvals: both are presented in turn and both decisions reach the backend in order.
 - Test queue cancellation: a queued entry can be cancelled by another participant before sending, and cannot be cancelled after delivery.
 - Test attribution on and off for delivered messages.
 - Test moving a client between two spaces: it receives the new space's state and no further events from the old one.
