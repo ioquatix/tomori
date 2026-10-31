@@ -4,7 +4,7 @@ This is a long-term requirement. It is not part of the initial server, but the i
 
 ## Requirement
 
-Each space has a scene graph owned by the server. The server replicates scene graph nodes and generic state to every client in the space, and clients render them. Clients do not need feature-specific code for each new kind of visualization.
+Each space has a scene graph owned by the server. The scene graph belongs to the space, not to its agent session. The server replicates scene graph nodes and generic state to every client in the space, and clients render them. Clients do not need feature-specific code for each new kind of visualization.
 
 Scene content can be produced by modules running on the server. An agent can write a module in Rust while the server is running, and the server can load, replace and unload it without restarting and without disturbing other spaces. Modules visualize information, states and running systems. Examples:
 
@@ -37,7 +37,7 @@ The space state model, the client protocol, the client renderer and a future mod
 
 ## Validation
 
-Until modules are implemented: review protocol and renderer changes to confirm that shared visual state comes from the server and that new visual state does not require hard-coding a new message type for each feature.
+Until modules are implemented: review protocol and renderer changes to confirm that shared visual state comes from the server and that new non-agent visualizations do not require hard-coding a new message type for each feature. Agent-specific state such as workers and presentation cards may keep its own messages.
 
 Once implemented:
 

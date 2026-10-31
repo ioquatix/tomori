@@ -1,10 +1,14 @@
 # Server
 
+This describes the target design for the Rust server that replaces `bridge/`. The current Node bridge and headset client differ where noted in `readme.md`; changes to them are not reviewed against this document until they move to the new server.
+
 ## Requirement
 
 The PC server is a Rust program built on `base-http-server`. It replaces the Node bridge and owns spaces, agent backends, speech, live audio routing and the spectator feed.
 
 Each client keeps one long-lived, bidirectional streaming connection to the server. Control messages, events, microphone audio, speech audio and presence are framed over that connection; the server does not require per-action request routes for interactive traffic. Audio frames are self-contained (source, sequence and timing) so that their transport can change without affecting the layers above.
+
+Whose view the spectator feed shows when a space has several participants is not yet decided.
 
 Wire types are defined once in a shared protocol crate used by both the server and native clients.
 

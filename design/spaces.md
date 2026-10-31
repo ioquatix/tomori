@@ -1,10 +1,12 @@
 # Spaces
 
+This describes the target design for the Rust server that replaces `bridge/`. The current Node bridge and headset client differ where noted in `readme.md`; changes to them are not reviewed against this document until they move to the new server.
+
 ## Requirement
 
 A space is bound to exactly one agent session. Every participant in a space interacts with that same session; a space never fans one participant's input out to several sessions, and a participant never addresses a session outside the space they have joined.
 
-The server hosts multiple spaces concurrently. Clients can list, create, join, leave and move between spaces. A client is a participant in at most one space at a time; moving to another space leaves the previous one.
+The server hosts multiple spaces concurrently. Clients can list, create, join, leave and move between spaces. Creating a space either starts a new agent session or binds an existing one, where the backend supports binding. A client is a participant in at most one space at a time; moving to another space leaves the previous one.
 
 Shared space state is held by the server and is the same for every participant: the conversation, the input queue, pending approvals and questions (including partially answered forms), delegated workers, presentation cards and worker visibility. Per-participant state is limited to presence, local presentation choices such as mute or paging, and the participant's own in-progress recording.
 
@@ -20,7 +22,7 @@ Several people should be able to share one conversational workspace with one coo
 
 ## Scope
 
-The server's space registry, the client protocol for joining and leaving spaces, the input queue, approval and question handling, and per-space persistence under `.space/`.
+The server's space registry, the client protocol for joining and leaving spaces, the input queue, and approval and question handling. How spaces persist across server restarts is not yet decided.
 
 ## Validation
 

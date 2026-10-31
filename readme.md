@@ -559,7 +559,7 @@ passthrough; optional tracked-hand skeletons are described above.
 
 ## Third-Party Components
 
-Original project code is released under the MIT License; see `license.md`.
+Original project code is released under the MIT License; see [license.md](license.md).
 Third-party components retain their own licenses:
 
 - Bundled controller assets: [MIT](assets/controllers/LICENSE.md).
@@ -571,3 +571,13 @@ Third-party components retain their own licenses:
 - Speech models and native dependencies are downloaded separately, not bundled
   in this repository. Their licensing requirements are noted in the relevant
   setup sections above.
+
+## Releases
+
+<!-- bake-readme:releases:start -->
+See [releases.md](releases.md) for the full release history.
+<!-- bake-readme:releases:end -->
+
+## See Also
+
+- [tomori](https://github.com/ioquatix/tomori) — A conversational spatial workspace for people and agents, built with OpenXR and wgpu<!-- bake-readme:package -->

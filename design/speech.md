@@ -1,5 +1,7 @@
 # Speech
 
+This describes the target design for the Rust server that replaces `bridge/`. The current Node bridge and headset client differ where noted in `readme.md`; changes to them are not reviewed against this document until they move to the new server.
+
 ## Requirement
 
 Speech recognition and synthesis run on the PC server.

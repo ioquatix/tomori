@@ -1,5 +1,7 @@
 # Agent Backends
 
+This describes the target design for the Rust server that replaces `bridge/`. The current Node bridge and headset client differ where noted in `readme.md`; changes to them are not reviewed against this document until they move to the new server.
+
 ## Requirement
 
 Each agent integration (currently OpenCode and Claude Code) is a separate workspace crate implementing a backend-neutral interface. Backends report structured facts: messages and their parts, text deltas, tool activity, permission requests, questions with structured fields, delegated workers and busy/idle state. They do not produce headset UI text, prompts or voice-answer parsing; the server derives those from the structured facts.

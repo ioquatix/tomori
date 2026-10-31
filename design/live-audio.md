@@ -1,5 +1,7 @@
 # Live Audio
 
+This describes the target design for the Rust server that replaces `bridge/`. The current Node bridge and headset client differ where noted in `readme.md`; changes to them are not reviewed against this document until they move to the new server.
+
 ## Requirement
 
 Participants in a space can talk to each other. Each participant sends one microphone stream, and each audio frame carries a gate:
@@ -12,7 +14,7 @@ Push-to-talk audio is not a separate upload path. Only `agent` audio is transcri
 
 Each client mixes every incoming participant stream together with the space's agent speech stream into a single output. A participant does not hear their own microphone. The server mixes the same sources once for the spectator feed.
 
-Live audio is real time: late audio is dropped rather than delayed or replayed.
+Playback and mixing are real time: audio that arrives too late to play is dropped from playback rather than delayed or replayed. This does not apply to transcription: every `agent` frame reaches recognition, in order, and a gap in `agent` audio fails the utterance with a visible error, as `speech.md` requires.
 
 Echo cancellation happens on the capturing device, so that a participant's playback does not feed back into their microphone stream.
 
@@ -28,7 +30,8 @@ Client audio capture and playback, the microphone gate, server routing and the s
 
 - Test that `agent` frames are both forwarded and transcribed, `live` frames are only forwarded, and `off` produces no frames.
 - Test that a client's output contains other participants and agent speech but not its own microphone.
-- Test that delayed frames are dropped rather than queued indefinitely.
+- Test that frames arriving too late for playback are dropped from playback and mixing, while the same `agent` frames still reach recognition.
+- Test that a missing `agent` frame fails the utterance visibly instead of producing a partial transcript.
 - On a headset, confirm that agent speech and other participants playing through the speakers are not transcribed from the local microphone.
 
 Latency targets for participant-to-participant audio are not yet agreed.
