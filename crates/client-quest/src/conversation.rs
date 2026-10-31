@@ -356,9 +356,8 @@ impl Conversation {
                     .filter(|talk| talk.utterance() == utterance)
                 {
                     if finished {
-                        // The queue entry now shows the words, and an earlier failure no longer applies.
+                        // The queue entry now shows the words. An earlier utterance's failure stays shown.
                         self.talk = None;
-                        self.error = None;
                     } else {
                         let (Talk::Recording { heard, .. } | Talk::Sending { heard, .. }) = talk;
                         *heard = text;
@@ -1970,7 +1969,7 @@ mod tests {
     }
 
     #[test]
-    fn a_late_failure_of_an_earlier_utterance_does_not_hide_the_current_one() {
+    fn a_late_failure_of_an_earlier_utterance_is_shown_after_the_current_one() {
         let mut conversation = joined(|_| {});
         let first = press(&mut conversation);
         conversation.talk(false);
@@ -1983,8 +1982,9 @@ mod tests {
         assert!(conversation.text().contains("MIC AGENT"));
         conversation.talk(false);
         assert!(conversation.text().contains("Sending: "));
+        // Once the current words are sent, the earlier failure is shown.
         conversation.apply(transcript(&second, "Run the tests.", true));
-        assert!(!conversation.text().contains("Nothing was heard"));
+        assert!(conversation.text().contains("ERROR: Nothing was heard"));
     }
 
     #[test]

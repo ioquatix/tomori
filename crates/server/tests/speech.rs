@@ -345,9 +345,12 @@ fn a_recognizer_failure_fails_the_utterance() {
     assert!(error.contains("the worker exited"), "{error}");
     assert!(error.contains("nothing was sent"), "{error}");
     // Nothing was queued: no snapshot with a queue entry follows.
+    // Nor is the end refused, if the failure came first.
     while let Some(message) = ada.next_message(Duration::from_millis(200)) {
-        if let ServerMessage::Space { state } = message {
-            assert!(state.queue.is_empty());
+        match message {
+            ServerMessage::Space { state } => assert!(state.queue.is_empty()),
+            ServerMessage::Error { error, .. } => panic!("{error}"),
+            _ => {}
         }
     }
     assert!(server.backend.started()[0].log().prompts.is_empty());
@@ -366,6 +369,10 @@ fn a_recognizer_failure_while_recording_closes_the_utterance() {
     ada.wait_for(|message| match message {
         ServerMessage::TranscriptFailed { utterance, .. } if utterance == "u1" => Some(()),
         _ => None,
+    });
+    // An end already on its way when the failure was reported is ignored, not refused.
+    ada.send(&ClientMessage::UtteranceEnd {
+        utterance: "u1".into(),
     });
     // The client forgets it without cancelling, as the server has closed it; the next utterance neither fails it again nor is refused.
     ada.send(&ClientMessage::UtteranceBegin {

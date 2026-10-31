@@ -100,6 +100,8 @@ struct ConnectionRecord {
     outbox: Arc<Outbox>,
     participant: Option<String>,
     utterance: Option<OpenUtterance>,
+    /// The client's id for the utterance the server last closed by failing it, so that an end or cancel already on its way is ignored rather than refused.
+    failed: Option<String>,
     /// Push-to-talk frames that arrived while no utterance was open, which are relayed but not transcribed.
     stray_frames: u64,
     /// Whether the last push-to-talk frame was stray, so that each run of them is logged once.
@@ -469,6 +471,7 @@ impl Hub {
                 outbox: outbox.clone(),
                 participant: None,
                 utterance: None,
+                failed: None,
                 stray_frames: 0,
                 straying: false,
                 liveness: Liveness {
@@ -896,12 +899,22 @@ impl Hub {
                     .get_mut(&connection)
                     .expect("checked above");
                 record.straying = false;
+                record.failed = None;
                 record.utterance = Some(OpenUtterance {
                     client: utterance,
                     id,
                     expected: None,
                 });
                 deferred.push(Deferred::Begin(id));
+            }
+            ClientMessage::UtteranceEnd { utterance }
+            | ClientMessage::UtteranceCancel { utterance }
+                if state.connections[&connection].failed.as_ref() == Some(&utterance) =>
+            {
+                // Already failed and reported: the client sent this before it heard.
+                if let Some(record) = state.connections.get_mut(&connection) {
+                    record.failed = None;
+                }
             }
             ClientMessage::UtteranceEnd { utterance }
             | ClientMessage::UtteranceCancel { utterance }
@@ -1099,6 +1112,7 @@ impl Hub {
             {
                 if gap {
                     let open = record.utterance.take().expect("matched above");
+                    record.failed = Some(open.client.clone());
                     state.utterances.remove(&open.id);
                     deferred.push(Deferred::Cancel(open.id));
                     state.send(
@@ -1227,11 +1241,18 @@ impl Hub {
     }
 
     pub(crate) fn transcript_failed(&self, utterance: UtteranceId, error: &str) {
-        let mut state = self.lock();
-        if let Some(record) = state.utterances.remove(&utterance) {
-            // Recognition can fail while the utterance is still open: close it, so that the client may forget it without cancelling and its next utterance does not fail this one again.
+        let mut deferred = Vec::new();
+        {
+            let mut state = self.lock();
+            let Some(record) = state.utterances.remove(&utterance) else {
+                return;
+            };
+            // Recognition can fail while the utterance is still open: close it, so that the client may forget it without cancelling and its next utterance does not fail this one again. The transcriber is still told, as every utterance it began ends with an end or a cancel.
             for connection in state.connections.values_mut() {
-                connection.utterance.take_if(|open| open.id == utterance);
+                if let Some(open) = connection.utterance.take_if(|open| open.id == utterance) {
+                    connection.failed = Some(open.client);
+                    deferred.push(Deferred::Cancel(utterance));
+                }
             }
             state.send(
                 &record.participant,
@@ -1241,6 +1262,7 @@ impl Hub {
                 },
             );
         }
+        self.run(deferred);
     }
 
     /// Add a space for a newly started session, and move its creator into it unless they have joined another space since asking. Returns `None`, registering nothing, once shutdown has begun: the caller must close the session.
