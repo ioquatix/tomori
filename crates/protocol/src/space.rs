@@ -90,6 +90,19 @@ pub struct Approval {
     pub id: String,
     pub title: String,
     pub text: String,
+    /// Choices beside allowing once and denying that the agent's own interface offers, such as "don't ask again".
+    /// Chosen with [`crate::Decision::Grant`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<ApprovalOption>,
+}
+
+/// A standing permission granted together with allowing the request, with its label prepared by the server.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApprovalOption {
+    /// Passed back as the option of a [`crate::Decision::Grant`] decision.
+    pub id: String,
+    /// What choosing it allows and for how long, such as "Yes, and don't ask again for Bash(make) in this project".
+    pub label: String,
 }
 
 /// The current field of a pending question, with prompt text prepared by the server.
@@ -152,4 +165,33 @@ pub struct Participant {
     pub name: String,
     /// The number used as the audio frame source for this participant.
     pub source: u32,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn approvals_list_options_only_when_offered() {
+        let mut approval = Approval {
+            id: "p".into(),
+            title: "Bash".into(),
+            text: "make".into(),
+            options: Vec::new(),
+        };
+        let json = serde_json::to_value(&approval).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({"id": "p", "title": "Bash", "text": "make"})
+        );
+        assert_eq!(serde_json::from_value::<Approval>(json).unwrap(), approval);
+
+        approval.options.push(ApprovalOption {
+            id: "suggestions".into(),
+            label: "Yes, and don't ask again for Bash(make) in this project".into(),
+        });
+        let json = serde_json::to_value(&approval).unwrap();
+        assert_eq!(json["options"][0]["id"], "suggestions");
+        assert_eq!(serde_json::from_value::<Approval>(json).unwrap(), approval);
+    }
 }

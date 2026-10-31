@@ -9,8 +9,9 @@
 use std::collections::{HashMap, HashSet};
 
 use backend::{
-    AnswerValue, Decision, Error, ErrorKind, Event, Field, FieldKind, FieldOption, Part,
-    Permission, Prompt, Question, Result, Role, Snapshot, SnapshotMessage, Worker, WorkerState,
+    AnswerValue, Decision, Error, ErrorKind, Event, Field, FieldKind, FieldOption, Grant,
+    GrantScope, Part, Permission, PermissionOption, Prompt, Question, Result, Role, Snapshot,
+    SnapshotMessage, Worker, WorkerState,
 };
 use serde_json::{Map, Value, json};
 
@@ -26,6 +27,13 @@ const SYNTHETIC_MODEL: &str = "<synthetic>";
 /// The agent-facing reason given when a participant denies a request.
 const DENIED: &str = "The user denied this request.";
 
+/// The id of the one standing option a Claude Code permission can offer: the terminal dialog's "Yes, and don't ask
+/// again" or "Yes, allow all edits during this session" row, which applies the request's permission suggestions.
+pub(crate) const SUGGESTIONS_OPTION: &str = "suggestions";
+
+/// Tools whose terminal dialog offers to accept edits for the session rather than to add rules.
+const EDIT_TOOLS: [&str; 4] = ["Edit", "MultiEdit", "Write", "NotebookEdit"];
+
 /// What handling one line produced.
 #[derive(Debug, Default)]
 pub(crate) struct Effects {
@@ -36,8 +44,15 @@ pub(crate) struct Effects {
 
 #[derive(Debug)]
 enum Pending {
-    Permission(Permission),
-    Question { question: Question, input: Value },
+    Permission {
+        permission: Permission,
+        /// The `permission_suggestions` entries that [`SUGGESTIONS_OPTION`] applies, exactly as Claude Code sent them.
+        updates: Vec<Value>,
+    },
+    Question {
+        question: Question,
+        input: Value,
+    },
 }
 
 #[derive(Debug)]
@@ -93,12 +108,12 @@ impl State {
             busy: Some(self.busy),
             messages: self.messages.clone(),
             permission: self.pending.iter().find_map(|(_, pending)| match pending {
-                Pending::Permission(permission) => Some(permission.clone()),
+                Pending::Permission { permission, .. } => Some(permission.clone()),
                 Pending::Question { .. } => None,
             }),
             question: self.pending.iter().find_map(|(_, pending)| match pending {
                 Pending::Question { question, .. } => Some(question.clone()),
-                Pending::Permission(_) => None,
+                Pending::Permission { .. } => None,
             }),
             workers: self.workers.clone(),
         }
@@ -132,11 +147,35 @@ impl State {
     pub(crate) fn decide(&mut self, id: &str, decision: Decision) -> Result<(Value, Event)> {
         let index = self.pending_index(id)?;
         let (response, event) = match (&self.pending[index].1, decision) {
-            (Pending::Permission(permission), Decision::AllowOnce) => (
+            (Pending::Permission { permission, .. }, Decision::AllowOnce) => (
                 json!({"behavior": "allow", "updatedInput": permission.input}),
                 Event::PermissionResolved { id: id.into() },
             ),
-            (Pending::Permission(_), Decision::Deny) => (
+            // The terminal answers its "don't ask again" row with the same updates, which Claude Code then applies and
+            // saves to their destinations itself.
+            (
+                Pending::Permission {
+                    permission,
+                    updates,
+                },
+                Decision::Grant { option },
+            ) if option == SUGGESTIONS_OPTION && !updates.is_empty() => (
+                json!({"behavior": "allow", "updatedInput": permission.input, "updatedPermissions": updates}),
+                Event::PermissionResolved { id: id.into() },
+            ),
+            (Pending::Permission { .. }, Decision::Grant { option }) => {
+                return Err(Error::new(
+                    ErrorKind::Invalid,
+                    format!("this request offers no option {option:?}"),
+                ));
+            }
+            (Pending::Question { .. }, Decision::Grant { .. }) => {
+                return Err(Error::new(
+                    ErrorKind::Invalid,
+                    "a question is answered, not allowed",
+                ));
+            }
+            (Pending::Permission { .. }, Decision::Deny) => (
                 json!({"behavior": "deny", "message": DENIED}),
                 Event::PermissionResolved { id: id.into() },
             ),
@@ -266,7 +305,7 @@ impl State {
                     && let Ok(index) = self.pending_index(id)
                 {
                     let event = match self.pending.remove(index).1 {
-                        Pending::Permission(_) => Event::PermissionResolved { id: id.into() },
+                        Pending::Permission { .. } => Event::PermissionResolved { id: id.into() },
                         Pending::Question { .. } => Event::QuestionResolved { id: id.into() },
                     };
                     effects.events.push(event);
@@ -584,6 +623,7 @@ impl State {
             return;
         }
 
+        let (updates, grants) = suggestions(tool, request);
         let permission = Permission {
             id: id.into(),
             tool: tool.into(),
@@ -591,12 +631,25 @@ impl State {
                 .or_else(|| str_field(&input, "description"))
                 .map(Into::into),
             input,
+            options: if grants.is_empty() {
+                Vec::new()
+            } else {
+                vec![PermissionOption {
+                    id: SUGGESTIONS_OPTION.into(),
+                    grants,
+                }]
+            },
         };
         effects
             .events
             .push(Event::PermissionRequested(permission.clone()));
-        self.pending
-            .push((id.into(), Pending::Permission(permission)));
+        self.pending.push((
+            id.into(),
+            Pending::Permission {
+                permission,
+                updates,
+            },
+        ));
     }
 
     fn begin_turn(&mut self, effects: &mut Effects) {
@@ -686,6 +739,92 @@ fn control_response(id: &str, response: Value) -> Value {
         "type": "control_response",
         "response": {"subtype": "success", "request_id": id, "response": response},
     })
+}
+
+/// The permission suggestions that the terminal dialog's standing row would apply for this request, as sent, with the
+/// grants they make. Both are empty when the terminal would offer no such row.
+///
+/// As in Claude Code 2.1, the row is withheld when the request sets `suppress_always_allow_rule`. Otherwise the row of
+/// an edit tool applies its `setMode` and `addDirectories` suggestions ("Yes, allow all edits during this session"),
+/// and the row of any other tool applies its `addRules` and `addDirectories` suggestions ("Yes, and don't ask again
+/// for ..."). Other suggestions are not shown in the terminal and are never applied.
+fn suggestions(tool: &str, request: &Value) -> (Vec<Value>, Vec<Grant>) {
+    if request["suppress_always_allow_rule"].as_bool() == Some(true) {
+        return (Vec::new(), Vec::new());
+    }
+    let Some(suggestions) = request["permission_suggestions"].as_array() else {
+        return (Vec::new(), Vec::new());
+    };
+    let shown: &[&str] = if EDIT_TOOLS.contains(&tool) {
+        &["setMode", "addDirectories"]
+    } else {
+        &["addRules", "addDirectories"]
+    };
+
+    let mut updates = Vec::new();
+    let mut grants = Vec::new();
+    for suggestion in suggestions {
+        let Some(kind) = str_field(suggestion, "type").filter(|kind| shown.contains(kind)) else {
+            continue;
+        };
+        let Some(scope) = str_field(suggestion, "destination").and_then(grant_scope) else {
+            continue;
+        };
+        let granted: Option<Vec<Grant>> = match kind {
+            "addRules" if str_field(suggestion, "behavior") == Some("allow") => suggestion["rules"]
+                .as_array()
+                .map(|rules| {
+                    rules
+                        .iter()
+                        .map(|rule| {
+                            Some(Grant::Rule {
+                                tool: str_field(rule, "toolName")?.into(),
+                                content: match rule.get("ruleContent") {
+                                    None | Some(Value::Null) => None,
+                                    Some(content) => Some(content.as_str()?.into()),
+                                },
+                                scope,
+                            })
+                        })
+                        .collect::<Option<Vec<_>>>()
+                })
+                .unwrap_or_default(),
+            "addDirectories" => suggestion["directories"].as_array().and_then(|paths| {
+                paths
+                    .iter()
+                    .map(|path| {
+                        Some(Grant::Directory {
+                            path: path.as_str()?.into(),
+                            scope,
+                        })
+                    })
+                    .collect()
+            }),
+            "setMode" => str_field(suggestion, "mode").map(|mode| {
+                vec![Grant::Mode {
+                    mode: mode.into(),
+                    scope,
+                }]
+            }),
+            _ => None,
+        };
+        // A malformed or empty suggestion is left out rather than applied without being described.
+        if let Some(granted) = granted.filter(|granted| !granted.is_empty()) {
+            updates.push(suggestion.clone());
+            grants.extend(granted);
+        }
+    }
+    (updates, grants)
+}
+
+fn grant_scope(destination: &str) -> Option<GrantScope> {
+    match destination {
+        "session" => Some(GrantScope::Session),
+        "localSettings" => Some(GrantScope::Local),
+        "projectSettings" => Some(GrantScope::Project),
+        "userSettings" => Some(GrantScope::User),
+        _ => None,
+    }
 }
 
 /// Map `AskUserQuestion` input to a question. Each field is keyed by its question text, as Claude Code keys answers.
@@ -855,6 +994,141 @@ mod tests {
             Event::PermissionResolved {
                 id: "perm-1".into()
             }
+        );
+    }
+
+    fn suggested(id: &str, tool: &str, suggestions: Value) -> Value {
+        let mut request = can_use_tool(id, tool, json!({"command": "make"}));
+        request["request"]["permission_suggestions"] = suggestions;
+        request
+    }
+
+    fn options(state: &mut State, request: Value) -> Vec<PermissionOption> {
+        let events = handle(state, request);
+        let Event::PermissionRequested(permission) = &events[0] else {
+            panic!("{events:?}")
+        };
+        permission.options.clone()
+    }
+
+    #[test]
+    fn options_follow_the_terminal_dialog() {
+        let suggestions = json!([
+            {"type": "addRules", "rules": [{"toolName": "Bash", "ruleContent": "make:*"}], "behavior": "allow", "destination": "projectSettings"},
+            {"type": "addRules", "rules": [{"toolName": "WebSearch"}], "behavior": "allow", "destination": "userSettings"},
+            {"type": "addDirectories", "directories": ["/work"], "destination": "session"},
+            {"type": "setMode", "mode": "acceptEdits", "destination": "session"},
+        ]);
+        let mut state = State::new("session".into());
+
+        // Other tools grant rules and directories.
+        assert_eq!(
+            options(&mut state, suggested("p1", "Bash", suggestions.clone())),
+            vec![PermissionOption {
+                id: SUGGESTIONS_OPTION.into(),
+                grants: vec![
+                    Grant::Rule {
+                        tool: "Bash".into(),
+                        content: Some("make:*".into()),
+                        scope: GrantScope::Project,
+                    },
+                    Grant::Rule {
+                        tool: "WebSearch".into(),
+                        content: None,
+                        scope: GrantScope::User,
+                    },
+                    Grant::Directory {
+                        path: "/work".into(),
+                        scope: GrantScope::Session,
+                    },
+                ],
+            }]
+        );
+
+        // Edit tools grant the mode and directories.
+        assert_eq!(
+            options(&mut state, suggested("p2", "Edit", suggestions.clone())),
+            vec![PermissionOption {
+                id: SUGGESTIONS_OPTION.into(),
+                grants: vec![
+                    Grant::Directory {
+                        path: "/work".into(),
+                        scope: GrantScope::Session,
+                    },
+                    Grant::Mode {
+                        mode: "acceptEdits".into(),
+                        scope: GrantScope::Session,
+                    },
+                ],
+            }]
+        );
+
+        // The terminal withholds the row when asked to.
+        let mut request = suggested("p3", "Bash", suggestions.clone());
+        request["request"]["suppress_always_allow_rule"] = json!(true);
+        assert_eq!(options(&mut state, request), Vec::new());
+
+        // Nothing is offered without suggestions, or with only malformed or unshown ones.
+        assert_eq!(
+            options(&mut state, can_use_tool("p4", "Bash", json!({}))),
+            Vec::new()
+        );
+        let malformed = json!([
+            {"type": "addRules", "rules": [{"ruleContent": "make"}], "behavior": "allow", "destination": "localSettings"},
+            {"type": "addRules", "rules": [{"toolName": "Bash"}], "behavior": "deny", "destination": "localSettings"},
+            {"type": "addRules", "rules": [{"toolName": "Bash"}], "behavior": "allow", "destination": "cliArg"},
+            {"type": "addRules", "rules": [], "behavior": "allow", "destination": "localSettings"},
+            {"type": "replaceRules", "rules": [{"toolName": "Bash"}], "behavior": "allow", "destination": "localSettings"},
+            {"type": "setMode", "mode": "acceptEdits", "destination": "session"},
+        ]);
+        assert_eq!(
+            options(&mut state, suggested("p5", "Bash", malformed)),
+            Vec::new()
+        );
+        let error = state
+            .decide(
+                "p5",
+                Decision::Grant {
+                    option: SUGGESTIONS_OPTION.into(),
+                },
+            )
+            .unwrap_err();
+        assert_eq!(error.kind, ErrorKind::Invalid);
+    }
+
+    #[test]
+    fn granting_echoes_the_shown_suggestions() {
+        let mut state = State::new("session".into());
+        let rule = json!({"type": "addRules", "rules": [{"toolName": "Bash", "ruleContent": "make"}], "behavior": "allow", "destination": "localSettings"});
+        let mode = json!({"type": "setMode", "mode": "acceptEdits", "destination": "session"});
+        handle(
+            &mut state,
+            suggested("p1", "Bash", json!([rule.clone(), mode.clone()])),
+        );
+        handle(
+            &mut state,
+            suggested("p2", "Bash", json!([rule.clone(), mode])),
+        );
+
+        let (response, event) = state
+            .decide(
+                "p1",
+                Decision::Grant {
+                    option: SUGGESTIONS_OPTION.into(),
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            response["response"]["response"],
+            json!({"behavior": "allow", "updatedInput": {"command": "make"}, "updatedPermissions": [rule]})
+        );
+        assert_eq!(event, Event::PermissionResolved { id: "p1".into() });
+
+        // Allowing once grants nothing.
+        let (response, _) = state.decide("p2", Decision::AllowOnce).unwrap();
+        assert_eq!(
+            response["response"]["response"],
+            json!({"behavior": "allow", "updatedInput": {"command": "make"}})
         );
     }
 

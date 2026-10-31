@@ -288,6 +288,7 @@ fn the_first_decision_wins() {
         tool: "Bash".to_owned(),
         input: serde_json::json!({"command": "ls -la"}),
         description: Some("List the files".to_owned()),
+        options: Vec::new(),
     }));
 
     let state = bob.space(|state| state.approval.is_some());
@@ -310,10 +311,12 @@ fn the_first_decision_wins() {
     ada.send(&ClientMessage::Decide {
         request: approval.id.clone(),
         decision: Decision::AllowOnce,
+        option: None,
     });
     bob.send(&ClientMessage::Decide {
         request: approval.id.clone(),
         decision: Decision::Deny,
+        option: None,
     });
 
     let window = Duration::from_millis(300);
@@ -329,6 +332,7 @@ fn the_first_decision_wins() {
     ada.send(&ClientMessage::Decide {
         request: approval.id,
         decision: Decision::Deny,
+        option: None,
     });
     assert_eq!(ada.error(), "That approval is no longer pending.");
 }
@@ -344,6 +348,7 @@ fn parallel_permissions_are_decided_in_turn() {
             tool: "Bash".to_owned(),
             input: serde_json::Value::Null,
             description: None,
+            options: Vec::new(),
         }));
     }
 
@@ -353,18 +358,21 @@ fn parallel_permissions_are_decided_in_turn() {
     ada.send(&ClientMessage::Decide {
         request: "p2".to_owned(),
         decision: Decision::Deny,
+        option: None,
     });
     assert_eq!(ada.error(), "That approval is no longer pending.");
 
     ada.send(&ClientMessage::Decide {
         request: "p1".to_owned(),
         decision: Decision::AllowOnce,
+        option: None,
     });
     let state = bob.space(|state| state.approval.as_ref().is_some_and(|a| a.id == "p2"));
     assert_eq!(state.activity, Activity::Waiting);
     ada.send(&ClientMessage::Decide {
         request: "p2".to_owned(),
         decision: Decision::Deny,
+        option: None,
     });
     // Once the backend confirms the last decision, nothing is pending.
     bob.space(|state| state.approval.is_none() && state.activity != Activity::Waiting);
@@ -375,6 +383,63 @@ fn parallel_permissions_are_decided_in_turn() {
             ("p1".to_owned(), backend::Decision::AllowOnce),
             ("p2".to_owned(), backend::Decision::Deny)
         ]
+    );
+}
+
+#[test]
+fn an_offered_option_is_granted() {
+    let server = TestServer::start();
+    let (mut ada, bob, _) = pair(&server);
+    let session = server.backend.started()[0].clone();
+    session.emit(Event::PermissionRequested(Permission {
+        id: "p1".to_owned(),
+        tool: "Bash".to_owned(),
+        input: serde_json::json!({"command": "touch marker.txt"}),
+        description: None,
+        options: vec![backend::PermissionOption {
+            id: "suggestions".to_owned(),
+            grants: vec![backend::Grant::Rule {
+                tool: "Bash".to_owned(),
+                content: Some("touch marker.txt".to_owned()),
+                scope: backend::GrantScope::Local,
+            }],
+        }],
+    }));
+
+    let state = bob.space(|state| state.approval.is_some());
+    assert_eq!(
+        state.approval.unwrap().options,
+        [protocol::ApprovalOption {
+            id: "suggestions".to_owned(),
+            label: "Yes, and don't ask again for Bash(touch marker.txt) in this project".to_owned(),
+        }]
+    );
+    ada.space(|state| state.approval.is_some());
+
+    // Malformed or unoffered choices are refused and leave the approval pending.
+    let decide = |decision, option: Option<&str>| ClientMessage::Decide {
+        request: "p1".to_owned(),
+        decision,
+        option: option.map(str::to_owned),
+    };
+    ada.send(&decide(Decision::Grant, None));
+    assert_eq!(ada.error(), "Choose an option to grant.");
+    ada.send(&decide(Decision::AllowOnce, Some("suggestions")));
+    assert_eq!(ada.error(), "Only a grant decision takes an option.");
+    ada.send(&decide(Decision::Grant, Some("always")));
+    assert_eq!(ada.error(), "That option is not offered for this approval.");
+    assert!(session.log().decisions.is_empty());
+
+    ada.send(&decide(Decision::Grant, Some("suggestions")));
+    bob.space(|state| state.approval.is_none() && state.activity != Activity::Waiting);
+    assert_eq!(
+        session.log().decisions,
+        [(
+            "p1".to_owned(),
+            backend::Decision::Grant {
+                option: "suggestions".to_owned()
+            }
+        )]
     );
 }
 

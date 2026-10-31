@@ -59,11 +59,56 @@ pub enum Role {
 }
 
 /// The outcome of a permission request.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Decision {
     AllowOnce,
+    /// Allow, and grant the [`PermissionOption`] with this id, with the same effect as choosing it in the agent's own
+    /// interface.
+    Grant {
+        option: String,
+    },
     Deny,
+}
+
+/// Where a granted permission is kept, as the agent names it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GrantScope {
+    /// Until the agent session ends.
+    Session,
+    /// This project, for this user only, such as Claude Code's `.claude/settings.local.json`.
+    Local,
+    /// This project, for everyone who uses it, such as Claude Code's `.claude/settings.json`.
+    Project,
+    /// Every project of this user, such as Claude Code's `~/.claude/settings.json`.
+    User,
+}
+
+/// One standing permission granted by a [`PermissionOption`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum Grant {
+    /// Calls of `tool` matching `content`, in the agent's rule syntax, run without asking. Without `content`, every call
+    /// of the tool does.
+    Rule {
+        tool: String,
+        content: Option<String>,
+        scope: GrantScope,
+    },
+    /// The agent may work in `path`.
+    Directory { path: String, scope: GrantScope },
+    /// The agent's permission mode changes, such as to Claude Code's `acceptEdits`.
+    Mode { mode: String, scope: GrantScope },
+}
+
+/// A choice the agent offers beside allowing once and denying, such as "don't ask again". Choosing it allows the request
+/// and applies every grant.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PermissionOption {
+    /// Stable for the life of the request; passed back in [`Decision::Grant`].
+    pub id: String,
+    pub grants: Vec<Grant>,
 }
 
 /// A tool permission request, described with structured facts.
@@ -76,6 +121,9 @@ pub struct Permission {
     pub input: serde_json::Value,
     /// The agent's own short description of the action, when it provides one.
     pub description: Option<String>,
+    /// The standing permissions the agent's own interface offers with this request, if any.
+    #[serde(default)]
+    pub options: Vec<PermissionOption>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

@@ -840,17 +840,36 @@ impl Hub {
                     Err(error) => state.error(participant, error),
                 }
             }
-            ClientMessage::Decide { request, decision } => {
+            ClientMessage::Decide {
+                request,
+                decision,
+                option,
+            } => {
+                let decision = match (decision, option) {
+                    (protocol::Decision::AllowOnce, None) => backend::Decision::AllowOnce,
+                    (protocol::Decision::Deny, None) => backend::Decision::Deny,
+                    (protocol::Decision::Grant, Some(option)) => {
+                        backend::Decision::Grant { option }
+                    }
+                    (protocol::Decision::Grant, None) => {
+                        state.error(participant, "Choose an option to grant.");
+                        return;
+                    }
+                    (_, Some(_)) => {
+                        state.error(participant, "Only a grant decision takes an option.");
+                        return;
+                    }
+                };
                 let Some(space) = in_space(state) else {
                     return;
                 };
                 let record = state.space_mut(&space).expect("checked above");
-                match record.model.claim_approval(&request) {
+                let option = match &decision {
+                    backend::Decision::Grant { option } => Some(option.as_str()),
+                    _ => None,
+                };
+                match record.model.claim_approval(&request, option) {
                     Ok(()) => {
-                        let decision = match decision {
-                            protocol::Decision::AllowOnce => backend::Decision::AllowOnce,
-                            protocol::Decision::Deny => backend::Decision::Deny,
-                        };
                         let sent = record.commands.try_send(SpaceCommand::Decide {
                             request: request.clone(),
                             decision,

@@ -13,11 +13,14 @@ pub struct Pose {
     pub orientation: [f32; 4],
 }
 
-/// A participant's decision on a pending tool permission. Tomori never grants persistent permissions.
+/// A participant's decision on a pending tool permission.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Decision {
     AllowOnce,
+    /// Allow, and grant the approval's [`crate::ApprovalOption`] named by the decision's `option`, with the same effect
+    /// as choosing it in the agent's own interface.
+    Grant,
     Deny,
 }
 
@@ -72,6 +75,9 @@ pub enum ClientMessage {
     Decide {
         request: String,
         decision: Decision,
+        /// The id of the approval option to grant. Required with [`Decision::Grant`] and refused with any other decision.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        option: Option<String>,
     },
     /// Answer the current field of a pending question with spoken or typed text.
     Answer {
@@ -168,11 +174,21 @@ mod tests {
         let json = serde_json::to_value(ClientMessage::Decide {
             request: "per_1".into(),
             decision: Decision::AllowOnce,
+            option: None,
         })
         .unwrap();
         assert_eq!(
             json,
             serde_json::json!({"type": "decide", "request": "per_1", "decision": "allow_once"})
+        );
+        let grant = serde_json::json!({"type": "decide", "request": "per_1", "decision": "grant", "option": "suggestions"});
+        assert_eq!(
+            serde_json::from_value::<ClientMessage>(grant).unwrap(),
+            ClientMessage::Decide {
+                request: "per_1".into(),
+                decision: Decision::Grant,
+                option: Some("suggestions".into()),
+            }
         );
 
         let json = serde_json::to_value(ServerMessage::Transcript {
