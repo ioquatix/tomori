@@ -89,7 +89,6 @@ struct HubState {
 struct ConnectionRecord {
     outbox: Arc<Outbox>,
     participant: Option<String>,
-    last_sequence: Option<u32>,
     utterance: Option<OpenUtterance>,
     /// Push-to-talk frames that arrived while no utterance was open, which are relayed but not transcribed.
     stray_frames: u64,
@@ -143,9 +142,9 @@ struct Liveness {
 struct OpenUtterance {
     client: String,
     id: UtteranceId,
-    /// The sequence number of the next frame on this connection: the one after the last frame before `UtteranceBegin`, then after each frame since. `None` if no frame had arrived before the utterance began.
+    /// The sequence number of the next frame of this utterance, once its first frame has arrived. A gap after that means frames were lost mid-utterance; see `design/speech.md`.
     ///
-    /// Frame sequence numbers increase by one per frame sent, and frames and control messages share one ordered stream, so the frame after `UtteranceBegin` must directly follow the last frame before it. A gap there means frames sent after the utterance began were lost, which would cut the start of the utterance; see `design/speech.md`.
+    /// The first frame is not checked against frames before `UtteranceBegin`: the client legitimately skips sequence numbers there, by not sending frames while the gate is off and by dropping congested live audio. It never drops frames of an open utterance, and frames and control share one ordered stream, so the first frame after `UtteranceBegin` is the utterance's first.
     expected: Option<u32>,
 }
 
@@ -394,7 +393,6 @@ impl Hub {
             ConnectionRecord {
                 outbox: outbox.clone(),
                 participant: None,
-                last_sequence: None,
                 utterance: None,
                 stray_frames: 0,
                 straying: false,
@@ -808,7 +806,7 @@ impl Hub {
                 record.utterance = Some(OpenUtterance {
                     client: utterance,
                     id,
-                    expected: record.last_sequence.map(|last| last.wrapping_add(1)),
+                    expected: None,
                 });
                 deferred.push(Deferred::Begin(id));
             }
@@ -935,11 +933,9 @@ impl Hub {
         let mut deferred = Vec::new();
         {
             let mut state = self.lock();
-            // Every frame counts towards the sequence, even outside a space, so that the next utterance's first frame can be checked.
             let Some(record) = state.connections.get_mut(&connection) else {
                 return;
             };
-            record.last_sequence = Some(frame.sequence);
             let gap = match record.utterance.as_mut() {
                 Some(open) => {
                     let gap = open

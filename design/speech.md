@@ -6,7 +6,7 @@ This describes the target design for the Rust server that replaces `bridge/`. Th
 
 Speech recognition and synthesis run on the PC server.
 
-**Recognition starts as audio arrives.** Audio addressed to the agent is decoded incrementally while the participant is still speaking, with partial transcripts sent back during recording. Stable words are committed as recording proceeds, so finishing an utterance only decodes the uncommitted tail rather than the whole recording. Recognition never silently discards spoken audio; if it cannot produce a transcript, the participant is told and nothing is sent. An utterance whose audio has a gap fails visibly, including a gap before its first frame: audio frames and the utterance's start share one ordered stream and frame sequence numbers increase by one per frame sent, so the first frame must directly follow the last frame sent before the utterance began. Push-to-talk audio that arrives while no utterance is open is relayed to the other participants but not transcribed; the server counts and logs it.
+**Recognition starts as audio arrives.** Audio addressed to the agent is decoded incrementally while the participant is still speaking, with partial transcripts sent back during recording. Stable words are committed as recording proceeds, so finishing an utterance only decodes the uncommitted tail rather than the whole recording. Recognition never silently discards spoken audio; if it cannot produce a transcript, the participant is told and nothing is sent. An utterance whose audio has a gap fails visibly. The client never drops frames of an open utterance and sends them in order with the utterance's start and end, so its first frame is the first one after the start; the client may skip sequence numbers before an utterance, by not sending audio while the gate is off and by dropping congested live audio, so the first frame is not checked against earlier ones. A client that cannot deliver an utterance's audio cancels the utterance and tells the participant. Push-to-talk audio that arrives while no utterance is open is relayed to the other participants but not transcribed; the server counts and logs it.
 
 **Synthesis starts before the reply completes.** The server consumes the agent's streaming text and begins synthesizing as soon as a speakable segment is stable, rather than waiting for the message to complete. Following segments are synthesized while earlier ones play.
 
@@ -26,7 +26,7 @@ The server's recognition and synthesis pipelines, the speakable-text filter and 
 
 ## Validation
 
-- Test that losing an utterance's first frame, as well as a later one, fails the utterance instead of queueing a cut transcript.
+- Test that losing a frame within an utterance fails the utterance instead of queueing a cut transcript, and that sequence numbers skipped before an utterance do not.
 - Test that partial transcripts arrive before an utterance ends, and that the final decode covers only the uncommitted tail.
 - Test that the first synthesized audio for a streamed reply is produced before that reply's message completes.
 - Test the speakable filter with streamed Markdown containing fences, inline code, tables, links, headings and a line that later becomes a table header or setext heading.
