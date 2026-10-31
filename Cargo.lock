@@ -2820,6 +2820,7 @@ dependencies = [
  "base-http-server",
  "base-scheduler",
  "base-scheduler-direct",
+ "client",
  "discovery",
  "env_logger",
  "event-listener",

@@ -63,3 +63,6 @@ speech = { path = "../speech", optional = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[dev-dependencies]
+client = { path = "../client" }
