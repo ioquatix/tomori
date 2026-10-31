@@ -14,7 +14,7 @@ pub struct SpaceSummary {
     pub participants: usize,
 }
 
-/// The agent's observed state. `Unknown` is never treated as idle or complete.
+/// The agent's observed state. `Unknown` is never treated as idle or complete, and stands for any state a newer server sends that this build does not know.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Activity {
@@ -25,6 +25,7 @@ pub enum Activity {
     /// The agent session has ended. The space keeps its state, but input is no longer accepted; `SpaceState::error` says why.
     Closed,
     #[default]
+    #[serde(other)]
     Unknown,
 }
 
@@ -117,6 +118,7 @@ pub struct Question {
     pub supported: bool,
 }
 
+/// A worker's observed state. `Unknown` stands for any state a newer server sends that this build does not know.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkerState {
@@ -126,6 +128,7 @@ pub enum WorkerState {
     Completed,
     Error,
     #[default]
+    #[serde(other)]
     Unknown,
 }
 
@@ -193,5 +196,31 @@ mod tests {
         let json = serde_json::to_value(&approval).unwrap();
         assert_eq!(json["options"][0]["id"], "suggestions");
         assert_eq!(serde_json::from_value::<Approval>(json).unwrap(), approval);
+    }
+
+    #[test]
+    fn states_a_newer_server_adds_are_read_as_unknown() {
+        assert_eq!(
+            serde_json::from_str::<Activity>("\"compacting\"").unwrap(),
+            Activity::Unknown
+        );
+        assert_eq!(
+            serde_json::from_str::<Activity>("\"closed\"").unwrap(),
+            Activity::Closed
+        );
+        assert_eq!(
+            serde_json::from_str::<WorkerState>("\"paused\"").unwrap(),
+            WorkerState::Unknown
+        );
+        let summary: SpaceSummary = serde_json::from_value(serde_json::json!({
+            "id": "space-1",
+            "title": "Tomori",
+            "backend": "fake",
+            "directory": "/tmp",
+            "activity": "compacting",
+            "participants": 1,
+        }))
+        .unwrap();
+        assert_eq!(summary.activity, Activity::Unknown);
     }
 }

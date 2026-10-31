@@ -14,7 +14,7 @@ Whose view the spectator feed shows when a space has several participants is not
 
 The server advertises itself on the local network with DNS service discovery over multicast DNS (Bonjour), as service type `_tomori._tcp`, with TXT records for the protocol version and a display name. When a client starts, it browses for that service and lists the servers it finds, so a participant can choose one without typing an address; entering an address manually remains possible. Advertising can be turned off.
 
-Wire types are defined once in a shared protocol crate used by both the server and native clients.
+Wire types are defined once in a shared protocol crate used by both the server and native clients. A client reads a space or worker state that it does not know, such as one added by a newer server, as unknown rather than rejecting the message, so adding such a state does not change the protocol version.
 
 Shutting the server down closes every space's session and ends every connection, and completes even while a space is being created: a session that finishes starting after shutdown has begun is closed at once rather than registered.
 
@@ -45,6 +45,7 @@ The server crate, the protocol crate, the shared client crate and network config
 - Inspect dependencies: the server uses `base-http-server`; client and server wire types come from the protocol crate.
 - Test a client session over one connection carrying control messages, events and audio concurrently.
 - Confirm that a headset can connect over the local network without USB.
+- Test that a space or worker state a client does not know is read as unknown.
 - Test that a running server is found by browsing for `_tomori._tcp`, with its protocol version and name, and that it disappears from the list when it stops. On a Quest, confirm that the server list populates on the same Wi-Fi network.
 - Over UDP, test that an isolated lost packet is recovered by error correction, that an unrecovered `agent` frame is requested again, and that playback continues without waiting for it.
 - Review the protocol for operations outside the listed responsibilities.
