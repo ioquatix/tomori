@@ -118,6 +118,10 @@ fn input_to_a_closed_space_fails_visibly() {
             .queue
             .iter()
             .any(|entry| entry.text == "second" && entry.state == QueueState::Queued)
+            && state
+                .queue
+                .iter()
+                .any(|entry| entry.text == "first" && entry.state == QueueState::Delivered)
     });
 
     // The session ends: queued input fails instead of waiting forever, and the space shows it is closed.
