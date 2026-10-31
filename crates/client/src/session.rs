@@ -23,7 +23,7 @@ use protocol::{
 
 use crate::client::Shared;
 use crate::outbox::Batch;
-use crate::resolve::resolve;
+use crate::resolve::resolve_in_background;
 use crate::{ConnectionState, Disconnect, Event, Options};
 
 /// The most encoded bytes written to the request body at once.
@@ -83,13 +83,24 @@ fn transport(error: impl std::fmt::Display) -> Disconnect {
     Disconnect::Transport(error.to_string())
 }
 
-/// Run one connection until it ends, returning why. Each resolved address is tried in turn until one accepts the connection, all within the connect timeout.
+/// Run one connection until it ends, returning why. Resolution and connecting share the connect timeout; each resolved address is tried in turn until one accepts the connection.
 async fn session(context: &Context<'_>, welcomed: &Cell<bool>) -> Disconnect {
-    let addresses = match resolve(&context.options.address) {
+    let deadline = context.scheduler.now() + context.options.connect_timeout;
+    // Closing does not wait for a slow lookup.
+    let resolution = or(
+        context.within(
+            context.options.connect_timeout,
+            resolve_in_background(&context.options.address),
+        ),
+        async {
+            context.shared.closing.cancelled().await;
+            Err(Disconnect::Closed)
+        },
+    );
+    let addresses = match resolution.await {
         Ok(addresses) => addresses,
         Err(reason) => return reason,
     };
-    let deadline = context.scheduler.now() + context.options.connect_timeout;
     let mut reason = Disconnect::Timeout;
     for address in addresses {
         let opened = Cell::new(false);
