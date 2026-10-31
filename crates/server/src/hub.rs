@@ -855,6 +855,15 @@ impl Hub {
                 decision,
                 option,
             } => {
+                let checked = limits::check(&request, limits::IDENTIFIER_BYTES, "request")
+                    .and_then(|()| match &option {
+                        Some(option) => limits::check(option, limits::IDENTIFIER_BYTES, "option"),
+                        None => Ok(()),
+                    });
+                if let Err(error) = checked {
+                    state.error(participant, error);
+                    return;
+                }
                 let decision = match (decision, option) {
                     (protocol::Decision::AllowOnce, None) => backend::Decision::AllowOnce,
                     (protocol::Decision::Deny, None) => backend::Decision::Deny,
@@ -899,7 +908,10 @@ impl Hub {
                 field,
                 text,
             } => {
-                if let Err(error) = limits::check(&text, limits::ANSWER_BYTES, "answer") {
+                let checked = limits::check(&text, limits::ANSWER_BYTES, "answer")
+                    .and_then(|()| limits::check(&question, limits::IDENTIFIER_BYTES, "question"))
+                    .and_then(|()| limits::check(&field, limits::IDENTIFIER_BYTES, "field"));
+                if let Err(error) = checked {
                     state.error(participant, error);
                     return;
                 }

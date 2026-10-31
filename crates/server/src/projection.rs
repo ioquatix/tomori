@@ -7,6 +7,8 @@ use std::fmt::Write;
 
 use backend::{AnswerValue, Field, FieldKind, Grant, GrantScope, Permission, Question};
 
+use crate::limits;
+
 /// Longest tool input summary shown in an approval.
 const INPUT_SUMMARY_LIMIT: usize = 600;
 
@@ -217,9 +219,24 @@ pub fn question(question: &Question, answers: &[(String, AnswerValue)]) -> proto
         id: question.id.clone(),
         title: question.title.clone(),
         text,
-        field: field.map(|field| field.key.clone()).unwrap_or_default(),
+        field: field
+            .map(|field| field_name(question, field))
+            .unwrap_or_default(),
         supported,
     }
+}
+
+/// How a field is named to clients, who name it again in their answers: its key, or for a key longer than [`limits::FIELD_BYTES`], such as a long question used as its own key, its position, so that snapshots stay small.
+pub fn field_name(question: &Question, field: &Field) -> String {
+    if field.key.len() <= limits::FIELD_BYTES {
+        return field.key.clone();
+    }
+    let position = question
+        .fields
+        .iter()
+        .position(|candidate| std::ptr::eq(candidate, field))
+        .unwrap_or_default();
+    format!("field {}", position + 1)
 }
 
 /// Lowercase, with runs of anything other than letters and digits collapsed to single spaces.

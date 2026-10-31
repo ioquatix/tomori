@@ -28,6 +28,12 @@ pub const UTTERANCE_BYTES: usize = 128;
 /// Longest answer text, in bytes.
 pub const ANSWER_BYTES: usize = 4096;
 
+/// Longest question field key named in a snapshot, in bytes. A longer key is named by its position instead; see [`crate::projection::field_name`].
+pub const FIELD_BYTES: usize = 1024;
+
+/// Longest identifier a client names in a decision or answer, in bytes: a request, question, option or field. Longer ones cannot match anything the server presented.
+pub const IDENTIFIER_BYTES: usize = 1024;
+
 /// Longest transcript that can be queued, in bytes. Partial transcripts are cut to this length.
 pub const QUEUED_TEXT_BYTES: usize = 4096;
 
@@ -39,7 +45,7 @@ pub const ERROR_BYTES: usize = 512;
 
 /// The most bytes of JSON in one space snapshot or lobby listing: a quarter of [`protocol::MAX_FRAME_BYTES`].
 ///
-/// The oldest messages are dropped first, then the newest message text is cut, then finished queue entries, approval and question text and workers. What remains is bounded by the input limits above and the connection limit, and stays below the frame limit even in the worst case.
+/// The oldest messages are dropped first, then the newest message text is cut, then finished queue entries are dropped, then approval and question text, their titles and the space error are cut, and then workers are dropped. What remains is bounded by the input limits above, [`FIELD_BYTES`], the approval option limits and the connection limit, and stays below the frame limit even in the worst case. Agent identifiers for approvals and questions are not cut, because clients name them in their replies.
 pub const SNAPSHOT_BUDGET: usize = protocol::MAX_FRAME_BYTES / 4;
 
 /// Appended to text that was cut to fit.
@@ -130,15 +136,27 @@ pub fn fit_state(state: &mut SpaceState) {
         let entry = state.queue.remove(index);
         size -= json_len(&entry) + 1;
     }
-    if size > SNAPSHOT_BUDGET
-        && let Some(approval) = &mut state.approval
-    {
-        size -= shrink(&mut approval.text, size - SNAPSHOT_BUDGET);
+    // Then text written by the agent, which a malicious or broken agent could make arbitrarily long.
+    let mut texts: Vec<&mut String> = Vec::new();
+    if let Some(approval) = &mut state.approval {
+        texts.push(&mut approval.text);
+        texts.push(&mut approval.title);
     }
-    if size > SNAPSHOT_BUDGET
-        && let Some(question) = &mut state.question
-    {
-        size -= shrink(&mut question.text, size - SNAPSHOT_BUDGET);
+    if let Some(question) = &mut state.question {
+        texts.push(&mut question.text);
+        texts.push(&mut question.title);
+    }
+    if let Some(error) = &mut state.error {
+        texts.push(error);
+    }
+    for text in texts {
+        if size <= SNAPSHOT_BUDGET {
+            break;
+        }
+        if text.len() <= TRUNCATED.len() {
+            continue;
+        }
+        size -= shrink(text, size - SNAPSHOT_BUDGET);
     }
     while size > SNAPSHOT_BUDGET && !state.workers.is_empty() {
         let worker = state.workers.remove(0);

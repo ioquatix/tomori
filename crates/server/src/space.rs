@@ -478,10 +478,11 @@ impl SpaceModel {
             return Err("Complete this question outside Tomori.".to_owned());
         }
         let current = projection::current_field(&pending.question, &pending.answers)
-            .filter(|current| current.key == field)
+            .filter(|current| projection::field_name(&pending.question, current) == field)
             .ok_or("The question changed; read the current field and answer again.")?;
         let value = projection::answer_value(current, text)?;
-        pending.answers.push((field.to_owned(), value));
+        let key = current.key.clone();
+        pending.answers.push((key, value));
         if projection::current_field(&pending.question, &pending.answers).is_some() {
             return Ok(AnswerOutcome::Recorded);
         }
