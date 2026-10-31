@@ -7,7 +7,7 @@
 
 // Built without any backend, the backend enums are empty and every match on them is vacuous.
 #![cfg_attr(
-    not(feature = "fake"),
+    not(any(feature = "fake", feature = "claude-code")),
     allow(unused_variables, unused_mut, unreachable_code)
 )]
 
@@ -18,17 +18,25 @@ use backend::{
 
 #[cfg(feature = "fake")]
 use crate::fake::{FakeBackend, FakeSession};
+#[cfg(feature = "claude-code")]
+use backend_claude_code::{ClaudeCode, ClaudeCodeSession};
 
 /// One of the backends compiled into this server.
 pub enum AnyBackend {
     #[cfg(feature = "fake")]
     Fake(FakeBackend),
+    #[cfg(feature = "claude-code")]
+    ClaudeCode(ClaudeCode),
 }
 
 /// A session of one of the backends compiled into this server.
+// One session is held per space, so the variant size difference is not worth an allocation.
+#[allow(clippy::large_enum_variant)]
 pub enum AnySession {
     #[cfg(feature = "fake")]
     Fake(FakeSession),
+    #[cfg(feature = "claude-code")]
+    ClaudeCode(ClaudeCodeSession),
 }
 
 /// Forward a method call to the concrete value inside an [`AnyBackend`] or [`AnySession`].
@@ -37,6 +45,8 @@ macro_rules! dispatch {
         match *$value {
             #[cfg(feature = "fake")]
             Self::Fake(ref $inner) => $call,
+            #[cfg(feature = "claude-code")]
+            Self::ClaudeCode(ref $inner) => $call,
         }
     };
 }
@@ -52,6 +62,20 @@ impl From<FakeBackend> for AnyBackend {
 impl From<FakeSession> for AnySession {
     fn from(session: FakeSession) -> Self {
         Self::Fake(session)
+    }
+}
+
+#[cfg(feature = "claude-code")]
+impl From<ClaudeCode> for AnyBackend {
+    fn from(backend: ClaudeCode) -> Self {
+        Self::ClaudeCode(backend)
+    }
+}
+
+#[cfg(feature = "claude-code")]
+impl From<ClaudeCodeSession> for AnySession {
+    fn from(session: ClaudeCodeSession) -> Self {
+        Self::ClaudeCode(session)
     }
 }
 

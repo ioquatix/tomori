@@ -21,13 +21,16 @@ name = "spaces"
 required-features = ["fake"]
 
 [features]
-default = ["fake"]
+default = ["fake", "claude-code"]
 # A scripted in-memory backend for tests and for manual testing without an agent.
 fake = []
+# Claude Code, driven as a persistent `claude` process per space.
+claude-code = ["dep:backend-claude-code"]
 
 [dependencies]
 async-channel = "2"
 backend = { path = "../backend" }
+backend-claude-code = { path = "../backend-claude-code", optional = true }
 base-http = "0.1.0"
 base-http-server = "0.1.0"
 base-scheduler = "0.3.0"

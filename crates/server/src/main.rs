@@ -7,7 +7,7 @@
 
 // Built without any backend, the backend enums are empty and every match on them is vacuous.
 #![cfg_attr(
-    not(feature = "fake"),
+    not(any(feature = "fake", feature = "claude-code")),
     allow(unused_variables, unused_mut, unreachable_code)
 )]
 
@@ -24,7 +24,7 @@ const USAGE: &str = "Usage: tomori-server [--bind ADDRESS] [--backend NAME]...
 
 Options:
   --bind ADDRESS   Listen address (default 0.0.0.0:8765).
-  --backend NAME   Offer a backend; repeat for several. Available: fake.
+  --backend NAME   Offer a backend; repeat for several. Available: fake, claude-code.
   --help           Show this help.";
 
 struct Arguments {
@@ -62,6 +62,8 @@ fn backend(name: &str) -> Result<server::AnyBackend, String> {
     match name {
         #[cfg(feature = "fake")]
         "fake" => Ok(server::fake::FakeBackend::new().into()),
+        #[cfg(feature = "claude-code")]
+        "claude-code" => Ok(backend_claude_code::ClaudeCode::new(Default::default()).into()),
         other => Err(format!("unknown backend {other:?}")),
     }
 }
