@@ -12,9 +12,11 @@
 mod error;
 pub mod speakable;
 pub mod stt;
+pub mod tts;
 mod worker;
 
 pub use error::Error;
 pub use speakable::{Speakable, SpeakableOptions};
 pub use stt::{Recognition, Recognizer, RecognizerConfig, TranscriptEvent, Utterance};
+pub use tts::{AudioChunk, Speech, SpeechEvent, Synthesizer};
 pub use worker::WorkerCommand;
