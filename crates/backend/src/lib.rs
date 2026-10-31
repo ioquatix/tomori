@@ -191,11 +191,12 @@ pub enum Event {
     Delivered {
         key: String,
     },
+    /// Sent before any other event that names the message.
     MessageStarted {
         message: String,
         role: Role,
     },
-    /// Assistant text, streamed as it is generated. Concatenating the deltas of a message gives its text.
+    /// Assistant text, streamed as it is generated, after the message's [`Event::MessageStarted`]. Concatenating the deltas of a message gives its text.
     TextDelta {
         message: String,
         text: String,
