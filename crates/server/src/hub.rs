@@ -195,8 +195,7 @@ enum Deferred {
     Cancel(UtteranceId),
 }
 
-/// An error reply, cut to [`limits::ERROR_BYTES`].
-/// 64 random bits as hexadecimal. `RandomState` is seeded from the operating system's random source.
+/// A token for this server run, so space identifiers are not reused after a restart: 64 random bits as hexadecimal. `RandomState` is seeded from the operating system's random source.
 fn run_token() -> String {
     use std::hash::{BuildHasher, Hasher};
     let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
@@ -209,6 +208,7 @@ fn run_token() -> String {
     format!("{:016x}", hasher.finish())
 }
 
+/// An error reply, cut to [`limits::ERROR_BYTES`].
 fn error_message(error: impl Into<String>) -> ServerMessage {
     ServerMessage::Error {
         error: limits::truncate(&error.into(), limits::ERROR_BYTES),

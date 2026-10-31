@@ -234,7 +234,8 @@ impl Conversation {
                 log::warn!("Server error: {error}");
                 if let Some(gone) = space.filter(|space| Some(space) == self.joining.as_ref()) {
                     // Our join was refused because the space does not exist, as after the server restarts. The client
-                    // would ask for the space again on every reconnect until it is told otherwise, so leave explicitly.
+                    // sends the membership it last recorded again after every reconnect, which would be this join, so
+                    // record a leave in its place.
                     self.spaces.retain(|summary| summary.id != gone);
                     self.selected = self.selected.min(self.spaces.len().saturating_sub(1));
                     self.listed = false;
