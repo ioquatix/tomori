@@ -4,7 +4,7 @@ This describes the target design for the Rust server that replaces `bridge/`. Th
 
 ## Requirement
 
-Each agent integration (currently OpenCode and Claude Code) is a separate workspace crate implementing a backend-neutral interface. Backends report structured facts: messages and their parts, text deltas, tool activity, permission requests, questions with structured fields, delegated workers and busy/idle state. They do not produce headset UI text, prompts or voice-answer parsing; the server derives those from the structured facts.
+Each agent integration (currently OpenCode and Claude Code) is a separate workspace crate implementing a backend-neutral interface. Backends report structured facts: messages and their parts, text deltas, tool activity, permission requests, questions with structured fields, delegated workers and busy/idle state. A delegated worker names the worker that started it as its parent, or no parent when the session itself started it, so that a change of the agent's own session identifier cannot leave workers pointing at it. They do not produce headset UI text, prompts or voice-answer parsing; the server derives those from the structured facts.
 
 Session identities are opaque and namespaced by backend. Clients and the wire protocol do not depend on a backend's identifier format.
 

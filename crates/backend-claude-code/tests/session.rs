@@ -568,7 +568,6 @@ fn reports_workers() {
     run(|| async {
         let fixture = Fixture::new("worker");
         let session = fixture.create().await;
-        let id = session.id();
         session
             .send(prompt("one", "Use a subagent."))
             .await
@@ -586,7 +585,7 @@ fn reports_workers() {
         assert_eq!(workers[0].len(), 1);
         let worker = &workers[0][0];
         assert_eq!(worker.id, "toolu_01So4iSESo7fNDLbyGJPYyDp");
-        assert_eq!(worker.parent.as_deref(), Some(id.as_str()));
+        assert_eq!(worker.parent, None);
         assert_eq!(worker.title, "List files");
         assert_eq!(worker.state, WorkerState::Running);
         assert!(events.contains(&Event::ToolFinished {
