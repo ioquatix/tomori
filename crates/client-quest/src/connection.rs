@@ -108,6 +108,18 @@ impl Voice {
         result.map_err(|error| format!("Cannot send: {error}"))
     }
 
+    /// Close the microphone and forget the utterance the server has already ended.
+    fn abandon(&mut self) -> Result<(), String> {
+        self.recording = None;
+        let mut captured = self.lock();
+        let Some(microphone) = captured.microphone.as_mut() else {
+            return Ok(());
+        };
+        microphone
+            .abandon()
+            .map_err(|error| format!("Cannot send: {error}"))
+    }
+
     /// The client is going away: close the microphone and forget it.
     fn reset(&mut self) {
         self.recording = None;
@@ -226,6 +238,11 @@ impl Connection {
                 }
                 Action::CancelUtterance => {
                     if let Err(error) = self.voice.finish(false) {
+                        conversation.fail(error);
+                    }
+                }
+                Action::AbandonUtterance => {
+                    if let Err(error) = self.voice.abandon() {
                         conversation.fail(error);
                     }
                 }

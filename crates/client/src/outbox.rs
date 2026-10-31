@@ -279,6 +279,13 @@ impl Outbox {
         Ok(None)
     }
 
+    /// Forget the open utterance without sending anything, because the server has already ended it. Its queued frames are still sent in order. Does nothing if `utterance` is not the open one.
+    pub fn abandon_utterance(&self, utterance: &str) {
+        self.lock()
+            .utterance
+            .take_if(|open| open.utterance == utterance);
+    }
+
     fn send_utterance(
         mut state: MutexGuard<'_, State>,
         message: ClientMessage,

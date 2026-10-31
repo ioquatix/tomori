@@ -78,6 +78,11 @@ impl Sender {
         Ok(())
     }
 
+    /// Forget the open utterance without sending `UtteranceCancel`, because the server has already ended it, as when it reports `TranscriptFailed`. A later `UtteranceEnd` or `UtteranceCancel` for it would be refused.
+    pub fn abandon_utterance(&self, utterance: &str) {
+        self.shared.outbox.abandon_utterance(utterance);
+    }
+
     pub fn state(&self) -> ConnectionState {
         self.shared
             .state

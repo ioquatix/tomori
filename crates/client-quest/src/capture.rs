@@ -60,7 +60,7 @@ pub use desktop::Desktop;
 mod desktop {
     use super::{Capture, Failed, Recording, Samples, downmix};
     use cpal::{
-        FromSample, SampleFormat, SizedSample, StreamConfig,
+        ErrorKind, FromSample, SampleFormat, SizedSample, StreamConfig,
         traits::{DeviceTrait, HostTrait, StreamTrait},
     };
 
@@ -128,7 +128,14 @@ mod desktop {
                     downmix(&converted, channels, &mut mono);
                     samples(&mono);
                 },
-                move |error| failed(format!("The microphone failed: {error}")),
+                move |error: cpal::Error| match error.kind() {
+                    // The stream keeps capturing without a gap.
+                    ErrorKind::DeviceChanged | ErrorKind::RealtimeDenied => {
+                        log::info!("Microphone: {error}");
+                    }
+                    // Anything else, including an overrun, loses audio, which must not be sent as if whole.
+                    _ => failed(format!("The microphone failed: {error}")),
+                },
                 None,
             )
             .map_err(|error| format!("Cannot open the microphone: {error}"))
@@ -170,10 +177,17 @@ mod android {
     }
 
     impl Capture for Android {
+        /// Asks once per launch; after that, the participant must allow it in Settings, since Android may not ask again.
         fn permit(&mut self) -> Result<bool, String> {
-            self.android
+            let asked = self.requested;
+            let granted = self
+                .android
                 .check_or_request("android.permission.RECORD_AUDIO", &mut self.requested)
-                .map_err(|error| format!("Cannot ask for the microphone: {error:#}"))
+                .map_err(|error| format!("Cannot ask for the microphone: {error:#}"))?;
+            if !granted && asked {
+                return Err("Allow the microphone for Tomori in Settings.".into());
+            }
+            Ok(granted)
         }
 
         /// The stream opens on the capture thread, so that the frame does not wait for it; failing to open is reported through `failed`.

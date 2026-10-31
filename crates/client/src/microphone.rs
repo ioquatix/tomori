@@ -26,7 +26,7 @@ pub struct Microphone {
     gate: Gate,
     utterance: Option<String>,
     sequence: u32,
-    /// Samples captured so far, including those not sent: the sender's clock for frame timestamps.
+    /// Samples pushed so far, including those not sent: the sender's clock for frame timestamps. It counts captured audio, so it stands still while the application captures nothing, as between push-to-talk recordings.
     captured: u64,
 }
 
@@ -127,6 +127,17 @@ impl Microphone {
         self.pending.clear();
         self.sender
             .send(ClientMessage::UtteranceCancel { utterance })?;
+        self.sender.send(ClientMessage::Gate { gate: self.gate })
+    }
+
+    /// Forget the open utterance without telling the server, because the server has already ended it, as when it reports `TranscriptFailed`. Audio not yet sent is discarded. Does nothing without an open utterance.
+    pub fn abandon(&mut self) -> Result<(), SendError> {
+        let Some(utterance) = self.utterance.take() else {
+            return Ok(());
+        };
+        self.sender.abandon_utterance(&utterance);
+        self.captured += self.pending.len() as u64;
+        self.pending.clear();
         self.sender.send(ClientMessage::Gate { gate: self.gate })
     }
 
@@ -364,6 +375,35 @@ mod tests {
                 },
                 ClientMessage::Gate { gate: Gate::Off },
             ]
+        );
+    }
+
+    #[test]
+    fn abandoning_sends_no_cancellation() {
+        let (mut microphone, sender) = microphone();
+        microphone.begin("u1").unwrap();
+        microphone.push(&[2; 400]).unwrap();
+        microphone.abandon().unwrap();
+        assert_eq!(microphone.utterance(), None);
+        microphone.push(&[2; 400]).unwrap();
+        let items = sent(sender.outbox());
+        assert_eq!(frames(&items), [(Gate::Agent, 0, 320)]);
+        assert_eq!(
+            controls(&items),
+            [
+                ClientMessage::Gate { gate: Gate::Agent },
+                ClientMessage::UtteranceBegin {
+                    utterance: "u1".into()
+                },
+                ClientMessage::Gate { gate: Gate::Off },
+            ]
+        );
+        // The next utterance does not cancel the abandoned one either.
+        microphone.begin("u2").unwrap();
+        assert!(
+            !controls(&sent(sender.outbox()))
+                .iter()
+                .any(|message| matches!(message, ClientMessage::UtteranceCancel { .. }))
         );
     }
 

@@ -38,6 +38,8 @@ pub enum Action {
     EndUtterance,
     /// Close the microphone and abandon the utterance.
     CancelUtterance,
+    /// Close the microphone and forget the utterance, which the server has already ended.
+    AbandonUtterance,
 }
 
 /// Push-to-talk, from pressing X until the server's transcript or failure. See `design/speech.md`.
@@ -225,6 +227,8 @@ impl Conversation {
         self.listed = false;
         self.selected = 0;
         self.close_space();
+        // A transcript still awaited cannot arrive on the new connection.
+        self.talk = None;
         self.mode = Mode::Lobby;
         self.error = None;
         self.notice = None;
@@ -363,8 +367,10 @@ impl Conversation {
             ServerMessage::TranscriptFailed { utterance, error } => {
                 log::warn!("Utterance {utterance} failed: {error}");
                 if self.talk.as_ref().map(Talk::utterance) == Some(utterance.as_str()) {
-                    self.stop_talking();
-                    self.talk = None;
+                    // Cancelling would be refused, since the server has already ended it.
+                    if matches!(self.talk.take(), Some(Talk::Recording { .. })) {
+                        self.actions.push(Action::AbandonUtterance);
+                    }
                 }
                 // Also shown for an earlier utterance, whose words were not sent either.
                 self.error = Some(error);
@@ -577,6 +583,7 @@ impl Conversation {
                 self.spaces.clear();
                 self.listed = false;
                 self.close_space();
+                self.talk = None;
                 self.leaving = false;
                 self.error = None;
                 self.ended = None;
@@ -936,12 +943,14 @@ impl Conversation {
             Some(Talk::Recording { heard, .. }) if heard.is_empty() => {
                 Some("MIC AGENT: listening...".to_owned())
             }
-            Some(Talk::Recording { heard, .. }) => Some(format!("MIC AGENT: {heard}")),
+            Some(Talk::Recording { heard, .. }) => {
+                Some(format!("MIC AGENT: {}", tail(heard, COLUMNS - 11)))
+            }
             _ => None,
         };
         let status = recording.or_else(|| self.status()).unwrap_or_else(|| {
             if let Some(Talk::Sending { heard, .. }) = &self.talk {
-                format!("Sending: {heard}...")
+                format!("Sending: {}...", tail(heard, COLUMNS - 12))
             } else if let Some(error) = &space.error {
                 format!("ERROR: {error}")
             } else if let Some(entry) = self.own_queued() {
@@ -1027,6 +1036,16 @@ fn window(selected: usize, count: usize, rows: usize) -> usize {
     selected
         .saturating_sub(rows - 1)
         .min(count.saturating_sub(rows))
+}
+
+/// The end of `text` within `width` columns, so that words still being heard stay in view.
+fn tail(text: &str, width: usize) -> String {
+    let ascii = wrapped_lines(&text.replace('\n', " ")).join(" ");
+    if ascii.len() <= width {
+        ascii
+    } else {
+        format!("...{}", &ascii[ascii.len() - (width - 3)..])
+    }
 }
 
 fn short(text: &str) -> String {
@@ -1850,7 +1869,8 @@ mod tests {
             utterance: utterance.clone(),
             error: "Some of the recording was lost, so nothing was sent. Please try again.".into(),
         }));
-        assert_eq!(conversation.take_actions(), [Action::CancelUtterance]);
+        // The server has already ended it, so it is not cancelled.
+        assert_eq!(conversation.take_actions(), [Action::AbandonUtterance]);
         assert_eq!(conversation.recording(), None);
         conversation.talk(false);
         assert!(conversation.take_actions().is_empty());
@@ -1933,6 +1953,38 @@ mod tests {
         assert_fits(&mut conversation);
         conversation.talk(false);
         assert_fits(&mut conversation);
+    }
+
+    #[test]
+    fn the_newest_words_heard_stay_in_view() {
+        let mut conversation = joined(|_| {});
+        let utterance = press(&mut conversation);
+        let heard = format!("{} the newest words", "older words ".repeat(10));
+        conversation.apply(transcript(&utterance, &heard, false));
+        assert!(conversation.text().contains("MIC AGENT: ..."));
+        assert!(conversation.text().contains("the newest words"));
+        conversation.talk(false);
+        assert!(conversation.text().contains("the newest words..."));
+    }
+
+    #[test]
+    fn leaving_the_server_forgets_words_being_sent() {
+        let mut conversation = joined(|_| {});
+        press(&mut conversation);
+        conversation.talk(false);
+        conversation.take_actions();
+        conversation.connect(Choice::new("Other", "10.0.0.2:8765", Source::Discovered));
+        assert_eq!(conversation.talk, None);
+
+        let mut conversation = joined(|_| {});
+        press(&mut conversation);
+        conversation.talk(false);
+        conversation.take_actions();
+        // Leave the space, then the server.
+        conversation.back();
+        conversation.back();
+        assert_eq!(conversation.mode, Mode::Servers);
+        assert_eq!(conversation.talk, None);
     }
 
     #[test]

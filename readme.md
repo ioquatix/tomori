@@ -192,12 +192,13 @@ and a **REC** timer above it counts up. Release **X** to send; the server
 finishes the transcript and queues it like typed input, where **B** can still
 cancel it.
 Otherwise the microphone is off, and the panel says **Mic off**. The first
-press asks for microphone permission; allow it and hold **X** again.
+press asks for microphone permission; allow it and hold **X** again. If it was
+denied, allow the microphone for Tomori in the headset's Settings.
 
 If anything stops the words reaching the agent intact, such as lost audio, a
 dropped connection, nothing being heard or a full queue, the panel shows the
 error and nothing is sent. Losing focus, as when the system menu opens, cancels
-a recording that is still held. The audio is also relayed to the other
+a recording that is still held; release **X** before holding it again. The audio is also relayed to the other
 participants in the space, though nothing plays it yet, and replies are not
 spoken yet (see [design/speech.md](design/speech.md) and
 [design/live-audio.md](design/live-audio.md)).
