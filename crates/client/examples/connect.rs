@@ -11,7 +11,9 @@
 //!
 //! Without an address, or with `-`, it browses for servers advertised with Bonjour, lists them and asks which one to join.
 //!
-//! Type commands on standard input: `list`, `join <space>`, `leave`, `gate off|live|agent`, `quit`.
+//! Type commands on standard input: `list`, `join <space>`, `leave`, `gate off|live|agent`, `allow <request>`,
+//! `deny <request>`, `grant <request> <option>`, `quit`. A pending approval is printed with its request id and the ids
+//! of the options it offers.
 
 use std::collections::BTreeMap;
 use std::io::BufRead;
@@ -20,7 +22,17 @@ use std::time::{Duration, Instant};
 
 use client::discovery::{self, Servers};
 use client::{Client, Event, Options, Sender};
-use protocol::{ClientMessage, Gate, ServerMessage};
+use protocol::{ClientMessage, Decision, Gate, ServerMessage};
+
+const COMMANDS: &str = "commands: list, join <space>, leave, gate off|live|agent, allow <request>, deny <request>, grant <request> <option>, quit";
+
+fn decide(request: &str, decision: Decision, option: Option<&str>) -> ClientMessage {
+    ClientMessage::Decide {
+        request: request.into(),
+        decision,
+        option: option.map(Into::into),
+    }
+}
 
 fn command(sender: &Sender, line: &str) -> bool {
     let mut words = line.split_whitespace();
@@ -38,9 +50,18 @@ fn command(sender: &Sender, line: &str) -> bool {
                 _ => Gate::Off,
             },
         },
+        (Some("allow"), Some(request)) => decide(request, Decision::AllowOnce, None),
+        (Some("deny"), Some(request)) => decide(request, Decision::Deny, None),
+        (Some("grant"), Some(request)) => match words.next() {
+            Some(option) => decide(request, Decision::Grant, Some(option)),
+            None => {
+                eprintln!("{COMMANDS}");
+                return true;
+            }
+        },
         (None, _) => return true,
         _ => {
-            eprintln!("commands: list, join <space>, leave, gate off|live|agent, quit");
+            eprintln!("{COMMANDS}");
             return true;
         }
     };
@@ -52,15 +73,27 @@ fn command(sender: &Sender, line: &str) -> bool {
 
 fn describe(message: &ServerMessage) -> String {
     match message {
-        ServerMessage::Space { state } => format!(
-            "space {} ({}) activity={:?} messages={} queue={} participants={}",
-            state.id,
-            state.title,
-            state.activity,
-            state.messages.len(),
-            state.queue.len(),
-            state.participants.len()
-        ),
+        ServerMessage::Space { state } => {
+            let mut text = format!(
+                "space {} ({}) activity={:?} messages={} queue={} participants={}",
+                state.id,
+                state.title,
+                state.activity,
+                state.messages.len(),
+                state.queue.len(),
+                state.participants.len()
+            );
+            if let Some(approval) = &state.approval {
+                text.push_str(&format!(
+                    "\napproval {} ({}): {}",
+                    approval.id, approval.title, approval.text
+                ));
+                for option in &approval.options {
+                    text.push_str(&format!("\n  option {}: {}", option.id, option.label));
+                }
+            }
+            text
+        }
         other => format!("{other:?}"),
     }
 }

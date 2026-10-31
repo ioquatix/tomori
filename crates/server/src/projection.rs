@@ -5,7 +5,7 @@
 
 use std::fmt::Write;
 
-use backend::{AnswerValue, Field, FieldKind, Permission, Question};
+use backend::{AnswerValue, Field, FieldKind, Grant, GrantScope, Permission, Question};
 
 /// Longest tool input summary shown in an approval.
 const INPUT_SUMMARY_LIMIT: usize = 600;
@@ -35,6 +35,87 @@ pub fn approval(permission: &Permission) -> protocol::Approval {
         id: permission.id.clone(),
         title: permission.tool.clone(),
         text,
+        options: options(permission),
+    }
+}
+
+/// The most standing options shown with one approval.
+const OPTION_COUNT_LIMIT: usize = 4;
+
+/// Longest option label, in characters. Like Claude Code's terminal, an option too long to describe in full is not
+/// offered, rather than granting something its label leaves out.
+const OPTION_LABEL_LIMIT: usize = 400;
+
+/// The standing options participants may choose for `permission`. Only these can be granted.
+pub fn options(permission: &Permission) -> Vec<protocol::ApprovalOption> {
+    permission
+        .options
+        .iter()
+        .filter(|option| !option.grants.is_empty())
+        .map(|option| protocol::ApprovalOption {
+            id: option.id.clone(),
+            label: grant_label(&option.grants),
+        })
+        .filter(|option| option.label.chars().count() <= OPTION_LABEL_LIMIT)
+        .take(OPTION_COUNT_LIMIT)
+        .collect()
+}
+
+/// A spoken-style label for a standing option, naming everything it grants and where it is kept, in the manner of
+/// Claude Code's terminal dialog: "Yes, allow all edits during this session" or "Yes, and don't ask again for
+/// Bash(make) in this project".
+pub fn grant_label(grants: &[Grant]) -> String {
+    // Grants of one kind and scope are named together, in the order they first appear.
+    let mut groups: Vec<(&'static str, GrantScope, Vec<String>)> = Vec::new();
+    for grant in grants {
+        let (kind, scope, name) = match grant {
+            Grant::Rule {
+                tool,
+                content,
+                scope,
+            } => (
+                "rule",
+                *scope,
+                match content {
+                    Some(content) => format!("{tool}({content})"),
+                    None => tool.clone(),
+                },
+            ),
+            Grant::Directory { path, scope } => ("directory", *scope, path.clone()),
+            Grant::Mode { mode, scope } => ("mode", *scope, mode.clone()),
+        };
+        match groups
+            .iter_mut()
+            .find(|(other, within, _)| *other == kind && *within == scope)
+        {
+            Some((_, _, names)) => names.push(name),
+            None => groups.push((kind, scope, vec![name])),
+        }
+    }
+
+    let parts: Vec<String> = groups
+        .iter()
+        .map(|(kind, scope, names)| {
+            let place = match scope {
+                GrantScope::Session => "during this session",
+                GrantScope::Local => "in this project",
+                GrantScope::Project => "in this project for everyone (shared project settings)",
+                GrantScope::User => "in any project (user settings)",
+            };
+            let names = names.join(" and ");
+            match *kind {
+                "rule" => format!("don't ask again for {names} {place}"),
+                "directory" => format!("allow access to {names} {place}"),
+                _ if names == "acceptEdits" => format!("allow all edits {place}"),
+                _ => format!("switch to {names} mode {place}"),
+            }
+        })
+        .collect();
+    match parts.as_slice() {
+        [] => "Yes".to_owned(),
+        [only] if only.starts_with("don't") => format!("Yes, and {only}"),
+        [only] => format!("Yes, {only}"),
+        _ => format!("Yes, and {}", parts.join("; and ")),
     }
 }
 
@@ -345,6 +426,7 @@ mod tests {
             tool: "Bash".into(),
             input: serde_json::json!({"command": "ls -la", "timeout": 5}),
             description: Some("List files".into()),
+            options: Vec::new(),
         };
         let approval = approval(&permission);
         assert_eq!(approval.title, "Bash");
@@ -352,5 +434,86 @@ mod tests {
             approval.text,
             "List files\nls -la\n\nA: allow once. B: deny."
         );
+        assert!(approval.options.is_empty());
+    }
+
+    #[test]
+    fn grant_labels_name_what_is_granted_and_where() {
+        use backend::{Grant, GrantScope};
+
+        let rule = |content: Option<&str>, scope| Grant::Rule {
+            tool: "Bash".into(),
+            content: content.map(Into::into),
+            scope,
+        };
+        assert_eq!(
+            grant_label(&[Grant::Mode {
+                mode: "acceptEdits".into(),
+                scope: GrantScope::Session
+            }]),
+            "Yes, allow all edits during this session"
+        );
+        assert_eq!(
+            grant_label(&[
+                rule(Some("touch marker.txt"), GrantScope::Local),
+                Grant::Directory {
+                    path: "/work".into(),
+                    scope: GrantScope::Session
+                },
+            ]),
+            "Yes, and don't ask again for Bash(touch marker.txt) in this project; and allow access to /work during this session"
+        );
+        assert_eq!(
+            grant_label(&[
+                rule(Some("make:*"), GrantScope::User),
+                rule(None, GrantScope::User)
+            ]),
+            "Yes, and don't ask again for Bash(make:*) and Bash in any project (user settings)"
+        );
+        assert_eq!(
+            grant_label(&[Grant::Mode {
+                mode: "plan".into(),
+                scope: GrantScope::Project
+            }]),
+            "Yes, switch to plan mode in this project for everyone (shared project settings)"
+        );
+    }
+
+    #[test]
+    fn options_that_cannot_be_described_are_not_offered() {
+        use backend::{Grant, GrantScope, PermissionOption};
+
+        let option = |id: &str, content: &str| PermissionOption {
+            id: id.into(),
+            grants: vec![Grant::Rule {
+                tool: "Bash".into(),
+                content: Some(content.into()),
+                scope: GrantScope::Local,
+            }],
+        };
+        let mut permission = Permission {
+            id: "p".into(),
+            tool: "Bash".into(),
+            input: serde_json::Value::Null,
+            description: None,
+            options: vec![
+                PermissionOption {
+                    id: "empty".into(),
+                    grants: Vec::new(),
+                },
+                option("long", &"x".repeat(OPTION_LABEL_LIMIT)),
+                option("make", "make"),
+            ],
+        };
+        for index in 0..OPTION_COUNT_LIMIT {
+            permission
+                .options
+                .push(option(&format!("extra-{index}"), "ls"));
+        }
+        let ids: Vec<String> = options(&permission)
+            .into_iter()
+            .map(|option| option.id)
+            .collect();
+        assert_eq!(ids, ["make", "extra-0", "extra-1", "extra-2"]);
     }
 }

@@ -10,8 +10,8 @@ use std::thread;
 use std::time::Duration;
 
 use backend::{
-    AnswerValue, Backend, Decision, ErrorKind, Event, FieldKind, Part, Prompt, Role, Session,
-    SessionSpec, WorkerState,
+    AnswerValue, Backend, Decision, ErrorKind, Event, FieldKind, Grant, GrantScope, Part,
+    PermissionOption, Prompt, Role, Session, SessionSpec, WorkerState,
 };
 use backend_claude_code::{ClaudeCode, ClaudeCodeSession, Config};
 use serde_json::Value;
@@ -337,6 +337,17 @@ fn denies_a_permission() {
         assert_eq!(permission.id, "7802cc24-5d63-4554-9ff9-15db6eca3fc7");
         assert_eq!(permission.tool, "Write");
         assert_eq!(permission.description.as_deref(), Some("b.txt"));
+        // The terminal offers to accept edits for the session.
+        assert_eq!(
+            permission.options,
+            vec![PermissionOption {
+                id: "suggestions".into(),
+                grants: vec![Grant::Mode {
+                    mode: "acceptEdits".into(),
+                    scope: GrantScope::Session,
+                }],
+            }]
+        );
         assert_eq!(
             session.snapshot().await.unwrap().permission.as_ref(),
             Some(permission)
@@ -383,6 +394,84 @@ fn denies_a_permission() {
         );
         assert_eq!(responses[1]["response"]["subtype"], "error");
         assert_eq!(responses[1]["response"]["request_id"], "hook-1");
+    });
+}
+
+#[test]
+fn grants_the_suggested_permissions() {
+    run(|| async {
+        let fixture = Fixture::new("grant");
+        let session = fixture.create().await;
+        session
+            .send(prompt("one", "Touch the marker."))
+            .await
+            .unwrap();
+
+        let events = events_until(&session, |event| {
+            matches!(event, Event::PermissionRequested(_))
+        })
+        .await;
+        let Some(Event::PermissionRequested(permission)) = events.last() else {
+            unreachable!()
+        };
+        // The terminal's "don't ask again" row shows the rule and the directory, not the mode change.
+        assert_eq!(
+            permission.options,
+            vec![PermissionOption {
+                id: "suggestions".into(),
+                grants: vec![
+                    Grant::Rule {
+                        tool: "Bash".into(),
+                        content: Some("touch marker.txt".into()),
+                        scope: GrantScope::Local,
+                    },
+                    Grant::Directory {
+                        path: "/private/tmp/work".into(),
+                        scope: GrantScope::Session,
+                    },
+                ],
+            }]
+        );
+
+        let error = session
+            .decide(
+                &permission.id,
+                Decision::Grant {
+                    option: "always".into(),
+                },
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind, ErrorKind::Invalid);
+        session
+            .decide(
+                &permission.id,
+                Decision::Grant {
+                    option: "suggestions".into(),
+                },
+            )
+            .await
+            .unwrap();
+        events_until(&session, |event| *event == Event::Idle).await;
+        close(&session).await;
+
+        let responses: Vec<_> = fixture
+            .written()
+            .into_iter()
+            .filter(|line| line["type"] == "control_response")
+            .collect();
+        assert_eq!(responses.len(), 1);
+        assert_eq!(
+            responses[0]["response"]["response"],
+            serde_json::json!({
+                "behavior": "allow",
+                "updatedInput": {"command": "touch marker.txt", "description": "Create marker.txt file with touch"},
+                "updatedPermissions": [
+                    {"type": "addRules", "rules": [{"toolName": "Bash", "ruleContent": "touch marker.txt"}], "behavior": "allow", "destination": "localSettings"},
+                    {"type": "addDirectories", "directories": ["/private/tmp/work"], "destination": "session"},
+                ],
+            })
+        );
     });
 }
 

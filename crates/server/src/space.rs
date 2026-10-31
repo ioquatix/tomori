@@ -419,9 +419,23 @@ impl SpaceModel {
         }
     }
 
-    /// Claim the presented approval for a decision. Only the first claim succeeds; the next pending approval is presented at once.
-    pub fn claim_approval(&mut self, request: &str) -> Result<(), &'static str> {
+    /// Claim the presented approval for a decision, which grants `option` if given. Only the first claim succeeds; the next pending approval is presented at once. A claim naming an option the approval does not offer fails and leaves it presented.
+    pub fn claim_approval(
+        &mut self,
+        request: &str,
+        option: Option<&str>,
+    ) -> Result<(), &'static str> {
         match self.approvals.front() {
+            Some(pending)
+                if pending.id == request
+                    && option.is_some_and(|option| {
+                        !projection::options(pending)
+                            .iter()
+                            .any(|offered| offered.id == option)
+                    }) =>
+            {
+                Err("That option is not offered for this approval.")
+            }
             Some(pending) if pending.id == request => {
                 let claimed = self.approvals.pop_front().expect("checked above");
                 self.deciding.push(claimed);
@@ -584,14 +598,15 @@ mod tests {
             tool: "Bash".into(),
             input: serde_json::Value::Null,
             description: None,
+            options: Vec::new(),
         }));
         space.enqueue("a".into(), "Ada".into(), "hello".into());
         assert_eq!(space.activity(), Activity::Waiting);
         assert!(space.next_prompt().is_none());
-        assert!(space.claim_approval("p").is_ok());
-        assert!(space.claim_approval("p").is_err());
+        assert!(space.claim_approval("p", None).is_ok());
+        assert!(space.claim_approval("p", None).is_err());
         space.restore_approval("p");
-        assert!(space.claim_approval("p").is_ok());
+        assert!(space.claim_approval("p", None).is_ok());
         space.apply(Event::PermissionResolved { id: "p".into() });
         assert!(space.next_prompt().is_some());
     }
@@ -602,7 +617,40 @@ mod tests {
             tool: "Bash".into(),
             input: serde_json::Value::Null,
             description: None,
+            options: Vec::new(),
         }
+    }
+
+    #[test]
+    fn only_offered_options_can_be_granted() {
+        let mut space = model();
+        let mut offering = permission("p1");
+        offering.options.push(backend::PermissionOption {
+            id: "suggestions".into(),
+            grants: vec![backend::Grant::Mode {
+                mode: "acceptEdits".into(),
+                scope: backend::GrantScope::Session,
+            }],
+        });
+        space.apply(Event::PermissionRequested(offering));
+        space.apply(Event::PermissionRequested(permission("p2")));
+
+        let approval = space.state(Vec::new()).approval.unwrap();
+        assert_eq!(
+            approval.options,
+            vec![protocol::ApprovalOption {
+                id: "suggestions".into(),
+                label: "Yes, allow all edits during this session".into(),
+            }]
+        );
+        assert!(space.claim_approval("p1", Some("always")).is_err());
+        assert_eq!(space.state(Vec::new()).approval.unwrap().id, "p1");
+        assert!(space.claim_approval("p1", Some("suggestions")).is_ok());
+
+        // An approval without options offers nothing to grant.
+        assert!(space.state(Vec::new()).approval.unwrap().options.is_empty());
+        assert!(space.claim_approval("p2", Some("suggestions")).is_err());
+        assert!(space.claim_approval("p2", None).is_ok());
     }
 
     #[test]
@@ -613,16 +661,16 @@ mod tests {
         space.apply(Event::PermissionRequested(permission("p1")));
         space.enqueue("a".into(), "Ada".into(), "hello".into());
         assert_eq!(space.state(Vec::new()).approval.unwrap().id, "p1");
-        assert!(space.claim_approval("p2").is_err());
-        assert!(space.claim_approval("p1").is_ok());
+        assert!(space.claim_approval("p2", None).is_err());
+        assert!(space.claim_approval("p1", None).is_ok());
         assert_eq!(space.state(Vec::new()).approval.unwrap().id, "p2");
 
         // A recoverable failure presents the first request again, ahead of the second.
         space.restore_approval("p1");
         assert_eq!(space.state(Vec::new()).approval.unwrap().id, "p1");
-        assert!(space.claim_approval("p1").is_ok());
+        assert!(space.claim_approval("p1", None).is_ok());
         space.decided("p1");
-        assert!(space.claim_approval("p2").is_ok());
+        assert!(space.claim_approval("p2", None).is_ok());
 
         // Nothing is delivered until every request is resolved.
         assert_eq!(space.activity(), Activity::Waiting);
