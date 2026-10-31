@@ -16,6 +16,8 @@ Each client mixes every incoming participant stream together with the space's ag
 
 Playback and mixing are real time: audio that arrives too late to play is dropped from playback rather than delayed or replayed. This does not apply to transcription: every `agent` frame reaches recognition, in order, and a gap in `agent` audio fails the utterance with a visible error, as `speech.md` requires.
 
+The agent speech stream is real time too. Synthesis runs ahead of playback, but the server sends each segment's audio at the rate it plays, only slightly ahead to absorb network jitter, to whoever is in the space at that moment; a participant who joins mid-segment hears it from that point. On each connection, participant audio never displaces agent speech: agent frames are queued separately and dropped only when they could no longer play in time, which receivers see as a gap in the agent stream's sequence numbers.
+
 Echo cancellation happens on the capturing device, so that a participant's playback does not feed back into their microphone stream.
 
 ## Rationale
@@ -32,6 +34,7 @@ Client audio capture and playback, the microphone gate, server routing and the s
 - Test that a client's output contains other participants and agent speech but not its own microphone.
 - Test that frames arriving too late for playback are dropped from playback and mixing, while the same `agent` frames still reach recognition.
 - Test that a missing `agent` frame fails the utterance visibly instead of producing a partial transcript.
+- Test that agent speech is sent at its playback rate rather than as fast as it is synthesized, that a participant joining mid-segment receives the rest of it, and that a backlog of participant audio on a connection does not displace agent frames.
 - On a headset, confirm that agent speech and other participants playing through the speakers are not transcribed from the local microphone.
 
 Latency targets for participant-to-participant audio are not yet agreed.
