@@ -13,6 +13,8 @@ use crate::connection::ConnectionBody;
 use crate::hub::Hub;
 
 /// The HTTP routes of the server: `POST /connect` for client connections and `GET /health`.
+///
+/// The cancellation passed to each call must be specific to that HTTP connection, as [`crate::Server::run`] arranges: a connection that goes silent is ended by cancelling it.
 pub struct Application {
     hub: Arc<Hub>,
 }
@@ -107,7 +109,7 @@ impl Handler for Application {
         &self,
         request: Request<B>,
         _interim: &mut InterimResponses<I>,
-        _cancellation: &Cancellation,
+        cancellation: &Cancellation,
     ) -> Result<Response<ResponseBody<B>>, Infallible> {
         let path = request.path.as_ref().map_or("", |path| path.as_str());
         let path = path.split('?').next().unwrap_or_default();
@@ -115,7 +117,8 @@ impl Handler for Application {
         let post = request.method == Method::POST;
         Ok(match path {
             protocol::CONNECT_PATH if post => {
-                let body = ConnectionBody::new(self.hub.clone(), request.body);
+                let body =
+                    ConnectionBody::new(self.hub.clone(), request.body, cancellation.clone());
                 response(
                     Status::OK,
                     protocol::CONTENT_TYPE,

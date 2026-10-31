@@ -90,6 +90,14 @@ pub enum ClientMessage {
     SetAttribution {
         enabled: bool,
     },
+    /// Sent when nothing has been received for the keepalive interval. Valid before Hello. See [`crate::Keepalive`].
+    Ping {
+        nonce: u64,
+    },
+    /// The immediate answer to a [`ServerMessage::Ping`], echoing its nonce.
+    Pong {
+        nonce: u64,
+    },
 }
 
 /// Control messages sent by the server.
@@ -141,6 +149,14 @@ pub enum ServerMessage {
     Error {
         error: String,
     },
+    /// Sent when nothing has been received for the keepalive interval. See [`crate::Keepalive`].
+    Ping {
+        nonce: u64,
+    },
+    /// The immediate answer to a [`ClientMessage::Ping`], echoing its nonce.
+    Pong {
+        nonce: u64,
+    },
 }
 
 #[cfg(test)]
@@ -166,6 +182,42 @@ mod tests {
         })
         .unwrap();
         assert_eq!(json["final"], true);
+    }
+
+    #[test]
+    fn keepalive_messages_are_symmetric() {
+        let ping = serde_json::json!({"type": "ping", "nonce": 7});
+        let pong = serde_json::json!({"type": "pong", "nonce": 7});
+        assert_eq!(
+            serde_json::to_value(ClientMessage::Ping { nonce: 7 }).unwrap(),
+            ping
+        );
+        assert_eq!(
+            serde_json::to_value(ServerMessage::Ping { nonce: 7 }).unwrap(),
+            ping
+        );
+        assert_eq!(
+            serde_json::to_value(ClientMessage::Pong { nonce: 7 }).unwrap(),
+            pong
+        );
+        assert_eq!(
+            serde_json::to_value(ServerMessage::Pong { nonce: 7 }).unwrap(),
+            pong
+        );
+        assert_eq!(
+            serde_json::from_value::<ClientMessage>(ping.clone()).unwrap(),
+            ClientMessage::Ping { nonce: 7 }
+        );
+        assert_eq!(
+            serde_json::from_value::<ServerMessage>(pong).unwrap(),
+            ServerMessage::Pong { nonce: 7 }
+        );
+        // The largest nonce survives a round trip through the frame encoding.
+        let frame = crate::Frame::server(&ServerMessage::Ping { nonce: u64::MAX });
+        assert_eq!(
+            frame.to_server_message().unwrap(),
+            ServerMessage::Ping { nonce: u64::MAX }
+        );
     }
 
     #[test]

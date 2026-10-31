@@ -17,7 +17,7 @@ pub enum Disconnect {
     Status(u16),
     /// The server sent something that violates the protocol, including an incompatible version.
     Protocol(String),
-    /// Connecting or the server's Welcome took too long.
+    /// Connecting or the server's Welcome took too long, or an established connection received nothing for [`protocol::Keepalive::timeout`].
     Timeout,
     /// The server ended the connection.
     Closed,

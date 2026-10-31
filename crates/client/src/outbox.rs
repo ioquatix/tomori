@@ -35,7 +35,7 @@ impl Membership {
 pub enum SendError {
     /// The client has been closed.
     Closed,
-    /// `Hello` is sent by the client itself on every connection.
+    /// `Hello`, `Ping` and `Pong` are sent by the client itself.
     Reserved,
 }
 
@@ -43,7 +43,10 @@ impl std::fmt::Display for SendError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Closed => write!(formatter, "the client is closed"),
-            Self::Reserved => write!(formatter, "hello is sent by the client on each connection"),
+            Self::Reserved => write!(
+                formatter,
+                "hello and keepalive messages are sent by the client itself"
+            ),
         }
     }
 }
@@ -60,6 +63,8 @@ pub enum Batch {
 }
 
 struct State {
+    /// Keepalive messages, sent before anything else so that queued audio never delays them.
+    keepalive: VecDeque<ClientMessage>,
     control: VecDeque<ClientMessage>,
     audio: VecDeque<AudioFrame>,
     audio_limit: usize,
@@ -83,6 +88,7 @@ impl Outbox {
     pub fn new(audio_limit: usize) -> Self {
         Self {
             state: Mutex::new(State {
+                keepalive: VecDeque::new(),
                 control: VecDeque::new(),
                 audio: VecDeque::new(),
                 audio_limit: audio_limit.max(1),
@@ -115,7 +121,9 @@ impl Outbox {
         }
         // Messages superseded by the restored membership, or too stale to deliver later, are not queued while disconnected.
         let deferred = match &message {
-            ClientMessage::Hello { .. } => return Err(SendError::Reserved),
+            ClientMessage::Hello { .. }
+            | ClientMessage::Ping { .. }
+            | ClientMessage::Pong { .. } => return Err(SendError::Reserved),
             ClientMessage::Join { space } => {
                 state.membership.space = Some(space.clone());
                 true
@@ -171,6 +179,20 @@ impl Outbox {
         Ok(())
     }
 
+    /// Queue a `Ping` or `Pong` ahead of all other traffic. Keepalive messages belong to one connection, so they are discarded while disconnected.
+    pub(crate) fn keepalive(&self, message: ClientMessage) {
+        debug_assert!(matches!(
+            message,
+            ClientMessage::Ping { .. } | ClientMessage::Pong { .. }
+        ));
+        let mut state = self.lock();
+        if state.closed || !state.connected {
+            return;
+        }
+        state.keepalive.push_back(message);
+        Self::wake(state);
+    }
+
     /// Outgoing audio frames dropped because the client was disconnected or the link was congested.
     pub fn dropped_audio(&self) -> u64 {
         self.lock().dropped_audio
@@ -224,15 +246,19 @@ impl Outbox {
     pub fn disconnect(&self) {
         let mut state = self.lock();
         state.connected = false;
+        state.keepalive.clear();
         state.dropped_audio += state.audio.len() as u64;
         state.audio.clear();
         state.waker = None;
     }
 
-    /// Take up to roughly `size_limit` bytes of encoded frames, alternating control and audio, or wait for some.
+    /// Take up to roughly `size_limit` bytes of encoded frames, keepalive first, then alternating control and audio, or wait for some.
     pub fn poll_batch(&self, context: &mut Context<'_>, size_limit: usize) -> Poll<Batch> {
         let mut state = self.lock();
         let mut output = Vec::new();
+        while let Some(message) = state.keepalive.pop_front() {
+            Frame::client(&message).encode_into(&mut output);
+        }
         while output.len() < size_limit {
             let audio = if state.prefer_audio {
                 !state.audio.is_empty()

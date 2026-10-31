@@ -6,11 +6,15 @@
 //! Every client action and backend event is applied synchronously under the lock. Work that may call out of the server — transcriber calls and backend operations — is deferred until the lock is released, or sent to the space's driver task.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
+use std::time::Instant;
 
 use backend::{AnswerValue, Backend, ErrorKind, Event, Prompt, Snapshot};
+use base_scheduler::Cancellation;
 use protocol::{
-    AudioFrame, ClientMessage, Frame, FrameKind, Gate, PROTOCOL_VERSION, Participant, ServerMessage,
+    AudioFrame, ClientMessage, Frame, FrameKind, Gate, Keepalive, PROTOCOL_VERSION, Participant,
+    ServerMessage,
 };
 
 use crate::backends::Backends;
@@ -62,6 +66,7 @@ struct HubState {
     next_source: u32,
     next_space: u64,
     next_utterance: u64,
+    next_ping: u64,
     connections: HashMap<ConnectionId, ConnectionRecord>,
     participants: HashMap<String, ParticipantRecord>,
     /// In creation order.
@@ -74,6 +79,18 @@ struct ConnectionRecord {
     participant: Option<String>,
     last_sequence: Option<u32>,
     utterance: Option<OpenUtterance>,
+    liveness: Liveness,
+}
+
+/// What the keepalive sweep knows about one connection.
+struct Liveness {
+    /// Set by the connection whenever data arrives, and cleared by the sweep.
+    received: Arc<AtomicBool>,
+    /// When the sweep last saw data arrive, or first saw the connection.
+    last: Option<Instant>,
+    pinged: Option<Instant>,
+    /// Ends this connection's HTTP exchange, including a write blocked on a peer that is gone.
+    cancellation: Cancellation,
 }
 
 struct OpenUtterance {
@@ -280,11 +297,16 @@ impl Hub {
         }
     }
 
-    pub fn connect(&self) -> (ConnectionId, Arc<Outbox>) {
+    /// Register a connection. `cancellation` must end only this connection's exchange: the keepalive sweep cancels it when the connection goes silent. The connection sets the returned flag whenever data arrives.
+    pub fn connect(
+        &self,
+        cancellation: Cancellation,
+    ) -> (ConnectionId, Arc<Outbox>, Arc<AtomicBool>) {
         let mut state = self.lock();
         state.next_connection += 1;
         let id = state.next_connection;
         let outbox = Arc::new(Outbox::new());
+        let received = Arc::new(AtomicBool::new(false));
         state.connections.insert(
             id,
             ConnectionRecord {
@@ -292,9 +314,54 @@ impl Hub {
                 participant: None,
                 last_sequence: None,
                 utterance: None,
+                liveness: Liveness {
+                    received: received.clone(),
+                    last: None,
+                    pinged: None,
+                    cancellation,
+                },
             },
         );
-        (id, outbox)
+        (id, outbox, received)
+    }
+
+    /// Ping connections that have been quiet for the keepalive interval, and release those that have received nothing for the keepalive timeout as if they had disconnected. Called periodically with the current time; a connection's quiet time is measured from the first sweep that sees it or the last that saw data arrive.
+    pub fn sweep(&self, now: Instant, keepalive: &Keepalive) {
+        let mut expired = Vec::new();
+        {
+            let mut state = self.lock();
+            let HubState {
+                connections,
+                next_ping,
+                ..
+            } = &mut *state;
+            for (&id, record) in connections.iter_mut() {
+                let liveness = &mut record.liveness;
+                if liveness.received.swap(false, Ordering::AcqRel) || liveness.last.is_none() {
+                    liveness.last = Some(now);
+                }
+                let quiet = now.saturating_duration_since(liveness.last.unwrap_or(now));
+                if quiet >= keepalive.timeout {
+                    expired.push((id, liveness.cancellation.clone()));
+                } else if quiet >= keepalive.interval
+                    && liveness.pinged.is_none_or(|pinged| {
+                        now.saturating_duration_since(pinged) >= keepalive.interval
+                    })
+                {
+                    *next_ping += 1;
+                    record
+                        .outbox
+                        .keepalive(ServerMessage::Ping { nonce: *next_ping });
+                    liveness.pinged = Some(now);
+                }
+            }
+        }
+        for (id, cancellation) in expired {
+            log::info!("Connection {id} received nothing within the keepalive timeout.");
+            // Release the participant now; cancelling also ends the exchange, even one blocked writing to a peer that is gone.
+            self.disconnect(id);
+            cancellation.cancel();
+        }
     }
 
     pub fn disconnect(&self, connection: ConnectionId) {
@@ -341,6 +408,17 @@ impl Hub {
     }
 
     fn handle(&self, connection: ConnectionId, message: ClientMessage) {
+        match message {
+            // Keepalive is answered whether or not the connection has said hello. Receiving it already counted as liveness.
+            ClientMessage::Ping { nonce } => {
+                if let Some(record) = self.lock().connections.get(&connection) {
+                    record.outbox.keepalive(ServerMessage::Pong { nonce });
+                }
+                return;
+            }
+            ClientMessage::Pong { .. } => return,
+            _ => {}
+        }
         let mut deferred = Vec::new();
         {
             let mut state = self.lock();
@@ -483,6 +561,9 @@ impl Hub {
         };
         match message {
             ClientMessage::Hello { .. } => unreachable!("handled by hello"),
+            ClientMessage::Ping { .. } | ClientMessage::Pong { .. } => {
+                unreachable!("handled before membership")
+            }
             ClientMessage::ListSpaces => outbox.spaces(),
             ClientMessage::CreateSpace {
                 title,

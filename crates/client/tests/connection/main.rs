@@ -7,7 +7,7 @@ mod server;
 use std::net::{SocketAddr, TcpListener};
 use std::time::{Duration, Instant};
 
-use client::{Backoff, Client, ConnectionState, Disconnect, Event, Options};
+use client::{Backoff, Client, ConnectionState, Disconnect, Event, Keepalive, Options};
 use protocol::{AudioFrame, ClientMessage, Gate, ServerMessage};
 use server::{ECHO_SOURCE, MiniServer, Mode, Received};
 
@@ -116,9 +116,11 @@ fn streams_control_and_audio_in_both_directions_at_once() {
         // Pace like a microphone, more or less, so the congestion limit is not what this test measures.
         std::thread::sleep(Duration::from_millis(1));
     }
+    // Congestion drops happen as frames are queued, so the count is final once sending ends.
+    let dropped = client.sender().dropped_audio_frames();
     let mut received = Vec::new();
     let deadline = Instant::now() + TIMEOUT;
-    while received.len() < count as usize && Instant::now() < deadline {
+    while (received.len() as u64 + dropped) < u64::from(count) && Instant::now() < deadline {
         match client.try_audio() {
             Some(frame) => {
                 assert_eq!(frame.source, ECHO_SOURCE);
@@ -128,7 +130,6 @@ fn streams_control_and_audio_in_both_directions_at_once() {
             None => std::thread::sleep(Duration::from_millis(5)),
         }
     }
-    let dropped = client.sender().dropped_audio_frames();
     assert_eq!(received.len() as u64 + dropped, u64::from(count));
     assert!(received.windows(2).all(|pair| pair[0] < pair[1]));
     assert!(dropped < u64::from(count) / 2, "dropped {dropped} frames");
@@ -354,6 +355,70 @@ fn reports_how_the_response_ended() {
     body.extend(raw::chunk(&[1, 1, 0, 0, 0, 0]));
     let (reason, _) = raw_disconnect(Some(body), TIMEOUT);
     assert!(matches!(reason, Disconnect::Protocol(error) if error.contains("audio")));
+}
+
+fn keepalive(interval: u64, timeout: u64) -> Keepalive {
+    Keepalive {
+        interval: Duration::from_millis(interval),
+        timeout: Duration::from_millis(timeout),
+    }
+}
+
+#[test]
+fn reconnects_when_the_server_goes_silent() {
+    // The peer welcomes the client and then sends nothing, like a server whose network went away.
+    let mut options = options(raw::start(Some(raw::welcome())));
+    options.keepalive = keepalive(50, 300);
+    let client = Client::connect(options).unwrap();
+    wait_connected(&client);
+    assert_eq!(wait_disconnected(&client), Disconnect::Timeout);
+    wait_connected(&client);
+}
+
+#[test]
+fn pings_keep_a_quiet_connection_open() {
+    let server = MiniServer::start(localhost(), Mode::Normal);
+    let mut options = options(server.address);
+    options.keepalive = keepalive(30, 300);
+    let client = Client::connect(options).unwrap();
+    wait_connected(&client);
+
+    // The client answers the server's ping without reporting it.
+    client
+        .send(ClientMessage::Answer {
+            question: "q".into(),
+            field: "f".into(),
+            text: "ping".into(),
+        })
+        .unwrap();
+    let deadline = Instant::now() + TIMEOUT;
+    while !server
+        .received(1)
+        .contains(&Received::Message(ClientMessage::Pong { nonce: 7 }))
+    {
+        assert!(Instant::now() < deadline, "the client never answered");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+
+    // Nothing else is sent, so only the client's pings and the server's pongs keep the connection alive for several timeouts.
+    std::thread::sleep(Duration::from_millis(1000));
+    assert!(client.state().is_connected());
+    while let Some(event) = client.try_event() {
+        assert!(
+            !matches!(
+                event,
+                Event::State(ConnectionState::Disconnected { .. })
+                    | Event::Message(ServerMessage::Ping { .. } | ServerMessage::Pong { .. })
+            ),
+            "unexpected {event:?}"
+        );
+    }
+    let pings = server
+        .received(1)
+        .iter()
+        .filter(|received| matches!(received, Received::Message(ClientMessage::Ping { .. })))
+        .count();
+    assert!(pings >= 3, "only {pings} pings");
 }
 
 #[test]

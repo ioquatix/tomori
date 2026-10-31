@@ -3,6 +3,8 @@
 
 use std::time::Duration;
 
+use protocol::Keepalive;
+
 use crate::Backoff;
 
 /// How a [`crate::Client`] reaches and identifies itself to the server.
@@ -20,6 +22,8 @@ pub struct Options {
     pub connect_timeout: Duration,
     /// How long closing waits for the server to finish the connection after queued control messages are sent.
     pub close_timeout: Duration,
+    /// When to ping a quiet server and when to give up on a silent one. A connection that receives nothing for [`protocol::Keepalive::timeout`] ends with [`crate::Disconnect::Timeout`] and reconnects.
+    pub keepalive: Keepalive,
     /// Outgoing audio frames queued while the link is congested; older frames beyond this are dropped. At 20 ms per frame the default is 160 ms.
     pub outgoing_audio_limit: usize,
     /// Received audio frames held for the application; newer frames are dropped when it falls this far behind.
@@ -40,6 +44,7 @@ impl Options {
             backoff: Backoff::default(),
             connect_timeout: Duration::from_secs(5),
             close_timeout: Duration::from_secs(1),
+            keepalive: Keepalive::default(),
             outgoing_audio_limit: 8,
             incoming_audio_limit: 256,
         }

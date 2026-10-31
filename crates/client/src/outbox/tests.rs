@@ -297,3 +297,48 @@ fn membership_follows_the_server_unless_a_change_is_queued() {
     outbox.disconnect();
     assert!(outbox.connect().is_empty());
 }
+
+#[test]
+fn keepalive_precedes_queued_traffic_and_is_not_deferred() {
+    let outbox = Outbox::new(16);
+    // Keepalive belongs to one connection: nothing is kept while disconnected.
+    outbox.keepalive(ClientMessage::Ping { nonce: 0 });
+    outbox.connect();
+    assert!(poll(&outbox, 1024).is_pending());
+
+    for sequence in 0..4 {
+        outbox.send_audio(audio(sequence)).unwrap();
+    }
+    outbox.send(answer("a")).unwrap();
+    outbox.keepalive(ClientMessage::Pong { nonce: 1 });
+    outbox.keepalive(ClientMessage::Ping { nonce: 2 });
+    // Even a batch limit smaller than one frame carries every keepalive message, first.
+    let Poll::Ready(Batch::Frames(bytes)) = poll(&outbox, 1) else {
+        panic!("expected frames");
+    };
+    let mut decoder = FrameDecoder::new();
+    decoder.push(&bytes);
+    let mut messages = Vec::new();
+    while let Some(frame) = decoder.next_frame().unwrap() {
+        messages.push(frame.to_client_message().unwrap());
+    }
+    assert_eq!(
+        messages,
+        [
+            ClientMessage::Pong { nonce: 1 },
+            ClientMessage::Ping { nonce: 2 }
+        ]
+    );
+
+    outbox.keepalive(ClientMessage::Ping { nonce: 3 });
+    outbox.disconnect();
+    outbox.connect();
+    assert_eq!(items(&outbox), [Item::Control(answer("a"))]);
+
+    for message in [
+        ClientMessage::Ping { nonce: 4 },
+        ClientMessage::Pong { nonce: 4 },
+    ] {
+        assert_eq!(outbox.send(message), Err(SendError::Reserved));
+    }
+}
