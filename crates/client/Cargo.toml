@@ -1,0 +1,21 @@
+[package]
+name = "client"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.93"
+description = "Connection, reconnection and playback for Tomori clients"
+repository = "https://github.com/ioquatix/tomori"
+license = "MIT"
+publish = false
+
+[dependencies]
+base-http = "0.1.0"
+base-http-client = "0.1.0"
+base-scheduler = "0.3.0"
+base-scheduler-direct = "0.3.0"
+futures-lite = "2.6.1"
+protocol = { path = "../protocol" }
+
+[dev-dependencies]
+base-endpoint = "0.1.0"
+base-http-server = "0.1.0"

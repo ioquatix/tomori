@@ -199,6 +199,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "async-stream"
+version = "0.3.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0b5a71a6f37880a80d1d7f19efd781e4b5de42c88f0722cc13bcb6cc2cfe8476"
+dependencies = [
+ "async-stream-impl",
+ "futures-core",
+ "pin-project-lite",
+]
+
+[[package]]
+name = "async-stream-impl"
+version = "0.3.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c7c24de15d275a1ecfd47a380fb4d5ec9bfe0933f309ed5e705b775596a3574d"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
+name = "async-task"
+version = "4.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8b75356056920673b02621b35afd0f7dda9306d03c79a30f5c56c44cf256e3de"
+
+[[package]]
 name = "atomic-waker"
 version = "1.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -346,12 +374,100 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "46f2f8db06d87ff80f4f96e56336afcb338b96b444ee8de7fe8919601e8de9b9"
 
 [[package]]
+name = "base-endpoint"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5486363e111b27b2822657168f4cbd5875ce10528be61ad2f158e6715862732f"
+dependencies = [
+ "base-scheduler",
+]
+
+[[package]]
+name = "base-http"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "693033d37de09d1681b735aa15ad2ca9faff2d43fe16e50d5889b45c76cf148a"
+dependencies = [
+ "arrayvec",
+ "base-scheduler",
+ "event-listener",
+ "smallvec",
+]
+
+[[package]]
+name = "base-http-client"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "726d3e06d8700688e1ba5ec73137758933911ddb16e64cad7f7f85f92cd481fe"
+dependencies = [
+ "async-stream",
+ "base-endpoint",
+ "base-http",
+ "base-http-protocol",
+ "base-http1",
+ "base-pool",
+ "base-scheduler",
+ "crossbeam-utils",
+ "event-listener",
+ "futures-channel",
+ "futures-util",
+ "pin-project-lite",
+]
+
+[[package]]
+name = "base-http-protocol"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f92541dfd488c90e9ff4fba1ca8ced9e80e515b429203ea9f64497a89e8c0e20"
+dependencies = [
+ "base-endpoint",
+ "base-http1",
+]
+
+[[package]]
+name = "base-http-server"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b7a9ae595f9cf931a2f60e01d5dc9be67f610597039228bd857f964034a607bd"
+dependencies = [
+ "base-endpoint",
+ "base-http",
+ "base-http-protocol",
+ "base-http1",
+ "base-scheduler",
+ "futures-util",
+]
+
+[[package]]
+name = "base-http1"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6a4fa771d515b1e4b09b0dbaf294ab97c1778872bf6a543cb3e680ff6b6a7078"
+dependencies = [
+ "base-endpoint",
+ "base-http",
+ "base-scheduler",
+ "httparse",
+ "smallvec",
+]
+
+[[package]]
 name = "base-markdown"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f917d2241d2fc1419cb4f10ff6a537818c80dc5ac08d10fbb9f59ac5d3c3b994"
 dependencies = [
  "memchr",
+]
+
+[[package]]
+name = "base-pool"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1fbb697bdc1804e12f1cf6eede9ce7d14b0d615d265b596bdfcf571a9749779b"
+dependencies = [
+ "base-scheduler",
+ "event-listener",
 ]
 
 [[package]]
@@ -369,6 +485,31 @@ dependencies = [
  "bake-releases",
  "bake-test",
  "base-design",
+]
+
+[[package]]
+name = "base-scheduler"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "705d8e4437d3c979a8ed14d8c0da110cb93ee2857a5bd4d3c6ec0fd17a2152d5"
+dependencies = [
+ "event-listener",
+]
+
+[[package]]
+name = "base-scheduler-direct"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a97f3917a7a217ce0921ab2789b5b40206ee011a99652c00cf883be6649df21e"
+dependencies = [
+ "async-task",
+ "base-scheduler",
+ "event-listener",
+ "futures-channel",
+ "libc",
+ "signal-hook",
+ "socket2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -561,6 +702,20 @@ dependencies = [
  "glob",
  "libc",
  "libloading 0.8.9",
+]
+
+[[package]]
+name = "client"
+version = "0.1.0"
+dependencies = [
+ "base-endpoint",
+ "base-http",
+ "base-http-client",
+ "base-http-server",
+ "base-scheduler",
+ "base-scheduler-direct",
+ "futures-lite",
+ "protocol",
 ]
 
 [[package]]
@@ -934,10 +1089,44 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "42703706b716c37f96a77aea830392ad231f44c9e9a67872fa5548707e11b11c"
 
 [[package]]
+name = "futures-channel"
+version = "0.3.34"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b1f9e3d69d39e4862ffed03ed071a76f9a13ba1d9109d355b0f0aa6b15e393c4"
+dependencies = [
+ "futures-core",
+]
+
+[[package]]
 name = "futures-core"
 version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "92d699e522242e69e3003b94ecc1f960f3a5e015aa7c5d7486e65ad01dd94f5e"
+
+[[package]]
+name = "futures-io"
+version = "0.3.34"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "53c0fa8157de1303bfffdaa1cc2a673bfffb60102f76b0ef4441659124373fed"
+
+[[package]]
+name = "futures-lite"
+version = "2.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f78e10609fe0e0b3f4157ffab1876319b5b0db102a2c60dc4626306dc46b44ad"
+dependencies = [
+ "fastrand",
+ "futures-core",
+ "futures-io",
+ "parking",
+ "pin-project-lite",
+]
+
+[[package]]
+name = "futures-sink"
+version = "0.3.34"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1944426bf7d03f1d14f708785e4b33efd750b36d48a157b836b3efc15ede8e1d"
 
 [[package]]
 name = "futures-task"
@@ -952,6 +1141,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0d50a92467f8ba5dd6e3ee5d4bd04d73ab2e4e1c44474a0674821dfce14b79bc"
 dependencies = [
  "futures-core",
+ "futures-sink",
  "futures-task",
  "pin-project-lite",
  "slab",
@@ -1105,6 +1295,12 @@ name = "hound"
 version = "3.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "62adaabb884c94955b19907d60019f4e145d091c75345379e70d1ee696f7854f"
+
+[[package]]
+name = "httparse"
+version = "1.10.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6dbf3de79e51f3d586ab4cb9d5c3e2c14aa28ed23d180cf89b4df0454a69cc87"
 
 [[package]]
 name = "icu_collections"
@@ -2499,6 +2695,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
+name = "signal-hook"
+version = "0.4.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b29ffa27d3d59a049bb328258de100f8012848d1b08d444e08bbc02ac468435e"
+dependencies = [
+ "libc",
+ "signal-hook-registry",
+]
+
+[[package]]
+name = "signal-hook-registry"
+version = "1.4.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c4db69cba1110affc0e9f7bcd48bbf87b3f4fc7c61fc9155afd4c469eb3d6c1b"
+dependencies = [
+ "errno",
+ "libc",
+]
+
+[[package]]
 name = "simd-adler32"
 version = "0.3.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2564,6 +2780,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dd538fb6910ac1099850255cf94a94df6551fbdd602454387d0adb2d1ca6dead"
 dependencies = [
  "serde",
+]
+
+[[package]]
+name = "socket2"
+version = "0.6.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c3d1e2c7f27f8d4cb10542a02c49005dbd6e93095799d6f3be745fae9f8fedd4"
+dependencies = [
+ "libc",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
