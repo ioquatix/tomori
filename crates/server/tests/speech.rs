@@ -10,8 +10,8 @@ use protocol::{AGENT_SOURCE, AudioFrame, ClientMessage, Gate, QueueState, Server
 use server::fake::FakeBackend;
 use server::test_support::{TestClient, TestServer, TextTranscriber};
 use server::{RecognitionTranscriber, Server};
-use speech::stt::{RATE, Word};
-use speech::{AudioChunk, Error, Recognizer, RecognizerConfig, Synthesizer};
+use speech::stt::{RATE, Transcript};
+use speech::{AudioChunk, Error, RecognitionStream, StreamingRecognizer, Synthesizer};
 
 /// Words the fake recognizer knows. Each is "spoken" as [`WORD_SAMPLES`] samples of `BASE + index`.
 const VOCABULARY: &[&str] = &["run", "the", "tests", "please", "fail", "crash"];
@@ -25,42 +25,67 @@ const SYNTHESIS_RATE: u32 = 24_000;
 const SYNTHESIS_FRAME: usize = SYNTHESIS_RATE as usize / 50;
 const FRAMES_PER_WORD: usize = 2;
 
-/// Recognizes [`VOCABULARY`] words from their sample values. "fail" makes the decode fail, as a crashed worker process would; "crash" panics the recognizer thread.
-struct FakeRecognizer;
+/// A streaming recognizer that hears [`VOCABULARY`] words from their sample values, a whole word at a time. "fail" makes the decode fail, as an engine error would; "crash" panics the recognizer. With `refuse`, no utterance can start, as when the engine cannot open a stream.
+#[derive(Default)]
+struct FakeRecognizer {
+    refuse: bool,
+}
 
-impl Recognizer for FakeRecognizer {
-    fn decode(&mut self, audio: &[i16], _prompt: Option<&str>) -> Result<Vec<Word>, Error> {
-        let mut words = Vec::new();
-        let mut start = 0;
-        while start < audio.len() {
-            let value = audio[start];
-            let length = audio[start..]
-                .iter()
-                .take_while(|&&sample| sample == value)
-                .count();
-            // Commit cuts can leave a stray sample of the previous word; ignore runs that are not whole words.
-            let count = (length + WORD_SAMPLES / 2) / WORD_SAMPLES;
+impl StreamingRecognizer for FakeRecognizer {
+    fn open(&mut self) -> Result<Box<dyn RecognitionStream>, Error> {
+        if self.refuse {
+            return Err(Error::Engine("no stream is available".into()));
+        }
+        Ok(Box::new(FakeStream::default()))
+    }
+}
+
+#[derive(Default)]
+struct FakeStream {
+    audio: Vec<i16>,
+    decoded: usize,
+    words: Vec<&'static str>,
+}
+
+impl RecognitionStream for FakeStream {
+    fn accept(&mut self, samples: &[i16]) {
+        self.audio.extend_from_slice(samples);
+    }
+
+    fn due(&self) -> bool {
+        self.audio.len() - self.decoded >= WORD_SAMPLES
+    }
+
+    fn decode(&mut self) -> Result<(), Error> {
+        while self.audio.len() - self.decoded >= WORD_SAMPLES {
+            let value = self.audio[self.decoded];
+            self.decoded += WORD_SAMPLES;
             let word = usize::try_from(value - BASE)
                 .ok()
                 .and_then(|index| VOCABULARY.get(index));
-            if let Some(&word) = word {
-                for index in 0..count {
-                    match word {
-                        "fail" => return Err(Error::Worker("the worker exited".into())),
-                        "crash" => panic!("the recognizer crashed"),
-                        _ => {}
-                    }
-                    let begin = start + index * WORD_SAMPLES;
-                    words.push(Word {
-                        text: format!(" {word}"),
-                        start: begin as f32 / RATE as f32,
-                        end: (begin + WORD_SAMPLES) as f32 / RATE as f32,
-                    });
-                }
+            match word {
+                Some(&"fail") => return Err(Error::Engine("the engine failed".into())),
+                Some(&"crash") => panic!("the recognizer crashed"),
+                Some(&word) => self.words.push(word),
+                None => {}
             }
-            start += length;
         }
-        Ok(words)
+        Ok(())
+    }
+
+    fn transcript(&self) -> Transcript {
+        match self.words.split_last() {
+            Some((last, rest)) => Transcript {
+                committed: rest.join(" "),
+                tentative: (*last).to_owned(),
+            },
+            None => Transcript::default(),
+        }
+    }
+
+    fn finish(&mut self) -> Result<String, Error> {
+        self.decode()?;
+        Ok(self.words.join(" "))
     }
 }
 
@@ -81,7 +106,7 @@ fn speak(client: &mut TestClient, words: &[&str]) {
     }
 }
 
-/// Produces one chunk of [`FRAMES_PER_WORD`] frames per word, and records what it was asked to say.
+/// Produces one chunk of [`FRAMES_PER_WORD`] frames per word, and records what it was asked to say. Text containing "crash" panics it.
 #[derive(Clone, Default)]
 struct FakeSynthesizer {
     spoken: Arc<Mutex<Vec<String>>>,
@@ -90,6 +115,9 @@ struct FakeSynthesizer {
 impl Synthesizer for FakeSynthesizer {
     fn synthesize(&mut self, text: &str, output: &mut dyn FnMut(AudioChunk)) -> Result<(), Error> {
         self.spoken.lock().unwrap().push(text.to_owned());
+        if text.contains("crash") {
+            panic!("the synthesizer crashed");
+        }
         for _ in text.split_whitespace() {
             output(AudioChunk {
                 sample_rate: SYNTHESIS_RATE,
@@ -101,16 +129,43 @@ impl Synthesizer for FakeSynthesizer {
 }
 
 fn recognizing_server(backend: FakeBackend) -> TestServer {
-    TestServer::with_server(backend, |backends| {
-        let config = RecognizerConfig {
-            refresh: Duration::from_millis(100),
-            minimum_audio: Duration::from_millis(100),
-            ..RecognizerConfig::default()
-        };
-        Server::new(
-            backends,
-            Arc::new(RecognitionTranscriber::new(FakeRecognizer, config)),
-        )
+    recognizing_server_with(backend, FakeRecognizer::default())
+}
+
+fn recognizing_server_with(backend: FakeBackend, recognizer: FakeRecognizer) -> TestServer {
+    TestServer::with_server(backend, move |backends| {
+        Server::new(backends, Arc::new(RecognitionTranscriber::new(recognizer)))
+    })
+}
+
+/// The error of utterance `id`, failing if it produces a transcript instead.
+fn failure(client: &mut TestClient, id: &str) -> String {
+    client.wait_for(|message| match message {
+        ServerMessage::TranscriptFailed { utterance, error } if utterance == id => {
+            Some(error.clone())
+        }
+        ServerMessage::Transcript {
+            utterance,
+            text,
+            finished: true,
+        } if utterance == id => panic!("{id} was transcribed as {text:?}"),
+        _ => None,
+    })
+}
+
+/// The final transcript of utterance `id`, failing if any utterance fails instead.
+fn transcript(client: &mut TestClient, id: &str) -> String {
+    client.wait_for(|message| match message {
+        ServerMessage::TranscriptFailed { utterance, error } => {
+            panic!("{utterance} failed: {error}")
+        }
+        ServerMessage::Error { error, .. } => panic!("{error}"),
+        ServerMessage::Transcript {
+            utterance,
+            text,
+            finished: true,
+        } if utterance == id => Some(text.clone()),
+        _ => None,
     })
 }
 
@@ -342,7 +397,7 @@ fn a_recognizer_failure_fails_the_utterance() {
         ServerMessage::Transcript { finished: true, .. } => panic!("a transcript was queued"),
         _ => None,
     });
-    assert!(error.contains("the worker exited"), "{error}");
+    assert!(error.contains("the engine failed"), "{error}");
     assert!(error.contains("nothing was sent"), "{error}");
     // Nothing was queued: no snapshot with a queue entry follows.
     // Nor is the end refused, if the failure came first.
@@ -415,9 +470,13 @@ fn a_crashed_recognizer_fails_the_utterance_instead_of_dropping_it() {
         }
         _ => None,
     });
-    assert!(error.contains("stopped"), "{error}");
+    assert!(
+        error.contains("unavailable until the server restarts"),
+        "{error}"
+    );
+    assert!(!error.contains("try again"), "{error}");
 
-    // Later utterances fail visibly too, rather than waiting forever.
+    // Later utterances fail visibly too, saying the same, rather than waiting forever.
     ada.send(&ClientMessage::UtteranceBegin {
         utterance: "u2".into(),
     });
@@ -425,10 +484,132 @@ fn a_crashed_recognizer_fails_the_utterance_instead_of_dropping_it() {
     ada.send(&ClientMessage::UtteranceEnd {
         utterance: "u2".into(),
     });
+    let error = failure(&mut ada, "u2");
+    assert!(
+        error.contains("unavailable until the server restarts"),
+        "{error}"
+    );
+}
+
+#[test]
+fn an_utterance_that_cannot_start_fails_visibly() {
+    let server = recognizing_server_with(FakeBackend::manual(), FakeRecognizer { refuse: true });
+    let mut ada = server.connect("ada", "Ada");
+    ada.create_space("Refused");
+    ada.send(&ClientMessage::UtteranceBegin {
+        utterance: "u1".into(),
+    });
+    speak(&mut ada, &["run", "the", "tests"]);
+    ada.send(&ClientMessage::UtteranceEnd {
+        utterance: "u1".into(),
+    });
+    let error = failure(&mut ada, "u1");
+    assert!(error.contains("no stream is available"), "{error}");
+    assert!(error.contains("nothing was sent"), "{error}");
+    assert!(server.backend.started()[0].log().prompts.is_empty());
+}
+
+#[test]
+fn one_participants_recognizer_failure_does_not_fail_another_recording_at_the_same_time() {
+    let server = recognizing_server(FakeBackend::manual());
+    let (mut ada, mut bob) = pair(&server);
+    ada.send(&ClientMessage::UtteranceBegin {
+        utterance: "a1".into(),
+    });
+    bob.send(&ClientMessage::UtteranceBegin {
+        utterance: "b1".into(),
+    });
+    speak(&mut bob, &["run", "the"]);
+    speak(&mut ada, &["please", "fail"]);
+    let error = failure(&mut ada, "a1");
+    assert!(error.contains("the engine failed"), "{error}");
+    // Bob was recording throughout, and his utterance is unaffected.
+    speak(&mut bob, &["tests"]);
+    bob.send(&ClientMessage::UtteranceEnd {
+        utterance: "b1".into(),
+    });
+    assert_eq!(transcript(&mut bob, "b1"), "run the tests");
+    let state = ada.space(|state| !state.queue.is_empty());
+    assert_eq!(state.queue.len(), 1);
+    assert_eq!(state.queue[0].participant, "bob");
+}
+
+#[test]
+fn a_cancelled_utterance_sends_nothing_and_the_next_is_transcribed() {
+    let server = recognizing_server(FakeBackend::manual());
+    let mut ada = server.connect("ada", "Ada");
+    ada.create_space("Cancel");
+    ada.send(&ClientMessage::UtteranceBegin {
+        utterance: "u1".into(),
+    });
+    speak(&mut ada, &["please", "please"]);
+    // Recognition is under way: a partial has arrived.
     ada.wait_for(|message| match message {
-        ServerMessage::TranscriptFailed { utterance, .. } if utterance == "u2" => Some(()),
+        ServerMessage::Transcript {
+            utterance,
+            finished: false,
+            ..
+        } if utterance == "u1" => Some(()),
         _ => None,
     });
+    speak(&mut ada, &["please"]);
+    ada.send(&ClientMessage::UtteranceCancel {
+        utterance: "u1".into(),
+    });
+    ada.send(&ClientMessage::UtteranceBegin {
+        utterance: "u2".into(),
+    });
+    speak(&mut ada, &["run", "the", "tests"]);
+    ada.send(&ClientMessage::UtteranceEnd {
+        utterance: "u2".into(),
+    });
+    let text = ada.wait_for(|message| match message {
+        ServerMessage::Transcript {
+            utterance,
+            text,
+            finished: true,
+        } => Some((utterance.clone(), text.clone())),
+        ServerMessage::TranscriptFailed { utterance, error } => {
+            panic!("{utterance} failed: {error}")
+        }
+        _ => None,
+    });
+    assert_eq!(text, ("u2".to_owned(), "run the tests".to_owned()));
+    ada.space(|state| !state.queue.is_empty());
+    let prompts = server.backend.started()[0].log().prompts;
+    assert_eq!(prompts.len(), 1);
+    assert_eq!(prompts[0].text, "Ada: run the tests");
+}
+
+#[test]
+fn a_lost_frame_fails_a_streaming_utterance() {
+    let server = recognizing_server(FakeBackend::manual());
+    let mut ada = server.connect("ada", "Ada");
+    ada.create_space("Gap");
+    ada.send(&ClientMessage::UtteranceBegin {
+        utterance: "u1".into(),
+    });
+    speak(&mut ada, &["run"]);
+    ada.skip_sequence(2);
+    speak(&mut ada, &["the", "tests"]);
+    ada.send(&ClientMessage::UtteranceEnd {
+        utterance: "u1".into(),
+    });
+    let error = failure(&mut ada, "u1");
+    assert!(error.contains("lost"), "{error}");
+    // The next utterance is transcribed, and only it reaches the agent.
+    ada.send(&ClientMessage::UtteranceBegin {
+        utterance: "u2".into(),
+    });
+    speak(&mut ada, &["run", "the", "tests"]);
+    ada.send(&ClientMessage::UtteranceEnd {
+        utterance: "u2".into(),
+    });
+    assert_eq!(transcript(&mut ada, "u2"), "run the tests");
+    ada.space(|state| !state.queue.is_empty());
+    let prompts = server.backend.started()[0].log().prompts;
+    assert_eq!(prompts.len(), 1);
+    assert_eq!(prompts[0].text, "Ada: run the tests");
 }
 
 #[test]
@@ -657,4 +838,70 @@ fn the_client_player_plays_the_spoken_reply() {
         std::thread::sleep(Duration::from_millis(10));
     }
     ada.close();
+}
+
+#[test]
+fn a_crashed_synthesizer_is_reported_once_as_unavailable() {
+    let synthesizer = FakeSynthesizer::default();
+    let server = speaking_server(FakeBackend::manual(), synthesizer.clone());
+    let (mut ada, mut bob) = pair(&server);
+
+    ada.say("u1", "speak up");
+    ada.space(|state| state.activity == protocol::Activity::Running);
+    let session = server.backend.started()[0].clone();
+    session.stream(&["This will crash. Then this is not spoken. Nor is this.\n"]);
+    for client in [&mut ada, &mut bob] {
+        let mut errors = Vec::new();
+        while let Some(message) = client.next_message(Duration::from_millis(500)) {
+            if let ServerMessage::Error { error, .. } = message {
+                errors.push(error);
+            }
+        }
+        assert_eq!(
+            errors,
+            [
+                "Speech synthesis is unavailable until the server restarts, so replies are not spoken."
+            ]
+        );
+        // Nothing is spoken; participants' push-to-talk audio is relayed, but no agent speech.
+        while let Some(frame) = client.next_audio(Duration::from_millis(100)) {
+            assert_ne!(frame.source, AGENT_SOURCE);
+        }
+    }
+    // The crashed synthesizer is not asked again.
+    assert_eq!(*synthesizer.spoken.lock().unwrap(), ["This will crash."]);
+}
+
+#[test]
+fn a_synthesizer_crash_in_one_space_disables_speech_in_every_space() {
+    let synthesizer = FakeSynthesizer::default();
+    let server = speaking_server(FakeBackend::manual(), synthesizer.clone());
+    let mut ada = server.connect("ada", "Ada");
+    let mut bob = server.connect("bob", "Bob");
+    ada.create_space("Crashing");
+    bob.create_space("Other");
+
+    ada.say("u1", "speak up");
+    ada.space(|state| state.activity == protocol::Activity::Running);
+    server.backend.started()[0].stream(&["This will crash.\n"]);
+    while ada.next_message(Duration::from_millis(500)).is_some() {}
+
+    // Bob's space shares the crashed synthesizer, so it reports speech as unavailable instead of using it again.
+    bob.say("u2", "and you?");
+    bob.space(|state| state.activity == protocol::Activity::Running);
+    server.backend.started()[1].stream(&["Then this is not spoken.\n"]);
+    let mut errors = Vec::new();
+    while let Some(message) = bob.next_message(Duration::from_millis(500)) {
+        if let ServerMessage::Error { error, .. } = message {
+            errors.push(error);
+        }
+    }
+    assert_eq!(
+        errors,
+        ["Speech synthesis is unavailable until the server restarts, so replies are not spoken."]
+    );
+    while let Some(frame) = bob.next_audio(Duration::from_millis(100)) {
+        assert_ne!(frame.source, AGENT_SOURCE);
+    }
+    assert_eq!(*synthesizer.spoken.lock().unwrap(), ["This will crash."]);
 }

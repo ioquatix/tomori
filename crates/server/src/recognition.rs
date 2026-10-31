@@ -8,27 +8,37 @@ use std::sync::{Mutex, PoisonError};
 
 use protocol::AudioFrame;
 use speech::stt::{RATE, Transcript};
-use speech::{Recognition, Recognizer, RecognizerConfig, TranscriptEvent, Utterance};
+use speech::{Error, Recognition, Stopper, StreamingRecognizer, TranscriptEvent, Utterance};
 
 use crate::transcriber::{Transcriber, TranscriptSink, UtteranceId};
 
-/// Reported when recognition stops without reporting a result, such as when its thread panicked.
-const STOPPED: &str = "Speech recognition stopped before the transcript was ready, so nothing was sent. Please try again.";
+/// Reported when recognition has stopped: a panic disabled it, or the server is shutting down. Trying again does not help, so the message does not suggest it.
+const STOPPED: &str =
+    "Speech recognition is unavailable until the server restarts, so nothing was sent.";
 
 /// Streaming speech recognition for push-to-talk utterances.
 ///
-/// One recognizer thread serves every utterance on the server. Partial transcripts are reported while the participant is speaking; a recognizer error, including a missing or crashed worker process, fails the utterance with a visible message.
+/// One recognizer thread serves every utterance on the server. Partial transcripts are reported while the participant is speaking; a recognizer error, including a missing model or recognition falling too far behind, fails the utterance with a visible message. Once a panic has disabled recognition, every utterance fails saying so, until the server restarts.
 pub struct RecognitionTranscriber {
     recognition: Mutex<Recognition>,
     utterances: Mutex<HashMap<UtteranceId, Utterance>>,
 }
 
 impl RecognitionTranscriber {
-    pub fn new(recognizer: impl Recognizer + 'static, config: RecognizerConfig) -> Self {
+    /// Transcribe with a streaming `recognizer`, which decodes the audio once, as it arrives.
+    pub fn new(recognizer: impl StreamingRecognizer + 'static) -> Self {
         Self {
-            recognition: Mutex::new(Recognition::spawn(recognizer, config)),
+            recognition: Mutex::new(Recognition::spawn(recognizer)),
             utterances: Mutex::default(),
         }
+    }
+
+    /// A handle that stops the recognition thread when the server shuts down; see `design/server.md`.
+    pub fn stopper(&self) -> Stopper {
+        self.recognition
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .stopper()
     }
 
     fn utterances(&self) -> std::sync::MutexGuard<'_, HashMap<UtteranceId, Utterance>> {
@@ -88,6 +98,10 @@ impl Reporter {
             TranscriptEvent::Final(text) => {
                 self.reported = true;
                 self.sink.finish(&text);
+            }
+            TranscriptEvent::Failed(Error::Stopped(_)) => {
+                self.reported = true;
+                self.sink.fail(STOPPED);
             }
             TranscriptEvent::Failed(error) => {
                 self.reported = true;

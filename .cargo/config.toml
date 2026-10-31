@@ -1,0 +1,6 @@
+# The speech crate links prebuilt sherpa-onnx libraries. Build them only from the archive that
+# scripts/fetch-sherpa-onnx.sh downloaded and checked against its pinned SHA-256, rather than letting
+# sherpa-onnx-sys download one unverified. An environment variable of the same name takes precedence.
+# See crates/speech/readme.md.
+[env]
+SHERPA_ONNX_ARCHIVE_DIR = { value = ".tools/sherpa-onnx", relative = true }

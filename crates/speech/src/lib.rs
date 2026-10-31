@@ -3,20 +3,20 @@
 
 //! Streaming speech recognition, speakable text selection and synthesis for the Tomori server. See `design/speech.md`.
 //!
-//! - [`stt`]: per-utterance streaming recognition with local-agreement commit.
+//! - [`stt`]: per-utterance streaming recognition.
 //! - [`speakable`]: selects stable, speakable sentences from streaming Markdown.
 //! - [`tts`]: ordered synthesis of those sentences.
 //!
-//! Engines run in supervised worker processes; see `worker/readme.md`.
+//! Engines run in this process through sherpa-onnx, on threads owned by this crate; see `readme.md`. A panic in an engine disables that engine: it is logged once, and every later request fails with [`Error::Stopped`]. Each engine thread can be stopped and waited for with a [`Stopper`] when the server shuts down.
 
 mod error;
 pub mod speakable;
+mod stop;
 pub mod stt;
 pub mod tts;
-mod worker;
 
 pub use error::Error;
 pub use speakable::{Speakable, SpeakableOptions};
-pub use stt::{Recognition, Recognizer, RecognizerConfig, TranscriptEvent, Utterance};
+pub use stop::Stopper;
+pub use stt::{Recognition, RecognitionStream, StreamingRecognizer, TranscriptEvent, Utterance};
 pub use tts::{AudioChunk, Speech, SpeechEvent, Synthesizer};
-pub use worker::WorkerCommand;

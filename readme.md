@@ -59,9 +59,11 @@ TOMORI_SKY_PREVIEW=/tmp/opencode/tomori-sky.png cargo test --locked -p client-qu
 Start the server on the PC with the Claude Code backend (see
 [design/server.md](design/server.md)). Spaces may run in the directory the
 server starts in or beneath it; give `--workspace-root PATH`, repeated as
-needed, to allow other directories instead:
+needed, to allow other directories instead. The server links the sherpa-onnx
+speech libraries, so fetch and verify them once before the first build:
 
 ```sh
+bash scripts/fetch-sherpa-onnx.sh
 cargo run -p server --bin tomori-server -- --backend claude-code
 ```
 
@@ -209,20 +211,24 @@ no open microphone for talking to other participants without the agent yet (see
 [design/speech.md](design/speech.md) and
 [design/live-audio.md](design/live-audio.md)).
 
-Recognition runs on the server with Whisper `small.en`, which needs Python 3
-and about 700 MB in `.tools/`. From the repository root:
+Recognition and synthesis run inside the server through sherpa-onnx, whose
+libraries `scripts/fetch-sherpa-onnx.sh` downloads and checks, and the build
+links. Recognition uses
+a streaming transducer that shows words while you speak; synthesis uses Kokoro.
+The models need about 520 MB in `.tools/`. From the repository root:
 
 ```sh
-bash scripts/setup-pc-transcription.sh
+bash scripts/fetch-asr-model.sh
+bash scripts/fetch-tts-model.sh
 cargo run -p server --bin tomori-server -- --backend claude-code --speech-root .
 ```
 
-Whisper uses CUDA on Linux when it is available, and the CPU elsewhere,
-including macOS. Without `--speech-root`, or if Whisper can't start, every
-utterance fails with an error that says so. Replies are spoken with Kokoro,
-which needs another 700 MB; without it the server says "Speech synthesis: off"
-or "unavailable" when it starts, and replies are only shown. See
-[crates/speech/worker/readme.md](crates/speech/worker/readme.md).
+Speech runs on the CPU, including on macOS; see
+[crates/speech/readme.md](crates/speech/readme.md) for CUDA on Linux. Without
+`--speech-root`, or if the recognition model can't load, every utterance fails
+with an error that says so. Replies are spoken with Kokoro, which needs another
+700 MB; without it the server says "Speech synthesis: off" or "unavailable" when
+it starts, and replies are only shown.
 
 ## PC spectator and live audio (prototype)
 
@@ -469,6 +475,7 @@ files (`libasound2-dev` or `alsa-lib-devel`) for the microphone.
 ## Tests / desktop OpenXR
 
 ```sh
+bash scripts/fetch-sherpa-onnx.sh        # once: the speech libraries the server links
 cargo test --workspace                   # simulation, projection, desktop camera, server and client tests
 cargo test -p client-quest graphics::tests -- --ignored  # offscreen stereo captions / mono rendering
 cargo run -p client-quest -- --xr        # use an active desktop OpenXR Vulkan runtime

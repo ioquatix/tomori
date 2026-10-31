@@ -38,8 +38,10 @@ default = ["fake", "claude-code", "speech"]
 fake = []
 # Claude Code, driven as a persistent `claude` process per space.
 claude-code = ["dep:backend-claude-code"]
-# Speech recognition and synthesis with the speech crate's engines.
+# Speech recognition and synthesis with the speech crate's in-process sherpa-onnx engines.
 speech = ["dep:speech"]
+# Link the speech engines from the shared sherpa-onnx libraries in `SHERPA_ONNX_LIB_DIR`, such as its CUDA build, for `--speech-provider cuda`; see crates/speech/readme.md.
+speech-shared = ["speech", "speech/shared"]
 
 [dependencies]
 async-channel = "2"
