@@ -6,7 +6,7 @@
 //! Every client action and backend event is applied synchronously under the lock. Work that may call out of the server — transcriber calls and backend operations — is deferred until the lock is released, or sent to the space's driver task.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::{Duration, Instant};
 
@@ -83,6 +83,29 @@ struct ConnectionRecord {
     liveness: Liveness,
 }
 
+/// Whether the HTTP server is writing a connection's output, shared by the connection body and the keepalive sweep.
+#[derive(Default)]
+pub struct Output {
+    /// True from when the body hands out a chunk until the HTTP server asks for the next one, which it does once the chunk is written.
+    pending: AtomicBool,
+    /// Chunks written so far.
+    written: AtomicU64,
+}
+
+impl Output {
+    /// The body handed out a chunk to write.
+    pub fn handed_out(&self) {
+        self.pending.store(true, Ordering::Release);
+    }
+
+    /// The HTTP server asked for more, so the previous chunk, if any, was written.
+    pub fn asked(&self) {
+        if self.pending.swap(false, Ordering::AcqRel) {
+            self.written.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+}
+
 /// What the keepalive sweep knows about one connection.
 struct Liveness {
     /// Set by the connection whenever data arrives, and cleared by the sweep.
@@ -93,6 +116,11 @@ struct Liveness {
     opened: Option<Instant>,
     greeted: bool,
     pinged: Option<Instant>,
+    output: Arc<Output>,
+    /// Chunks written when the sweep last looked.
+    written: u64,
+    /// When the sweep first saw the current write pending without progress.
+    stalled: Option<Instant>,
     /// Ends this connection's HTTP exchange, including a write blocked on a peer that is gone.
     cancellation: Cancellation,
 }
@@ -303,16 +331,17 @@ impl Hub {
         }
     }
 
-    /// Register a connection. `cancellation` must end only this connection's exchange: the keepalive sweep cancels it when the connection goes silent. The connection sets the returned flag whenever data arrives.
+    /// Register a connection. `cancellation` must end only this connection's exchange: the keepalive sweep cancels it when the connection goes silent. The connection sets the returned flag whenever data arrives, and reports its writes to the returned [`Output`].
     pub fn connect(
         &self,
         cancellation: Cancellation,
-    ) -> (ConnectionId, Arc<Outbox>, Arc<AtomicBool>) {
+    ) -> (ConnectionId, Arc<Outbox>, Arc<AtomicBool>, Arc<Output>) {
         let mut state = self.lock();
         state.next_connection += 1;
         let id = state.next_connection;
         let outbox = Arc::new(Outbox::new());
         let received = Arc::new(AtomicBool::new(false));
+        let output = Arc::new(Output::default());
         state.connections.insert(
             id,
             ConnectionRecord {
@@ -326,14 +355,17 @@ impl Hub {
                     opened: None,
                     greeted: false,
                     pinged: None,
+                    output: output.clone(),
+                    written: 0,
+                    stalled: None,
                     cancellation,
                 },
             },
         );
-        (id, outbox, received)
+        (id, outbox, received, output)
     }
 
-    /// Ping connections that have been quiet for the keepalive interval, and release those that have received nothing for the keepalive timeout as if they had disconnected. Also release connections that have not said Hello within `hello_timeout`, so that a peer cannot hold a connection slot by keeping a connection alive without joining. Called periodically with the current time; a connection's quiet time is measured from the first sweep that sees it or the last that saw data arrive.
+    /// Ping connections that have been quiet for the keepalive interval, and release those that have received nothing for the keepalive timeout as if they had disconnected. Release, in the same way, connections whose current write has made no progress for the keepalive timeout: a peer that does not read can receive neither audio nor state. Also release connections that have not said Hello within `hello_timeout`, so that a peer cannot hold a connection slot by keeping a connection alive without joining. Called periodically with the current time; a connection's quiet time is measured from the first sweep that sees it or the last that saw data arrive.
     pub fn sweep(&self, now: Instant, keepalive: &Keepalive, hello_timeout: Duration) {
         let mut expired = Vec::new();
         {
@@ -350,11 +382,24 @@ impl Hub {
                 }
                 let quiet = now.saturating_duration_since(liveness.last.unwrap_or(now));
                 let opened = *liveness.opened.get_or_insert(now);
+                let written = liveness.output.written.load(Ordering::Acquire);
+                if liveness.output.pending.load(Ordering::Acquire) && written == liveness.written {
+                    liveness.stalled.get_or_insert(now);
+                } else {
+                    liveness.stalled = None;
+                }
+                liveness.written = written;
+                let stalled = liveness
+                    .stalled
+                    .is_some_and(|since| now.saturating_duration_since(since) >= keepalive.timeout);
                 if !liveness.greeted && now.saturating_duration_since(opened) >= hello_timeout {
                     log::info!("Connection {id} did not say Hello in time.");
                     expired.push((id, liveness.cancellation.clone()));
                 } else if quiet >= keepalive.timeout {
                     log::info!("Connection {id} received nothing within the keepalive timeout.");
+                    expired.push((id, liveness.cancellation.clone()));
+                } else if stalled {
+                    log::info!("Connection {id} accepted no output within the keepalive timeout.");
                     expired.push((id, liveness.cancellation.clone()));
                 } else if quiet >= keepalive.interval
                     && liveness.pinged.is_none_or(|pinged| {
@@ -1167,5 +1212,43 @@ impl Hub {
         for connection in state.connections.values() {
             connection.outbox.close();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::transcriber::NullTranscriber;
+
+    fn hub() -> Arc<Hub> {
+        let (jobs, _) = async_channel::unbounded();
+        Hub::new(Backends::new(), Arc::new(NullTranscriber::new()), jobs)
+    }
+
+    #[test]
+    fn a_connection_whose_output_is_not_accepted_is_released_even_while_it_sends() {
+        let hub = hub();
+        let keepalive = Keepalive {
+            interval: Duration::from_secs(5),
+            timeout: Duration::from_secs(15),
+        };
+        let hello = Duration::from_secs(3600);
+        let blocked = Cancellation::new();
+        let (_, _, blocked_received, blocked_output) = hub.connect(blocked.clone());
+        let flowing = Cancellation::new();
+        let (_, _, flowing_received, flowing_output) = hub.connect(flowing.clone());
+
+        let start = Instant::now();
+        // Both peers keep sending. One write is never accepted; the other connection's writes complete.
+        blocked_output.handed_out();
+        for second in 0..=20 {
+            blocked_received.store(true, Ordering::Release);
+            flowing_received.store(true, Ordering::Release);
+            flowing_output.asked();
+            flowing_output.handed_out();
+            hub.sweep(start + Duration::from_secs(second), &keepalive, hello);
+            assert_eq!(blocked.is_cancelled(), second >= 15, "after {second} s");
+        }
+        assert!(!flowing.is_cancelled());
     }
 }

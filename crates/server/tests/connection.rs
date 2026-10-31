@@ -219,6 +219,59 @@ fn a_client_that_stops_reading_is_released_even_while_writes_are_blocked() {
     }
 }
 
+#[test]
+fn a_client_that_sends_but_never_reads_is_released() {
+    let keepalive = Keepalive {
+        interval: Duration::from_millis(100),
+        timeout: Duration::from_millis(500),
+    };
+    let server = TestServer::with_server(FakeBackend::new(), move |backends| {
+        Server::new(backends, Arc::new(TextTranscriber::default())).with_keepalive(keepalive)
+    });
+    let mut bob = server.connect("bob", "Bob");
+    let space = bob.create_space("Demo").id;
+    let ada = raw_join(&server, &space);
+    bob.space(|state| state.participants.len() == 2);
+
+    // Ada keeps sending, but never reads what the server sends her.
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let sender = {
+        let mut ada = ada.try_clone().unwrap();
+        let stop = stop.clone();
+        std::thread::spawn(move || {
+            let mut nonce = 0;
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                nonce += 1;
+                if ada
+                    .write_all(&chunk(&ClientMessage::Ping { nonce }))
+                    .is_err()
+                {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        })
+    };
+
+    // Bob talks without pause, so the server's writes to Ada back up, until she is released.
+    let deadline = Instant::now() + TIMEOUT;
+    'talking: loop {
+        assert!(Instant::now() < deadline, "Ada was never released");
+        for _ in 0..100 {
+            bob.send_audio(Gate::Live, vec![1; 320]);
+        }
+        while let Some(message) = bob.next_message(Duration::ZERO) {
+            if let ServerMessage::Space { state } = message
+                && state.participants.len() == 1
+            {
+                break 'talking;
+            }
+        }
+    }
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    sender.join().unwrap();
+}
+
 /// A server whose connections must complete a request head, or say Hello, within `timeout`.
 fn with_request_timeout(timeout: Duration) -> TestServer {
     TestServer::with_server(FakeBackend::new(), move |backends| {

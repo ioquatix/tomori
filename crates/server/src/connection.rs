@@ -11,7 +11,7 @@ use base_scheduler::Cancellation;
 use futures_util::future::{Either, select};
 use protocol::{Frame, FrameDecoder, ServerMessage};
 
-use crate::hub::{ConnectionId, Hub};
+use crate::hub::{ConnectionId, Hub, Output};
 use crate::outbox::{Outbox, Popped};
 
 /// Outgoing data is batched into chunks of about this size when frames are already waiting.
@@ -72,6 +72,8 @@ pub struct ConnectionBody<B: ReadableBody> {
     outbox: Arc<Outbox>,
     /// Set whenever request data arrives, for the hub's keepalive sweep.
     received: Arc<AtomicBool>,
+    /// Tracks whether output is being written, for the hub's keepalive sweep.
+    output: Arc<Output>,
     request: Input<B>,
     decoder: FrameDecoder,
     input_ended: bool,
@@ -81,12 +83,13 @@ pub struct ConnectionBody<B: ReadableBody> {
 impl<B: ReadableBody> ConnectionBody<B> {
     /// `cancellation` must end only this connection's HTTP exchange; the hub cancels it when the connection goes silent. See [`Hub::sweep`].
     pub fn new(hub: Arc<Hub>, request: B, cancellation: Cancellation) -> Self {
-        let (id, outbox, received) = hub.connect(cancellation);
+        let (id, outbox, received, output) = hub.connect(cancellation);
         Self {
             hub,
             id,
             outbox,
             received,
+            output,
             request: Input::Idle(request),
             decoder: FrameDecoder::new(),
             input_ended: false,
@@ -203,6 +206,8 @@ impl<B: ReadableBody> ReadableBody for ConnectionBody<B> {
     }
 
     async fn read(&mut self, cancellation: &Cancellation) -> Result<BodyFrame<Vec<u8>>, BodyError> {
+        // The HTTP server reads the body again only once the previous chunk is written. Until then, the request body is not read either, so input from the peer is not seen while a write is blocked; the keepalive sweep releases a connection whose write makes no progress.
+        self.output.asked();
         loop {
             if self.finished {
                 return Ok(BodyFrame::End);
@@ -214,6 +219,7 @@ impl<B: ReadableBody> ReadableBody for ConnectionBody<B> {
                 if !open {
                     self.finished = true;
                 }
+                self.output.handed_out();
                 return Ok(BodyFrame::Data {
                     data: output,
                     end: !open,
