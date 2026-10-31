@@ -2,7 +2,6 @@
 /android/libs/
 /.android-env
 /.tools/
-/android/assets/*.bin
 /bridge/node_modules/
 /.space/
 

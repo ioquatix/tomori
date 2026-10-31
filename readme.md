@@ -470,7 +470,7 @@ The script downloads the official Khronos **1.1.65** OpenXR loader AAR from Mave
 Central, checks its published SHA-256, and packages the arm64 loader in the APK.
 The Quest APK does not contain a transcription model. PC transcription setup
 fetches MIT-licensed `Systran/faster-whisper-small.en` at a pinned revision and
-verifies the model SHA-256. The prior Quest model files are left untouched.
+verifies the model SHA-256.
 `cargo-apk` creates a local debug signing key if needed. Build output:
 `target/debug/apk/tomori.apk` (package `io.github.ioquatix.tomori`).
 Launch from **Library → Unknown Sources → Tomori** if not auto-started.
