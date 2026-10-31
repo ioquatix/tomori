@@ -336,7 +336,7 @@ impl TestClient {
     /// Wait for an error message and return its text.
     pub fn error(&self) -> String {
         self.wait_for(|message| match message {
-            ServerMessage::Error { error } => Some(error.clone()),
+            ServerMessage::Error { error, .. } => Some(error.clone()),
             _ => None,
         })
     }

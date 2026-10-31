@@ -31,7 +31,7 @@ pub const ANSWER_BYTES: usize = 4096;
 /// Longest question field key named in a snapshot, in bytes. A longer key is named by its position instead; see [`crate::projection::field_name`].
 pub const FIELD_BYTES: usize = 1024;
 
-/// Longest identifier a client names in a decision or answer, in bytes: a request, question, option or field. Longer ones cannot match anything the server presented.
+/// Longest identifier a client names in a join, decision or answer, in bytes: a space, request, question, option or field. Longer ones cannot match anything the server presented.
 pub const IDENTIFIER_BYTES: usize = 1024;
 
 /// Longest transcript that can be queued, in bytes. Partial transcripts are cut to this length.

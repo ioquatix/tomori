@@ -25,7 +25,11 @@ fn oversized_client_strings_are_rejected_without_repeating_them() {
     // About a megabyte of JSON once escaped, which an echoing error reply could not carry.
     let space: String = "\u{200b}".repeat(340_000);
     ada.send(&ClientMessage::Join { space });
-    assert_eq!(ada.error(), "That space does not exist.");
+    let error = ada.error();
+    assert!(
+        error.contains("space identifier") && error.len() < 100,
+        "{error}"
+    );
 
     ada.send(&ClientMessage::CreateSpace {
         title: "A".repeat(600_000),

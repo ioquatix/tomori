@@ -312,7 +312,7 @@ fn welcome(context: &Context<'_>, frame: Frame) -> Result<(), Disconnect> {
             context.set_state(ConnectionState::Connected { source, server });
             Ok(())
         }
-        ServerMessage::Error { error } => Err(Disconnect::Protocol(format!(
+        ServerMessage::Error { error, .. } => Err(Disconnect::Protocol(format!(
             "server refused the connection: {error}"
         ))),
         other => Err(Disconnect::Protocol(format!(

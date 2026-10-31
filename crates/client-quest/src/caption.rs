@@ -159,11 +159,6 @@ impl Caption {
         queue.write_buffer(&self.vertices, 0, bytemuck::cast_slice(&mesh));
     }
 
-    #[cfg(target_os = "android")]
-    pub fn text(&self) -> &str {
-        &self.text
-    }
-
     pub fn draw(
         &self,
         encoder: &mut wgpu::CommandEncoder,

@@ -154,6 +154,9 @@ pub enum ServerMessage {
     /// A request could not be completed. The connection stays open.
     Error {
         error: String,
+        /// The space a refused `Join` named, so that a client can tell its join was refused rather than some other request. Absent for other errors.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        space: Option<String>,
     },
     /// Sent when nothing has been received for the keepalive interval. See [`crate::Keepalive`].
     Ping {

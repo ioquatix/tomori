@@ -15,8 +15,12 @@ case "$command" in
         cargo apk build -p client-quest --lib
         if [[ "$command" == run ]]; then
             adb install -r target/debug/apk/tomori.apk
-            adb reverse tcp:8765 "tcp:${TOMORI_BRIDGE_PORT:-8765}"
-            adb shell am start -n "$package/android.app.NativeActivity"
+            # The headset reaches the server at 127.0.0.1:8765; TOMORI_SERVER_PORT is where the server listens on the PC.
+            adb reverse tcp:8765 "tcp:${TOMORI_SERVER_PORT:-8765}"
+            # TOMORI_SERVER=host:port connects straight to that server instead of showing the server list.
+            extras=()
+            if [[ -n "${TOMORI_SERVER:-}" ]]; then extras+=(-e tomori.server "$TOMORI_SERVER"); fi
+            adb shell am start -n "$package/android.app.NativeActivity" ${extras[@]+"${extras[@]}"}
         fi
         ;;
     logs) adb logcat -s tomori OpenXR-Loader AndroidRuntime ;;

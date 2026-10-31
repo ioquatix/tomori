@@ -3,22 +3,20 @@
 A conversational spatial workspace for people and agents, currently a native
 **Rust + OpenXR + wgpu/Vulkan** prototype for **Meta Quest 3**.
 128 agents inhabit a selectable moonlit Sky environment or minimal floor grid.
-Real stereo views use the headset's predicted poses and asymmetric eye projections. Voice-to-text
-and speech synthesis run locally on the PC; the Quest captures audio and renders
-the interactive scene. A PC bridge is required for voice and OpenCode chat.
+Real stereo views use the headset's predicted poses and asymmetric eye projections. The Quest
+renders the interactive scene and joins conversations through a Tomori server on
+the PC, which runs the agent sessions.
 
 Tomori is the name of both the system and its conversational coordinator; see
 [naming.md](naming.md). The Rust package and executable are named `tomori`.
-The current prototype is single-user and USB/loopback-connected;
-multi-user workspaces and Bonjour discovery are future directions, not
-implemented features. Sky is an early environment blockout, not finished artwork.
+The headset finds servers with Bonjour or over USB; several participants can share
+a space. Voice is moving from the PC bridge to the server, so the headset is
+text-only for now. Sky is an early environment blockout, not finished artwork.
 Private workspace memory and session state are not included in this public
 source repository.
 
 - **Right trigger:** attract the swarm to the right controller (orange cube).
-- **A:** open a session / allow a pending tool once; otherwise reset the swarm.
-- **Hold X (left controller):** see a live transcription draft; release to send.
-- **Squeeze the left grip:** toggle your live audience microphone.
+- **A:** connect, join a space, or confirm an approval; otherwise reset the swarm.
 - **Squeeze the right grip:** switch between Sky and Minimal environments.
 - **Hold Meta button:** Quest's system recenter brings the swarm in front of you.
   A short press opens the system menu. No artificial camera movement.
@@ -33,8 +31,8 @@ separate from sessions, worker simulation and application input.
 - **Quest / desktop XR:** squeeze and release the right grip to switch presets.
 - **Desktop window:** press **E** to switch presets; or launch with
   `TOMORI_ENVIRONMENT=minimal cargo run -p client-quest` for the original grid.
-- **Spectator:** follows the headset's selection; older headset builds without
-  an environment field retain Minimal. Update the PC bridge for new senders.
+- **Spectator:** followed the headset's selection; the headset doesn't publish
+  to the spectator for now.
 
 Switching does not reset agents, conversations or worker positions. Selection
 is not persisted across launches. Sky uses the same scene/recenter transform as
@@ -56,67 +54,65 @@ TOMORI_SKY_PREVIEW=/tmp/opencode/tomori-sky.png cargo test --locked -p client-qu
   sky_environment_renders_stereo_switches_and_preserves_recenter -- --ignored
 ```
 
-## Chat with existing OpenCode sessions in VR
+## Join a space on a Tomori server
 
-Requires **OpenCode V2** on the PC (tested with 2.1.4), Node.js, npm, Python,
-and the USB-connected Quest. Install the PC transcription model once, then
-start the small loopback bridge in another terminal:
+Start the server on the PC with the Claude Code backend (see
+[design/server.md](design/server.md)). Spaces may run in the directory the
+server starts in or beneath it; give `--workspace-root PATH`, repeated as
+needed, to allow other directories instead:
 
 ```sh
-bash scripts/setup-pc-transcription.sh  # installs PC venv and model
-bash scripts/opencode-bridge.sh
+cargo run -p server --bin tomori-server -- --backend claude-code
 ```
 
-It installs the pinned official `@opencode/client` package if necessary,
-discovers/authenticates with the same background service as the OpenCode UI,
-and forwards its own loopback port 8765 over USB with `adb reverse`. It does not
-create a new conversation or replace existing agents/models/project settings.
-Leave this terminal running while chatting. After reconnecting USB, run the
-script again (or `adb reverse tcp:8765 tcp:8765` if the bridge is still running).
+The headset joins existing spaces but can't create them yet, so create one from
+the PC with the example client: give it the server's address, then type
+`create` with the backend and a directory beneath a workspace root.
+
+```sh
+cargo run -p client --example connect -- 127.0.0.1:8765
+create claude-code /home/sam/project
+```
+
+The space stays on the server after the example quits.
+
+It advertises itself with Bonjour, so the headset lists it when both are on the
+same network. Over USB, `bash scripts/android.sh run` forwards the headset's
+port 8765 to the PC with `adb reverse`, and the list's **USB** entry connects
+through it; set `TOMORI_SERVER_PORT` when the server listens on another port.
+To skip the list, give an address:
+`TOMORI_SERVER=192.168.1.10:8765 bash scripts/android.sh run`, or pass the
+intent extras `tomori.server` and `tomori.name` to `am start`. Your name
+defaults to the headset's model name. The headset remembers the last server it
+connected to, and connects to it again when it finds it, unless you move the
+selection first.
 
 ### Controls
 
-- **Session browser:** flick left stick up/down to choose among the 40 most
-  recently updated, unarchived root sessions; **A** opens the selection.
-- **Hold X, speak, release:** see a changing live transcript, then send the
-  finalized text to the open session. No extra confirmation. If the agent is
-  busy, OpenCode queues the message.
-- **Click the left thumbstick:** toggle spoken replies; the panel shows
-  `[SOUND]` or `[MUTED]`. Holding X interrupts ongoing speech before recording.
-  Leaving the conversation or losing XR focus also stops playback.
-- **Click the right thumbstick:** replay the selected assistant message (or the
-  latest assistant reply if a different message is selected).
-- **Flick the right thumbstick left/right:** select a coordinator-published
-  result card; **up/down:** page through that card's contents (wrapping at either
-  end). Release the stick between flicks. Clicking it still replays speech.
-- **Conversation:** flick left stick up/down to page through text; left/right
-  to browse recent messages. The panel shows the latest 24 timeline entries,
-  omitting internal reasoning and compressing tool-only messages to status lines.
-  Replies update progressively by polling about every 700 ms, not an SSE stream.
-- **Pending tool permission:** **A** allows once, **B** denies. Nothing is
-  auto-approved, and persistent permissions are never changed.
-- **Pending question:** hold X and say the answer or numbered option. Ordinary
-  string, boolean, numeric, and multiselect fields are supported, including
-  sequential multi-field forms. Conditional/external forms must be completed
-  in the regular OpenCode UI. Say multiple selections separated by “and”.
-- **B:** return to sessions; from sessions, switch to the standalone voice demo.
-- **Y:** return to/refresh the session browser.
+- **Servers:** flick the left stick up/down to choose; **A** connects; **Y**
+  searches again. A server with an incompatible protocol is listed with its
+  version but can't be chosen.
+- **Spaces:** flick the left stick up/down to choose; **A** joins; **B** returns
+  to the servers, or first dismisses an error or a note that a space has ended;
+  **Y** lists again.
+- **In a space:** flick the left stick up/down to page through text and
+  left/right to move between messages; the queue follows the last message.
+  **Y** fetches the space again.
+- **Pending approval:** flick the right stick left/right to choose *allow once*
+  or a standing option, then press **A**; **B** denies. Nothing is decided
+  without a press.
+- **Pending question:** answer it on the PC for now.
+- **B:** deny a pending approval, otherwise cancel your newest queued entry,
+  otherwise leave the space.
 
-Speech is bound to the selected session/question **when recording starts**,
-so changing sessions while Whisper is processing cannot send it somewhere else.
-Network sends are not automatically retried: if delivery is uncertain, check
-the session in OpenCode before repeating it. Existing OpenCode permissions still
-apply; selected agents may edit files or run tools just as in the regular UI.
-
-The bridge listens on **127.0.0.1 only**, exposes no model credentials to the
-headset, and has no generic filesystem/shell/session-deletion endpoints.
-Only speech recognition is local/offline: transcripts and replies are exchanged
-with OpenCode and its configured model provider. The APK now requests INTERNET
-and permits cleartext HTTP for this USB loopback demo, not a production network setup.
-The standalone voice-preview mode (B from session browser) also requires the PC
-bridge, but does not send its transcript to an OpenCode session.
+The server keeps the conversation: after a dropped connection the headset
+reconnects and rejoins the space by itself. If the space is gone, as after the
+server restarts, the headset returns to the space list.
 
 ### Delegated workers and result cards
+
+The headset doesn't show workers or result cards for now: the PC bridge
+provided them, and they return through the server.
 
 The coordinator can use OpenCode's existing subagent tool. Child sessions of the
 open root conversation appear as smaller swarms: cubes travel from the coordinator
@@ -171,65 +167,33 @@ ancestors visible. Visibility decisions persist in `.space/worker-visibility.jso
 
 ### Swarm conversation signals (prototype)
 
-Open a session to give the swarm an observable conversational state:
+Join a space to give the swarm an observable conversational state:
 
 | Appearance | Meaning |
 | --- | --- |
-| Tight violet circulation, rotating broken halo | Selected session is working |
-| Lavender circulation, rotating broken halo | Speech queued/synthesizing, or settling before ready |
-| Cyan ripples and cube-size changes | Headset speech playback; motion follows the written audio level |
-| Open, calm mint swarm with a steady complete halo | Selected session idle and speech queue drained |
-| Amber, gently pulsing broken halo | A permission or question needs your input |
-| Wide cyan swarm | Your push-to-talk recording is active |
-| Blue circulation | Finalizing your recording/transcript |
-| Dim fragmented halo / red fragmented halo | Status unknown or stale / an interaction error |
+| Tight violet circulation, rotating broken halo | The space's agent is working, or input is queued |
+| Open, calm mint swarm with a steady complete halo | The agent is idle and nothing is queued |
+| Amber, gently pulsing broken halo | An approval or question needs an answer |
+| Dim fragmented halo / red fragmented halo | Status unknown / the server is unreachable |
 
-The ready halo persists; you don't need to catch an end-of-turn flash. Speech
-preparation stays distinct from ready even between chunks. Holding X still
-interrupts spoken playback; it does not cancel agent work, and a busy session
-may queue your message. An active violet arc during playback represents observed
-work in the selected session, **not** all delegated/background work. This is
-status telemetry, not a visualization of hidden reasoning. The standalone demo
-retains its original flocking behavior. Controller attraction still works.
+The ready halo persists; you don't need to catch an end-of-turn flash. An
+active violet arc represents observed work in the space, **not** all
+delegated/background work. This is status telemetry, not a visualization of
+hidden reasoning. Outside a space the swarm keeps its original flocking
+behavior. Controller attraction still works. While in a space, the text console
+sits lower so it doesn't obscure the swarm.
 
-The same state and audio envelope accompany the Quest scene to updated PC
-spectators. Older senders keep the original visual style. OBS audio is separate
-and may be delayed relative to these cues. While a session is open, the text
-console sits lower so it doesn't obscure the swarm; all its controls remain.
+### Voice
 
-### Spoken replies (PC-side Kokoro)
-
-Install the PC voice model once (~350 MB download):
-
-```sh
-bash scripts/fetch-tts-model.sh
-```
-
-Restart the bridge after updating dependencies (`npm ci --prefix bridge`),
-then run `bash scripts/opencode-bridge.sh`. The bridge lazily starts a separate
-CPU worker using Kokoro v1.0 via sherpa-onnx. Its audio goes over the
-USB loopback connection to the Quest's speakers. The model stays on the PC;
-no speech synthesis cloud service is used. The default is `jf_alpha` (ID 37),
-a Japanese-trained voice speaking English via the English text frontend. This
-is an experiment, not a clone of any specific voice; English pronunciation may
-be imperfect. Change the voice ID (0–53) by setting `TOMORI_TTS_VOICE` when
-starting the bridge. Other Japanese-trained voices include 38, 39, and 40;
-the prior Michael voice is 16 in this model.
-
-Only **new completed assistant text** is spoken; old session history, internal
-reasoning, tool output, and fenced code blocks are not read aloud. Long replies
-are sent as short chunks after each assistant message finishes, not as live
-word-by-word generation. Speech can lag behind text; the headset can keep
-rendering and chatting while synthesis runs. Starting a recording interrupts
-speech already playing; new replies completed while X is held wait until X is
-released. Muting or losing focus discards queued audio. If the speech worker
-is missing or unavailable, the text chat remains usable and shows an error.
-
-Licensing: Kokoro model weights are Apache-2.0; this sherpa-onnx release uses
-eSpeak NG for phonemization (GPL-3.0-or-later). Review the model bundle and
-dependency licenses before distributing the PC bridge.
+Speech recognition and spoken replies are moving from the PC bridge to the
+server (see [design/speech.md](design/speech.md)). Until they arrive, **X** shows
+a notice instead of recording, and replies are not spoken.
 
 ## PC spectator and live audio (prototype)
+
+The headset doesn't publish its scene or audio for now; this section describes
+the PC side, which shows “Waiting for Quest” until publishing returns through
+the server.
 
 The Quest remains the simulation authority for now. It sends its head/view,
 controller, agent positions, chat panel, and recording indicator to the PC bridge
@@ -395,52 +359,6 @@ inputs at 48 kHz. Small buffers mean late audio may be dropped, and the pipeline
 can retain a short tail after muting; verify the headset's `MIC OFF` state and
 audio/video sync before broadcasting.
 
-**The audience microphone starts OFF.** Squeeze the **left grip** to toggle it.
-The panel shows `MIC OFF`, `MIC LINKING`, or `MIC LIVE`; press the grip again to
-stop. It also turns off when the app loses focus or exits. When enabled, audio
-is sent continuously to the PC regardless of whether X is held. X remains the
-separate push-to-talk control for the OpenCode prompt, sharing the microphone
-with the live stream. The stream may briefly pause while the microphone switches
-between continuous and prompt recording. No audio is stored by the app/bridge.
-Headphones are recommended: the headset speakers can leak assistant speech back
-into the microphone. Video can include chat and other sensitive content; check
-your OBS preview before broadcasting. The prototype uses 16 kHz mono (the speech
-recognizer's format), not high-fidelity audio, and drops late packets to limit
-latency rather than accumulating a backlog.
-
-## PC live voice-to-text
-
-Press **B** from the session browser to enter standalone voice-preview mode.
-
-1. Wait for the floating panel to say **Ready**.
-2. Press **X** and allow microphone access in the system permission prompt.
-3. Hold **X**. Once `REC ... LIVE ON PC` appears, speak English. The headset
-   sends small audio chunks to the PC; the panel shows the most recent part of
-   the revisable draft. The header identifies the session bound at button-down.
-4. Release **X** to finalize and send the entire transcript to that session.
-   There is no 60-second recording cutoff. A timer shows elapsed time, not a
-   false progress bar. Partial results may change as more speech arrives.
-
-Recognition uses **faster-whisper `small.en`** on the PC (CUDA on this machine;
-CPU fallback when CUDA is unavailable), in a background worker with a bounded
-rolling audio window. Long prompts keep their earlier finalized words without
-buffering all the audio. The live draft is refreshed approximately every two
-seconds of audio. The initial model load may take longer; wait for `REC` before
-speaking. The model and CUDA runtime remain on the PC; no external transcription
-service is used. Override `TOMORI_ASR_DEVICE=cpu` on bridge startup if needed.
-
-Microphone capture is Android AAudio, 16 kHz mono. Push-to-talk audio is sent to
-the PC for recognition **even when the audience microphone is off**; the left
-grip separately controls what goes to OBS. Losing focus or quitting cancels the
-recording, and a missing/out-of-order audio chunk or saturated connection fails
-the utterance rather than silently sending a partial prompt. Audio is not saved
-by the app or bridge; OpenCode records the final sent text in its normal session
-history. The prompt API has a large text-size guard and the chosen model has a
-finite context, so extraordinarily long prompts still have practical limits.
-
-If microphone access was denied, enable it in Quest's app permissions and try
-X again. There is no automatic permission grant or background listening.
-
 ## Build and sideload (Linux)
 
 Enable Quest developer mode, connect a USB data cable, and accept **Allow USB
@@ -468,9 +386,7 @@ bash scripts/android.sh run
 
 The script downloads the official Khronos **1.1.65** OpenXR loader AAR from Maven
 Central, checks its published SHA-256, and packages the arm64 loader in the APK.
-The Quest APK does not contain a transcription model. PC transcription setup
-fetches MIT-licensed `Systran/faster-whisper-small.en` at a pinned revision and
-verifies the model SHA-256.
+The Quest APK does not contain a transcription model.
 `cargo-apk` creates a local debug signing key if needed. Build output:
 `target/debug/apk/tomori.apk` (package `io.github.ioquatix.tomori`).
 Launch from **Library → Unknown Sources → Tomori** if not auto-started.
@@ -499,6 +415,17 @@ Runs the same simulation and wgpu renderer in a resizable desktop window;
 - **Hold left mouse:** attract agents to the cursor on a plane through the swarm.
 - **Right-drag:** orbit the camera; **mouse wheel:** zoom.
 - **R:** reset agents; **Space:** pause/resume; **Esc:** quit.
+
+The window doesn't connect to a server. To use a server without a headset or a
+GPU, show the headset's panel in the terminal:
+
+```sh
+cargo run -p client-quest -- --console [--server HOST:PORT] [--name NAME]
+```
+
+Type the controller buttons as commands, such as `a`, `b`, `y`, `u` and `d`
+for the left stick, and `<` `>` for the right stick. `--server` (or
+`TOMORI_SERVER`) and `--name` also apply to `--xr`.
 
 ## Tests / desktop OpenXR
 
@@ -533,15 +460,11 @@ own OpenXR loader/runtime (for example Monado).
   two-layer XR swapchain images, one layer per eye.
 - `crates/client-quest/src/graphics.rs`, `crates/client-quest/src/swarm.wgsl`: instanced cube rendering with per-eye depth.
 - `crates/client-quest/src/swarm.rs`: deterministic CPU flocking, separation/alignment/cohesion.
-- `crates/client-quest/src/voice.rs`, `crates/client-quest/src/speech.rs`: Android permission/capture and ordered PC audio streaming.
 - `bridge/asr.mjs`, `bridge/asr_worker.py`: GPU/CPU Whisper rolling transcription.
 - `crates/client-quest/src/caption.rs`, `crates/client-quest/src/caption.wgsl`: head-relative, stereo text panel.
-- `crates/client-quest/src/chat.rs`: session browser, reply paging, background loopback HTTP client.
-- `bridge/`: official OpenCode V2 client adapter (no alternate AI backend).
-
-An ndk 0.9 workaround is covered by regression tests: positive AAudio read/write
-counts are incorrectly reported as errors, so the app normalizes those counts.
-The legacy local-Whisper regression tests also cover its abort-closure workaround.
+- `crates/client-quest/src/conversation.rs`: server list, space list and space panel, driven by server events.
+- `crates/client-quest/src/connection.rs`: the server connection and Bonjour browsing.
+- `bridge/`: official OpenCode V2 client adapter, no longer used by the headset.
 
 The Vulkan device uses the runtime-selected physical GPU and enables the full
 extension/feature set required by wgpu. Swapchain images remain runtime-owned;
@@ -553,7 +476,7 @@ ready/stopping/exit events. The scene initially faces the headset; the app uses
 `LOCAL_FLOOR` when available so the Quest's system Meta-button recenter moves the
 scene, falling back to `LOCAL` with an approximate 1.6 m floor offset. Reference
 space changes take effect at the runtime's specified frame time. Recentering
-doesn't reset the agents, chat, or interaction state. This is opaque VR, not
+doesn't reset the agents, conversation, or interaction state. This is opaque VR, not
 passthrough; optional tracked-hand skeletons are described above.
 
 ## Third-Party Components

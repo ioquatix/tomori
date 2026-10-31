@@ -408,6 +408,7 @@ mod tests {
         for index in 0..100 {
             outbox.message(ServerMessage::Error {
                 error: format!("error {index}"),
+                space: None,
             });
         }
         outbox.message(ServerMessage::Left);
@@ -417,6 +418,7 @@ mod tests {
         // Once sent, errors are reported again.
         outbox.message(ServerMessage::Error {
             error: "again".into(),
+            space: None,
         });
         assert_eq!(drain(&outbox).len(), 1);
     }
