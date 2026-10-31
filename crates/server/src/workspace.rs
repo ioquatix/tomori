@@ -80,7 +80,18 @@ impl WorkspaceRoots {
         let current = std::env::current_dir().map_err(|error| {
             format!("could not determine the current directory: {error}; give --workspace-root")
         })?;
-        Self::new([current])
+        Self::implicit(current)
+    }
+
+    /// The default root for `directory`, refusing the file system root, where a service manager such as launchd or systemd starts a server, which would allow every directory without the operator choosing it.
+    fn implicit(directory: PathBuf) -> Result<Self, String> {
+        let roots = Self::new([directory])?;
+        if roots.roots.iter().any(|root| root.parent().is_none()) {
+            return Err(
+                "the current directory is the file system root; give --workspace-root".to_owned(),
+            );
+        }
+        Ok(roots)
     }
 
     /// No roots at all, refusing every directory.
@@ -315,6 +326,16 @@ mod tests {
             std::fs::create_dir_all(&path).unwrap();
             path
         }
+    }
+
+    #[test]
+    fn the_file_system_root_is_not_an_implicit_root() {
+        assert!(WorkspaceRoots::implicit(PathBuf::from("/")).is_err());
+        let scratch = Scratch::new("implicit");
+        let roots = WorkspaceRoots::implicit(scratch.0.clone()).unwrap();
+        assert_eq!(roots.roots(), std::slice::from_ref(&scratch.0));
+        // Given explicitly, it is the operator's choice.
+        assert!(WorkspaceRoots::new([PathBuf::from("/")]).is_ok());
     }
 
     impl Drop for Scratch {
