@@ -36,6 +36,8 @@ pub enum Mode {
 }
 
 pub struct Conversation {
+    /// This participant's identity, which the server records on their queued input.
+    participant: String,
     name: String,
     mode: Mode,
     servers: Vec<Choice>,
@@ -68,9 +70,10 @@ pub struct Conversation {
 }
 
 impl Conversation {
-    /// `name` is this participant's display name, which the server records as the speaker of their queued input.
-    pub fn new(name: impl Into<String>) -> Self {
+    /// `participant` is this participant's identity and `name` their display name.
+    pub fn new(participant: impl Into<String>, name: impl Into<String>) -> Self {
         Self {
+            participant: participant.into(),
             name: name.into(),
             mode: Mode::Servers,
             servers: Vec::new(),
@@ -463,14 +466,11 @@ impl Conversation {
         self.notice = Some("Voice is moving to the server; X is not available yet.".into());
     }
 
-    /// Your newest entry still waiting in the queue. The server records each entry's speaker by display name.
+    /// Your newest entry still waiting in the queue. Entries are matched by participant identity, since display names need not be unique.
     fn own_queued(&self) -> Option<&protocol::QueueEntry> {
-        self.space
-            .as_ref()?
-            .queue
-            .iter()
-            .rev()
-            .find(|entry| entry.state == QueueState::Queued && entry.speaker == self.name)
+        self.space.as_ref()?.queue.iter().rev().find(|entry| {
+            entry.state == QueueState::Queued && entry.participant == self.participant
+        })
     }
 
     /// What the swarm should show. `Unknown` and a lost connection are never shown as ready.
@@ -863,10 +863,11 @@ mod tests {
         }
     }
 
+    /// An entry spoken by `speaker`, whose participant identity is their name in lower case.
     fn entry(id: &str, speaker: &str, state: QueueState) -> QueueEntry {
         QueueEntry {
             id: id.into(),
-            participant: String::new(),
+            participant: speaker.to_lowercase(),
             speaker: speaker.into(),
             text: format!("text of {id}"),
             state,
@@ -886,7 +887,7 @@ mod tests {
 
     /// A conversation connected to a server and joined to [`SPACE`].
     fn joined(change: impl FnOnce(&mut SpaceState)) -> Conversation {
-        let mut conversation = Conversation::new("Ada");
+        let mut conversation = Conversation::new("ada", "Ada");
         conversation.connect(Choice::new("Studio", "10.0.0.1:8765", Source::Discovered));
         conversation.apply(connected());
         conversation.apply(space(change));
@@ -902,7 +903,7 @@ mod tests {
 
     #[test]
     fn connects_lists_and_joins() {
-        let mut conversation = Conversation::new("Ada");
+        let mut conversation = Conversation::new("ada", "Ada");
         assert!(conversation.is_browsing());
         conversation.set_servers(vec![
             Choice::new("Studio", "10.0.0.1:8765", Source::Discovered),
@@ -945,7 +946,7 @@ mod tests {
 
     #[test]
     fn an_incompatible_server_cannot_be_chosen() {
-        let mut conversation = Conversation::new("Ada");
+        let mut conversation = Conversation::new("ada", "Ada");
         let mut old = Choice::new("Old", "10.0.0.3:8765", Source::Discovered);
         old.unavailable = Some("protocol 2, needs 1".into());
         conversation.set_servers(vec![old]);
@@ -1082,7 +1083,7 @@ mod tests {
 
     #[test]
     fn activity_is_never_ready_unless_the_server_says_idle() {
-        let mut conversation = Conversation::new("Ada");
+        let mut conversation = Conversation::new("ada", "Ada");
         assert_eq!(conversation.activity(), SessionActivity::Unselected);
 
         let cases = [
@@ -1191,7 +1192,7 @@ mod tests {
 
     #[test]
     fn the_server_rejoining_after_a_reconnect_in_the_lobby_enters_the_space() {
-        let mut conversation = Conversation::new("Ada");
+        let mut conversation = Conversation::new("ada", "Ada");
         conversation.connect(Choice::new("Studio", "10.0.0.1:8765", Source::Override));
         conversation.apply(connected());
         conversation.apply(space(|_| {}));
@@ -1245,6 +1246,18 @@ mod tests {
             ];
         }));
         // Others' entries and those already sending are not yours to cancel here.
+        conversation.back();
+        assert_eq!(sent(&mut conversation), [ClientMessage::Leave]);
+    }
+
+    #[test]
+    fn another_participant_with_your_name_does_not_own_your_entries() {
+        let mut conversation = joined(|state| {
+            let mut namesake = entry("1", "Ada", QueueState::Queued);
+            namesake.participant = "another-ada".into();
+            state.queue = vec![namesake];
+        });
+        assert!(!conversation.text().contains("B cancel queued"));
         conversation.back();
         assert_eq!(sent(&mut conversation), [ClientMessage::Leave]);
     }
@@ -1351,7 +1364,7 @@ mod tests {
         );
         assert_fits(&mut conversation);
 
-        let mut conversation = Conversation::new("Ada");
+        let mut conversation = Conversation::new("ada", "Ada");
         conversation.set_servers(
             (0..20)
                 .map(|i| Choice::new(long.clone(), format!("10.0.0.{i}:8765"), Source::Discovered))
@@ -1386,7 +1399,7 @@ mod tests {
 
     #[test]
     fn b_in_the_lobby_returns_to_the_server_list() {
-        let mut conversation = Conversation::new("Ada");
+        let mut conversation = Conversation::new("ada", "Ada");
         conversation.connect(Choice::new("Studio", "10.0.0.1:8765", Source::Discovered));
         conversation.take_actions();
         conversation.back();
@@ -1410,7 +1423,7 @@ mod tests {
 
     #[test]
     fn keeps_the_selection_when_lists_change() {
-        let mut conversation = Conversation::new("Ada");
+        let mut conversation = Conversation::new("ada", "Ada");
         conversation.set_servers(vec![
             Choice::new("A", "a", Source::Discovered),
             Choice::new("B", "b", Source::Discovered),
@@ -1430,7 +1443,7 @@ mod tests {
 
     #[test]
     fn selects_the_best_server_until_one_is_chosen() {
-        let mut conversation = Conversation::new("Ada");
+        let mut conversation = Conversation::new("ada", "Ada");
         conversation.set_servers(vec![Choice::new("USB", USB, Source::Usb)]);
         conversation.set_servers(vec![
             Choice::new("Studio", "10.0.0.2:8765", Source::Discovered),
