@@ -107,6 +107,19 @@ pub fn choices(
     choices
 }
 
+/// The server to connect to without asking: the remembered server once browsing finds it again, unless an override was given, which is connected to at startup instead.
+pub fn automatic(choices: &[Choice]) -> Option<&Choice> {
+    if choices
+        .iter()
+        .any(|choice| choice.source == Source::Override)
+    {
+        return None;
+    }
+    choices
+        .iter()
+        .find(|choice| choice.source == Source::Remembered && choice.is_available())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -259,5 +272,39 @@ mod tests {
             [(USB, Source::Usb, true), ("", Source::Discovered, false)]
         );
         assert_eq!(choices[1].unavailable.as_deref(), Some("no address"));
+    }
+
+    #[test]
+    fn the_remembered_server_is_connected_automatically_once_found() {
+        let found = servers(&[
+            server("alpha", "Alpha", "10.0.0.1:8765", Some(PROTOCOL_VERSION)),
+            server("beta", "Beta", "10.0.0.2:8765", Some(PROTOCOL_VERSION)),
+        ]);
+        assert_eq!(automatic(&choices(None, None, &found)), None);
+        assert_eq!(automatic(&choices(None, Some("gamma"), &found)), None);
+        let choices = choices(None, Some("beta"), &found);
+        let choice = automatic(&choices).unwrap();
+        assert_eq!(choice.instance.as_deref(), Some("beta"));
+        assert_eq!(choice.address, "10.0.0.2:8765");
+    }
+
+    #[test]
+    fn nothing_is_connected_automatically_beside_an_override_or_without_an_address() {
+        let found = servers(&[server(
+            "beta",
+            "Beta",
+            "10.0.0.2:8765",
+            Some(PROTOCOL_VERSION),
+        )]);
+        assert_eq!(
+            automatic(&choices(Some("10.0.0.9:8765"), Some("beta"), &found)),
+            None
+        );
+        let mut unreachable = server("beta", "Beta", "", Some(PROTOCOL_VERSION));
+        unreachable.addresses.clear();
+        assert_eq!(
+            automatic(&choices(None, Some("beta"), &servers(&[unreachable]))),
+            None
+        );
     }
 }

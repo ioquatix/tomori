@@ -7,7 +7,7 @@
 use crate::{
     caption::{COLUMNS, ROWS, wrapped_lines},
     interaction::SessionActivity,
-    server_choice::Choice,
+    server_choice::{self, Choice},
 };
 use client::{ConnectionState, Event};
 use protocol::{
@@ -44,6 +44,8 @@ pub struct Conversation {
     server: usize,
     /// Whether the stick moved the server selection; until then the best choice, listed first, stays selected as servers appear.
     chosen: bool,
+    /// Whether the remembered server may still be connected to when it appears: only once, before the participant moves the selection or connects.
+    automatic: bool,
     /// The server chosen in the server list, while in the lobby or a space.
     connected: Option<Choice>,
     state: Option<ConnectionState>,
@@ -79,6 +81,7 @@ impl Conversation {
             servers: Vec::new(),
             server: 0,
             chosen: false,
+            automatic: true,
             connected: None,
             state: None,
             spaces: Vec::new(),
@@ -129,11 +132,19 @@ impl Conversation {
             .and_then(|address| servers.iter().position(|choice| &choice.address == address))
             .unwrap_or(0);
         self.servers = servers;
+        if self.automatic
+            && !self.chosen
+            && self.mode == Mode::Servers
+            && let Some(choice) = server_choice::automatic(&self.servers).cloned()
+        {
+            self.connect(choice);
+        }
     }
 
     /// Connect to a server without choosing it from the list, as for an address given at startup.
     pub fn connect(&mut self, choice: Choice) {
         log::info!("Connecting to {} at {}", choice.label, choice.address);
+        self.automatic = false;
         self.actions.push(Action::Connect(choice.clone()));
         self.connected = Some(choice);
         self.state = None;
@@ -1439,6 +1450,48 @@ mod tests {
             conversation.take_actions().as_slice(),
             [Action::Connect(choice)] if choice.address == "b"
         ));
+    }
+
+    fn remembered() -> Choice {
+        let mut choice = Choice::new("Studio", "10.0.0.2:8765", Source::Remembered);
+        choice.instance = Some("studio".into());
+        choice
+    }
+
+    #[test]
+    fn connects_to_the_remembered_server_when_it_appears_but_only_once() {
+        let mut conversation = Conversation::new("ada", "Ada");
+        conversation.set_servers(vec![Choice::new("USB", USB, Source::Usb)]);
+        assert!(conversation.take_actions().is_empty());
+        conversation.set_servers(vec![remembered(), Choice::new("USB", USB, Source::Usb)]);
+        assert!(matches!(
+            conversation.take_actions().as_slice(),
+            [Action::Connect(choice)] if choice.address == "10.0.0.2:8765"
+        ));
+        assert_eq!(conversation.mode(), Mode::Lobby);
+        // Returning to the list leaves the choice to the participant.
+        conversation.back();
+        conversation.take_actions();
+        conversation.set_servers(vec![remembered(), Choice::new("USB", USB, Source::Usb)]);
+        assert!(conversation.take_actions().is_empty());
+        assert_eq!(conversation.mode(), Mode::Servers);
+    }
+
+    #[test]
+    fn moving_the_selection_stops_the_remembered_server_connecting() {
+        let mut conversation = Conversation::new("ada", "Ada");
+        conversation.set_servers(vec![
+            Choice::new("Other", "10.0.0.3:8765", Source::Discovered),
+            Choice::new("USB", USB, Source::Usb),
+        ]);
+        conversation.navigate(0, 1);
+        conversation.set_servers(vec![
+            remembered(),
+            Choice::new("Other", "10.0.0.3:8765", Source::Discovered),
+            Choice::new("USB", USB, Source::Usb),
+        ]);
+        assert!(conversation.take_actions().is_empty());
+        assert_eq!(conversation.mode(), Mode::Servers);
     }
 
     #[test]
