@@ -75,12 +75,12 @@ impl WorkspaceRoots {
         })
     }
 
-    /// The default: the user's home directory alone.
-    pub fn home() -> Result<Self, String> {
-        let home = std::env::home_dir()
-            .filter(|home| !home.as_os_str().is_empty())
-            .ok_or("could not determine the home directory; give --workspace-root")?;
-        Self::new([home])
+    /// The default: the server's current working directory alone, so that where the operator starts the server is where agents may work, as with `claude` itself.
+    pub fn current() -> Result<Self, String> {
+        let current = std::env::current_dir().map_err(|error| {
+            format!("could not determine the current directory: {error}; give --workspace-root")
+        })?;
+        Self::new([current])
     }
 
     /// No roots at all, refusing every directory.

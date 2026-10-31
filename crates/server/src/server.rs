@@ -42,7 +42,7 @@ pub struct Server {
     admission: Admission,
     request_timeout: Duration,
     retention: Duration,
-    /// Where spaces may run; `None` until configured, which means the home directory when the server runs.
+    /// Where spaces may run; `None` until configured, which means the current directory when the server runs.
     roots: Option<WorkspaceRoots>,
     slots: Arc<SpaceSlots>,
 }
@@ -94,7 +94,7 @@ impl Server {
         }
     }
 
-    /// Run spaces only in these directories or beneath them. Without this, the only root is the home directory. See `design/workspaces.md`.
+    /// Run spaces only in these directories or beneath them. Without this, the only root is the current directory when the server runs. See `design/workspaces.md`.
     pub fn with_workspace_roots(mut self, roots: WorkspaceRoots) -> Self {
         self.roots = Some(roots);
         self
@@ -310,11 +310,14 @@ impl Server {
     async fn supervise<S: Timers>(&self, scheduler: &S, cancellation: &Cancellation) {
         let roots = match &self.roots {
             Some(roots) => roots.clone(),
-            None => WorkspaceRoots::home().unwrap_or_else(|error| {
+            None => WorkspaceRoots::current().unwrap_or_else(|error| {
                 log::error!("No workspace roots, so every directory is refused: {error}.");
                 WorkspaceRoots::none()
             }),
         };
+        for root in roots.roots() {
+            log::info!("Spaces may run in {} or beneath it.", root.display());
+        }
         let resolving = Arc::new(Resolving::default());
         let mut spaces = FuturesUnordered::new();
         let mut cancelled = pin!(cancellation.cancelled());
