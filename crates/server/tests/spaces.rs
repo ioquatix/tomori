@@ -832,6 +832,43 @@ fn a_streaming_reply_sends_paced_snapshots_ending_with_the_latest_state() {
     assert!(snapshots >= 2, "snapshots were not sent while streaming");
 }
 
+#[test]
+fn a_snapshot_deferred_while_a_later_one_is_pending_is_sent_when_it_is_due() {
+    let server = TestServer::start();
+    let mut ada = server.connect("ada", "Ada");
+    let mut bob = server.connect("bob", "Bob");
+    ada.create_space("Later");
+    bob.create_space("Sooner");
+    let later = server.backend.started()[0].clone();
+    let sooner = server.backend.started()[1].clone();
+    // Let the snapshots of creating the spaces fall out of the interval.
+    std::thread::sleep(Duration::from_millis(200));
+    let error = |message: &str| Event::Error {
+        message: message.to_owned(),
+    };
+
+    sooner.emit(error("first"));
+    bob.space(|state| state.error.as_deref() == Some("first"));
+    std::thread::sleep(Duration::from_millis(60));
+    // This space defers a snapshot due about 160 ms after the first.
+    later.emit(error("first"));
+    ada.space(|state| state.error.as_deref() == Some("first"));
+    later.emit(error("second"));
+    // Let the pacer start waiting for it.
+    std::thread::sleep(Duration::from_millis(20));
+
+    // The other space then defers one due about 100 ms after the first, sooner than the pending one.
+    let started = std::time::Instant::now();
+    sooner.emit(error("second"));
+    bob.space(|state| state.error.as_deref() == Some("second"));
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < Duration::from_millis(50),
+        "the sooner snapshot took {elapsed:?}, as if it waited for the later one"
+    );
+    ada.space(|state| state.error.as_deref() == Some("second"));
+}
+
 /// End `client`'s connection and wait until the server has released it.
 fn hang_up(mut client: TestClient) {
     client.finish();

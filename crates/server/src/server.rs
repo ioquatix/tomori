@@ -163,23 +163,25 @@ impl Server {
         served
     }
 
-    /// Send space snapshots that were deferred to keep a streaming reply within [`crate::hub::SNAPSHOT_INTERVAL`], when they are due. Sleeps until a space defers one.
+    /// Send space snapshots that were deferred to keep a streaming reply within [`crate::hub::SNAPSHOT_INTERVAL`], when they are due. Sleeps until a space defers one, and wakes when another space defers one, which may be due sooner.
     async fn pace<S: Timers>(&self, scheduler: &S, cancellation: &Cancellation) {
         let mut timer = scheduler.timer();
         loop {
             let listener = self.hub.listen_snapshots();
             match self.hub.snapshot_deadline() {
                 Some(deadline) => {
-                    if let Err(error) = scheduler
-                        .timer_wait_until(&mut timer, deadline, cancellation)
-                        .await
-                    {
-                        if !cancellation.is_cancelled() {
-                            log::error!("The snapshot timer failed: {error}");
+                    let due = scheduler.timer_wait_until(&mut timer, deadline, cancellation);
+                    match select(pin!(due), pin!(listener)).await {
+                        Either::Left((Ok(()), _)) => self.hub.flush_snapshots(scheduler.now()),
+                        Either::Left((Err(error), _)) => {
+                            if !cancellation.is_cancelled() {
+                                log::error!("The snapshot timer failed: {error}");
+                            }
+                            return;
                         }
-                        return;
+                        // A later deferral: compute the earliest deadline again.
+                        Either::Right(_) => {}
                     }
-                    self.hub.flush_snapshots(scheduler.now());
                 }
                 None => {
                     if let Either::Right(_) =
