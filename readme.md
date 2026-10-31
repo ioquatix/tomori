@@ -66,11 +66,13 @@ cargo run -p server --bin tomori-server -- --backend claude-code
 It advertises itself with Bonjour, so the headset lists it when both are on the
 same network. Over USB, `bash scripts/android.sh run` forwards the headset's
 port 8765 to the PC with `adb reverse`, and the list's **USB** entry connects
-through it. To skip the list, give an address:
+through it; set `TOMORI_SERVER_PORT` when the server listens on another port.
+To skip the list, give an address:
 `TOMORI_SERVER=192.168.1.10:8765 bash scripts/android.sh run`, or pass the
 intent extras `tomori.server` and `tomori.name` to `am start`. Your name
-defaults to the headset's model name. The headset remembers the last server
-and lists it first. The headset joins existing spaces; it can't create them yet.
+defaults to the headset's model name. The headset remembers the last server it
+connected to, and connects to it again when it finds it, unless you move the
+selection first. The headset joins existing spaces; it can't create them yet.
 
 ### Controls
 
