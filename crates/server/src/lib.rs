@@ -9,6 +9,7 @@ mod application;
 mod backends;
 mod connection;
 mod hub;
+mod limits;
 mod outbox;
 mod projection;
 mod queue;

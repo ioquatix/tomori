@@ -9,7 +9,7 @@ use std::task::{Poll, Waker};
 use base_http::body::{BodyError, BodyFrame, ReadableBody};
 use base_scheduler::Cancellation;
 use futures_util::future::{Either, select};
-use protocol::{Frame, FrameDecoder};
+use protocol::{Frame, FrameDecoder, ServerMessage};
 
 use crate::hub::{ConnectionId, Hub};
 use crate::outbox::{Outbox, Popped};
@@ -100,7 +100,7 @@ impl<B: ReadableBody> ConnectionBody<B> {
             match self.outbox.pop() {
                 Popped::Control(item) => {
                     if let Some(message) = self.hub.render(self.id, item) {
-                        Frame::server(&message).encode_into(output);
+                        encode(&message, output);
                     }
                 }
                 Popped::Audio(frame) => output.extend_from_slice(&frame),
@@ -161,6 +161,17 @@ impl<B: ReadableBody> ConnectionBody<B> {
             self.input(result.map_err(BodyError::new)?)?;
         }
         Ok(())
+    }
+}
+
+/// Append `message` as a frame. A message that would exceed the frame limit, which the server's size limits should prevent, is replaced by a short error so that the client is not disconnected by a frame it must reject.
+fn encode(message: &ServerMessage, output: &mut Vec<u8>) {
+    if let Err(error) = Frame::server(message).try_encode_into(output) {
+        log::error!("A server message was not sent: {error}.");
+        Frame::server(&ServerMessage::Error {
+            error: "A message from the server was too large to send.".to_owned(),
+        })
+        .encode_into(output);
     }
 }
 

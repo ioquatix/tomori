@@ -21,6 +21,14 @@ impl InputQueue {
         &self.entries
     }
 
+    /// Entries that are queued or sending.
+    pub fn waiting(&self) -> usize {
+        self.entries
+            .iter()
+            .filter(|entry| matches!(entry.state, QueueState::Queued | QueueState::Sending))
+            .count()
+    }
+
     /// Add an entry. Returns false if an entry with this key was already queued, in which case nothing changes.
     pub fn push(&mut self, key: String, speaker: String, text: String) -> bool {
         if !self.keys.insert(key.clone()) {

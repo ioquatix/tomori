@@ -346,6 +346,11 @@ impl SpaceModel {
         self.queue.push(key, speaker, text)
     }
 
+    /// Entries waiting to be delivered.
+    pub fn waiting(&self) -> usize {
+        self.queue.waiting()
+    }
+
     pub fn cancel(&mut self, key: &str) -> Result<(), &'static str> {
         self.queue.cancel(key)
     }

@@ -18,6 +18,7 @@ use protocol::{
 };
 
 use crate::backends::Backends;
+use crate::limits;
 use crate::outbox::{Outbox, Outgoing};
 use crate::space::{AnswerOutcome, SpaceModel};
 use crate::transcriber::{Transcriber, TranscriptSink, UtteranceId};
@@ -128,6 +129,13 @@ enum Deferred {
     Cancel(UtteranceId),
 }
 
+/// An error reply, cut to [`limits::ERROR_BYTES`].
+fn error_message(error: impl Into<String>) -> ServerMessage {
+    ServerMessage::Error {
+        error: limits::truncate(&error.into(), limits::ERROR_BYTES),
+    }
+}
+
 impl HubState {
     fn outbox(&self, participant: &str) -> Option<&Arc<Outbox>> {
         let connection = self.participants.get(participant)?.connection?;
@@ -141,12 +149,7 @@ impl HubState {
     }
 
     fn error(&self, participant: &str, error: impl Into<String>) {
-        self.send(
-            participant,
-            ServerMessage::Error {
-                error: error.into(),
-            },
-        );
+        self.send(participant, error_message(error));
     }
 
     fn space(&self, id: &str) -> Option<&SpaceRecord> {
@@ -403,7 +406,7 @@ impl Hub {
 
     fn reply_error(&self, connection: ConnectionId, error: String) {
         if let Some(record) = self.lock().connections.get(&connection) {
-            record.outbox.message(ServerMessage::Error { error });
+            record.outbox.message(error_message(error));
         }
     }
 
@@ -447,9 +450,7 @@ impl Hub {
                     &mut deferred,
                 );
             } else if let Some(record) = state.connections.get(&connection) {
-                record.outbox.message(ServerMessage::Error {
-                    error: "Send hello first.".to_owned(),
-                });
+                record.outbox.message(error_message("Send hello first."));
             }
         }
         self.run(deferred);
@@ -472,24 +473,28 @@ impl Hub {
             return;
         };
         if state.connections[&connection].participant.is_some() {
-            outbox.message(ServerMessage::Error {
-                error: "This connection already said hello.".to_owned(),
-            });
+            outbox.message(error_message("This connection already said hello."));
             return;
         }
         if protocol != PROTOCOL_VERSION {
-            outbox.message(ServerMessage::Error {
-                error: format!(
-                    "Unsupported protocol {protocol}; this server speaks {PROTOCOL_VERSION}."
-                ),
-            });
+            outbox.message(error_message(format!(
+                "Unsupported protocol {protocol}; this server speaks {PROTOCOL_VERSION}."
+            )));
             outbox.close();
             return;
         }
-        if participant.is_empty() {
-            outbox.message(ServerMessage::Error {
-                error: "A participant identity is required.".to_owned(),
-            });
+        let invalid = if participant.is_empty() {
+            Err("A participant identity is required.".to_owned())
+        } else {
+            limits::check(
+                &participant,
+                limits::PARTICIPANT_BYTES,
+                "participant identity",
+            )
+            .and_then(|()| limits::check(&name, limits::NAME_BYTES, "name"))
+        };
+        if let Err(error) = invalid {
+            outbox.message(error_message(error));
             outbox.close();
             return;
         }
@@ -571,14 +576,21 @@ impl Hub {
                 directory,
                 session,
             } => {
+                let checked = limits::check(&title, limits::TITLE_BYTES, "title")
+                    .and_then(|()| limits::check(&directory, limits::DIRECTORY_BYTES, "directory"))
+                    .and_then(|()| match &session {
+                        Some(session) => limits::check(session, limits::SESSION_BYTES, "session"),
+                        None => Ok(()),
+                    });
+                if let Err(error) = checked {
+                    state.error(participant, error);
+                    return;
+                }
                 let Some(found) = self.backends.get(&backend) else {
                     let names: Vec<&str> = self.backends.names().collect();
                     state.error(
                         participant,
-                        format!(
-                            "Unknown backend {backend:?}; available: {}.",
-                            names.join(", ")
-                        ),
+                        format!("Unknown backend; available: {}.", names.join(", ")),
                     );
                     return;
                 };
@@ -602,7 +614,7 @@ impl Hub {
             }
             ClientMessage::Join { space: target } => {
                 if state.space(&target).is_none() {
-                    state.error(participant, format!("No space {target:?}."));
+                    state.error(participant, "That space does not exist.");
                     return;
                 }
                 state.join(participant, &target);
@@ -622,6 +634,12 @@ impl Hub {
                 // Each audio frame carries its own gate; the announcement needs no state yet.
             }
             ClientMessage::UtteranceBegin { utterance } => {
+                if let Err(error) =
+                    limits::check(&utterance, limits::UTTERANCE_BYTES, "utterance identifier")
+                {
+                    state.error(participant, error);
+                    return;
+                }
                 let Some(space) = in_space(state) else {
                     return;
                 };
@@ -665,7 +683,7 @@ impl Hub {
                     .as_ref()
                     .is_some_and(|open| open.client == utterance) =>
             {
-                state.error(participant, format!("No open utterance {utterance:?}."));
+                state.error(participant, "That utterance is not open.");
             }
             ClientMessage::UtteranceEnd { .. } => {
                 let open = state
@@ -718,6 +736,10 @@ impl Hub {
                 field,
                 text,
             } => {
+                if let Err(error) = limits::check(&text, limits::ANSWER_BYTES, "answer") {
+                    state.error(participant, error);
+                    return;
+                }
                 let Some(space) = in_space(state) else {
                     return;
                 };
@@ -812,7 +834,10 @@ impl Hub {
                 }
             }
             let source = state.participants[&participant].source;
-            let encoded = Frame::audio(&AudioFrame { source, ..frame }).encode();
+            // The relayed frame is the size of the frame received, which was within the limit.
+            let Ok(encoded) = Frame::audio(&AudioFrame { source, ..frame }).try_encode() else {
+                return;
+            };
             if let Some(space) = state.space(&space) {
                 for other in &space.model.participants {
                     if *other != participant
@@ -833,7 +858,7 @@ impl Hub {
                 &record.participant,
                 ServerMessage::Transcript {
                     utterance: record.client.clone(),
-                    text: text.to_owned(),
+                    text: limits::truncate(text, limits::QUEUED_TEXT_BYTES),
                     finished: false,
                 },
             );
@@ -848,12 +873,19 @@ impl Hub {
         let text = text.trim();
         let failure = if text.is_empty() {
             Some("Nothing was heard, so nothing was sent.")
+        } else if text.len() > limits::QUEUED_TEXT_BYTES {
+            Some("The recording was too long, so nothing was sent. Please say it in shorter parts.")
         } else if state
             .participants
             .get(&record.participant)
             .is_none_or(|participant| participant.space.as_deref() != Some(&record.space))
         {
             Some("You left the space before the transcript was ready, so nothing was sent.")
+        } else if state
+            .space(&record.space)
+            .is_some_and(|space| space.model.waiting() >= limits::QUEUED_ENTRIES)
+        {
+            Some("The queue is full, so nothing was sent. Please wait for the agent to catch up.")
         } else {
             None
         };
@@ -1055,7 +1087,10 @@ impl Hub {
     /// Send one agent speech frame to the space's current participants. A participant who joined mid-segment receives from here on.
     #[cfg_attr(not(feature = "speech"), allow(dead_code))]
     pub(crate) fn agent_audio(&self, space: &str, frame: &AudioFrame) {
-        let encoded = Frame::audio(frame).encode();
+        let Ok(encoded) = Frame::audio(frame).try_encode() else {
+            log::warn!("An agent speech frame for {space} exceeds the frame limit.");
+            return;
+        };
         let state = self.lock();
         let Some(record) = state.space(space) else {
             return;
@@ -1088,19 +1123,21 @@ impl Hub {
                 let (_, space) = state.member(connection)?;
                 let space = state.space(&space?)?;
                 let participants = state.participants(&space.model);
+                let mut state = space.model.state(participants);
+                limits::fit_state(&mut state);
                 Some(ServerMessage::Space {
-                    state: Box::new(space.model.state(participants)),
+                    state: Box::new(state),
                 })
             }
             Outgoing::Spaces => {
                 let state = self.lock();
-                Some(ServerMessage::Spaces {
-                    spaces: state
-                        .spaces
-                        .iter()
-                        .map(|space| space.model.summary())
-                        .collect(),
-                })
+                let mut spaces: Vec<_> = state
+                    .spaces
+                    .iter()
+                    .map(|space| space.model.summary())
+                    .collect();
+                limits::fit_spaces(&mut spaces);
+                Some(ServerMessage::Spaces { spaces })
             }
         }
     }

@@ -16,6 +16,11 @@ The server advertises itself on the local network with DNS service discovery ove
 
 Wire types are defined once in a shared protocol crate used by both the server and native clients.
 
+No frame exceeds the protocol's frame limit (`MAX_FRAME_BYTES`, 1 MiB), which every receiver enforces. Encoding a larger frame is an error rather than a corrupt or oversized frame, and the server never panics on it.
+
+- The server bounds the strings that clients supply when they arrive: participant identity and display name, space title, directory and session, utterance identifiers, answer text and queued transcripts. It also bounds how many entries wait in a space's queue. A value over its limit is rejected with a short error that names the field but does not repeat the value; the error replies of the server never repeat unbounded client input, and are themselves cut to a fixed length.
+- Space snapshots and the lobby listing are kept within a byte budget of a quarter of the frame limit (256 KiB of JSON), because they also carry agent output. A snapshot over budget drops its oldest messages first, then cuts the newest message text with a visible marker, then drops finished queue entries, cuts approval and question text and drops the oldest workers. A listing over budget shortens long directories to their final part, then leaves out the oldest spaces. What remains is bounded by the input limits and the connection limit.
+
 Clients connect over the local network; a USB connection is not required. Authentication is not an initial requirement. It will be added later, likely as tokens carried in cookies or authorization headers; until then, anyone who can reach the server on the local network can join a space. Whether local network traffic is encrypted is not yet decided. The server exposes no generic filesystem, shell or session-deletion operations and never sends model credentials to clients.
 
 ## Rationale
@@ -34,3 +39,4 @@ The server crate, the protocol crate, the shared client crate and network config
 - Test that a running server is found by browsing for `_tomori._tcp`, with its protocol version and name, and that it disappears from the list when it stops. On a Quest, confirm that the server list populates on the same Wi-Fi network.
 - Over UDP, test that an isolated lost packet is recovered by error correction, that an unrecovered `agent` frame is requested again, and that playback continues without waiting for it.
 - Review the protocol for operations outside the listed responsibilities.
+- Test that oversized client strings are rejected without being repeated, that a large conversation and a large lobby listing arrive within the snapshot budget, and that encoding an oversized frame fails without producing it.

@@ -84,15 +84,37 @@ impl Frame {
         }
     }
 
-    /// Append the encoded frame to `output`.
-    pub fn encode_into(&self, output: &mut Vec<u8>) {
-        debug_assert!(self.payload.len() <= MAX_FRAME_BYTES);
+    /// Append the encoded frame to `output`, or return [`FrameError::TooLarge`] without changing `output` if the payload exceeds [`MAX_FRAME_BYTES`], which no peer would accept.
+    pub fn try_encode_into(&self, output: &mut Vec<u8>) -> Result<(), FrameError> {
+        if self.payload.len() > MAX_FRAME_BYTES {
+            return Err(FrameError::TooLarge(self.payload.len()));
+        }
         output.reserve(HEADER_BYTES + self.payload.len());
         output.push(self.kind as u8);
         output.extend_from_slice(&(self.payload.len() as u32).to_le_bytes());
         output.extend_from_slice(&self.payload);
+        Ok(())
     }
 
+    /// The encoded frame, or [`FrameError::TooLarge`] if the payload exceeds [`MAX_FRAME_BYTES`].
+    pub fn try_encode(&self) -> Result<Vec<u8>, FrameError> {
+        let mut output = Vec::new();
+        self.try_encode_into(&mut output)?;
+        Ok(output)
+    }
+
+    /// Append the encoded frame to `output`.
+    ///
+    /// # Panics
+    ///
+    /// If the payload exceeds [`MAX_FRAME_BYTES`]. Use this only where the payload is bounded by construction; otherwise use [`try_encode_into`](Self::try_encode_into). An oversized frame is never produced.
+    pub fn encode_into(&self, output: &mut Vec<u8>) {
+        if let Err(error) = self.try_encode_into(output) {
+            panic!("{error}");
+        }
+    }
+
+    /// The encoded frame. Panics like [`encode_into`](Self::encode_into).
     pub fn encode(&self) -> Vec<u8> {
         let mut output = Vec::new();
         self.encode_into(&mut output);
@@ -237,6 +259,30 @@ mod tests {
         decoder.push(&[0, 4, 0, 0, 0, b'{']);
         assert!(decoder.next_frame().unwrap().is_none());
         assert!(matches!(decoder.finish(), Err(FrameError::Truncated)));
+    }
+
+    #[test]
+    fn oversized_payloads_are_never_encoded() {
+        let frame = Frame {
+            kind: FrameKind::Control,
+            payload: vec![b' '; MAX_FRAME_BYTES + 1],
+        };
+        let mut output = vec![1, 2, 3];
+        assert!(matches!(
+            frame.try_encode_into(&mut output),
+            Err(FrameError::TooLarge(length)) if length == MAX_FRAME_BYTES + 1
+        ));
+        assert_eq!(output, [1, 2, 3]);
+        assert!(std::panic::catch_unwind(|| frame.encode()).is_err());
+
+        let largest = Frame {
+            kind: FrameKind::Control,
+            payload: vec![b' '; MAX_FRAME_BYTES],
+        };
+        assert_eq!(
+            largest.try_encode().unwrap().len(),
+            HEADER_BYTES + MAX_FRAME_BYTES
+        );
     }
 
     #[test]
