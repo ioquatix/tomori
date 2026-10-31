@@ -658,6 +658,24 @@ fn dropping_a_session_stops_the_agents_tools() {
     });
 }
 
+#[cfg(unix)]
+#[test]
+fn closes_promptly_when_a_stray_process_holds_the_output() {
+    run(|| async {
+        let fixture = Fixture::new("stray");
+        let started = std::time::Instant::now();
+        let session = fixture.create().await;
+        let events = events_until(&session, |event| matches!(event, Event::Closed { .. })).await;
+        let elapsed = started.elapsed();
+        let children = fixture.children(1).await;
+        unsafe { libc::kill(children[0] as libc::pid_t, libc::SIGKILL) };
+
+        // Output written before the exit is still reported.
+        assert_eq!(events, vec![Event::Busy, Event::Closed { reason: None }]);
+        assert!(elapsed < Duration::from_secs(4), "closing took {elapsed:?}");
+    });
+}
+
 #[test]
 fn lists_and_attaches_sessions() {
     run(|| async {

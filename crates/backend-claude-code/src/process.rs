@@ -22,20 +22,25 @@ use std::time::Duration;
 /// How many trailing lines of standard error are kept to explain an unexpected exit.
 const STDERR_LINES: usize = 8;
 
+/// How long output may keep arriving after the process exits. A process the agent started can inherit its standard
+/// output and hold it open long after the agent has gone.
+const OUTPUT_DRAIN_LIMIT: Duration = Duration::from_secs(1);
+
 /// Output from the child process, in order per pipe.
 #[derive(Debug)]
 pub(crate) enum Output {
     /// One line of standard output, without the line terminator.
     Line(String),
-    /// Standard output reached end of file.
-    Eof,
-    /// The process exited and has been reaped.
+    /// The process exited and has been reaped, and its standard output was read to the end or for
+    /// [`OUTPUT_DRAIN_LIMIT`].
     Exited(ExitStatus),
 }
 
 struct Status {
     child: Child,
     exited: Option<ExitStatus>,
+    /// Standard output has reached end of file.
+    stdout_closed: bool,
 }
 
 struct Shared {
@@ -99,6 +104,7 @@ impl Process {
             status: Mutex::new(Status {
                 child,
                 exited: None,
+                stdout_closed: false,
             }),
             changed: Condvar::new(),
         });
@@ -109,9 +115,14 @@ impl Process {
             .spawn(move || write_lines(stdin, lines))?;
 
         let output = sink.clone();
+        let closed = shared.clone();
         thread::Builder::new()
             .name("claude-stdout".into())
-            .spawn(move || read_lines(stdout, &*output))?;
+            .spawn(move || {
+                read_lines(stdout, &*output);
+                closed.status.lock().unwrap().stdout_closed = true;
+                closed.changed.notify_all();
+            })?;
 
         let tail = Arc::new(Mutex::new(VecDeque::new()));
         let errors = tail.clone();
@@ -125,6 +136,7 @@ impl Process {
             .name("claude-reaper".into())
             .spawn(move || {
                 let status = reap(pid, &reaped);
+                drain(&reaped);
                 sink(Output::Exited(status));
                 // Closing the channel wakes every task waiting for the exit.
                 drop(notify);
@@ -262,7 +274,6 @@ fn read_lines(stdout: impl Read, sink: &dyn Fn(Output)) {
             }
         }
     }
-    sink(Output::Eof);
 }
 
 fn keep_tail(stderr: impl Read, tail: &Mutex<VecDeque<String>>) {
@@ -274,6 +285,16 @@ fn keep_tail(stderr: impl Read, tail: &Mutex<VecDeque<String>>) {
         }
         tail.push_back(line);
     }
+}
+
+/// Wait a bounded time for standard output to reach end of file, so that every line is delivered before the exit is
+/// reported.
+fn drain(shared: &Shared) {
+    let status = shared.status.lock().unwrap();
+    let _ = shared
+        .changed
+        .wait_timeout_while(status, OUTPUT_DRAIN_LIMIT, |status| !status.stdout_closed)
+        .unwrap();
 }
 
 /// Wait until the process has exited, then reap it under the status lock.

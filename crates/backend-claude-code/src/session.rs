@@ -22,7 +22,6 @@ enum Input {
 
 #[derive(Default)]
 struct Lifecycle {
-    eof: bool,
     exit: Option<ExitStatus>,
     /// [`Event::Closed`] has been queued; nothing follows it.
     closed: bool,
@@ -87,6 +86,10 @@ impl ClaudeCodeSession {
     }
 
     fn receive(&self, input: Input) {
+        // Output can outlive the process when something it started holds the pipe open; nothing follows `Closed`.
+        if self.lifecycle.lock().unwrap().closed {
+            return;
+        }
         let events = match input {
             Input::Local(event) => vec![event],
             Input::Process(Output::Line(line)) => {
@@ -96,10 +99,6 @@ impl ClaudeCodeSession {
                 }
                 effects.events
             }
-            Input::Process(Output::Eof) => {
-                self.lifecycle.lock().unwrap().eof = true;
-                self.finish()
-            }
             Input::Process(Output::Exited(status)) => {
                 self.lifecycle.lock().unwrap().exit = Some(status);
                 self.finish()
@@ -108,15 +107,12 @@ impl ClaudeCodeSession {
         self.events.lock().unwrap().extend(events);
     }
 
-    /// The closing event, once the process has exited and all of its output has been handled.
+    /// The closing event, once the process has exited. Its output was drained first, so every line has been handled.
     fn finish(&self) -> Vec<Event> {
         let mut lifecycle = self.lifecycle.lock().unwrap();
         let Some(status) = lifecycle.exit else {
             return Vec::new();
         };
-        if !lifecycle.eof || lifecycle.closed {
-            return Vec::new();
-        }
         lifecycle.closed = true;
 
         let reason = if self.closing.load(Ordering::SeqCst) || status.success() {
