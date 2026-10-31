@@ -1,6 +1,6 @@
 # Clients
 
-This describes the target layout of Tomori clients. The headset and desktop application still lives in the root `tomori` package; it moves to `crates/client-quest` when it switches from `bridge/` to the new server.
+This describes the layout of Tomori clients. The headset and desktop application is `crates/client-quest`; it is switching from `bridge/` to the new server.
 
 ## Requirement
 
@@ -12,7 +12,7 @@ Each kind of hardware or output has its own client implementation in a separate 
 
 The protocol stays device-neutral. A client reports optional capabilities, such as hand tracking or controllers, through its messages; the server never branches on which hardware a participant uses.
 
-The root package becomes a workspace manifest once the headset application moves.
+The root manifest only defines the workspace and its build profiles; it has no package.
 
 ## Rationale
 

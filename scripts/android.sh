@@ -12,7 +12,7 @@ case "$command" in
     build|run)
         if [[ ! -s android/libs/arm64-v8a/libopenxr_loader.so ]]; then bash scripts/fetch-loader.sh; fi
         cargo metadata --locked --format-version 1 --no-deps > /dev/null
-        cargo apk build --lib
+        cargo apk build -p client-quest --lib
         if [[ "$command" == run ]]; then
             adb install -r target/debug/apk/tomori.apk
             adb reverse tcp:8765 "tcp:${TOMORI_BRIDGE_PORT:-8765}"

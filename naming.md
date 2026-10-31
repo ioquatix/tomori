@@ -26,7 +26,7 @@ Recheck before publication; this is not a trademark or wider availability check.
 
 The public repository uses `ioquatix/tomori`. Technical names now match:
 
-- Rust package, library and executable: `tomori`.
+- Rust package: `client-quest` (in `crates/client-quest`); library and executable: `tomori`.
 - Android application ID: `io.github.ioquatix.tomori`; label: **Tomori**;
   APK: `tomori.apk`.
 - Node bridge package: `tomori-opencode-bridge`.
