@@ -131,6 +131,9 @@ impl Connection {
         if !browsing {
             if self.browser.take().is_some() {
                 self.multicast.set_held(false);
+                // A new browser reports only the servers it finds, not those that vanished while it was stopped.
+                self.servers = discovery::Servers::new();
+                self.changed = true;
             }
             return;
         }
