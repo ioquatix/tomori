@@ -291,6 +291,8 @@ fn synthesis(server: Server, _root: Option<&Path>) -> Server {
 }
 
 fn main() -> ExitCode {
+    // Log to standard error, at info and above unless `RUST_LOG` says otherwise.
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     let arguments = match parse(std::env::args().skip(1)) {
         Ok(arguments) => arguments,
         Err(message) => {
@@ -367,7 +369,15 @@ fn main() -> ExitCode {
             .run(&scheduler, listener, &cancellation)
             .await
             .map(|_| ())
-            .map_err(|error| format!("The server failed: {error}"))
+            .map_err(|error| {
+                let mut message = format!("The server failed: {error}");
+                let mut source = std::error::Error::source(&error);
+                while let Some(cause) = source {
+                    message.push_str(&format!(": {cause}"));
+                    source = cause.source();
+                }
+                message
+            })
     });
     block_on(scheduler.shutdown());
     match result {

@@ -50,6 +50,7 @@ base-http-server = "0.2.0"
 base-scheduler = "0.3.0"
 base-scheduler-direct = "0.3.0"
 discovery = { path = "../discovery" }
+env_logger = "0.11"
 event-listener = "5"
 futures-lite = "2"
 futures-util = { version = "0.3", default-features = false, features = ["alloc", "async-await"] }

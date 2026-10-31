@@ -29,7 +29,7 @@ pub struct Admission {
 
 /// One connection's progress.
 pub struct Watch {
-    /// When the connection became idle, as first seen by a sweep, or `None` while a request is being served.
+    /// When the connection became idle, as first seen by a sweep, or the request being served.
     idle: Mutex<Idle>,
     /// Ends only this connection.
     cancellation: Cancellation,
@@ -39,12 +39,26 @@ enum Idle {
     /// Idle, and not yet seen by a sweep.
     Unseen,
     Since(Instant),
-    Serving,
+    /// Serving a request, named by its method and the start of its path.
+    Serving(String),
 }
+
+/// The most characters of a request path kept to name the request in logs.
+const LOGGED_PATH: usize = 64;
 
 impl Watch {
     fn set(&self, idle: Idle) {
         *self.idle.lock().expect("the watch is never left poisoned") = idle;
+    }
+
+    /// What the connection was last seen doing, for logs.
+    pub fn state(&self) -> String {
+        match &*self.idle.lock().expect("the watch is never left poisoned") {
+            Idle::Unseen | Idle::Since(_) => {
+                "waiting for a request or closing after a response".to_owned()
+            }
+            Idle::Serving(request) => format!("serving {request}"),
+        }
     }
 }
 
@@ -83,7 +97,7 @@ impl Admission {
                         expired.push(watch.cancellation.clone());
                         return false;
                     }
-                    Idle::Since(_) | Idle::Serving => {}
+                    Idle::Since(_) | Idle::Serving(_) => {}
                 }
                 true
             });
@@ -117,7 +131,11 @@ impl Handler for Admitted<'_> {
         cancellation: &Cancellation,
     ) -> Result<Response<Self::Body<B>>, Infallible> {
         // The request head is complete.
-        self.watch.set(Idle::Serving);
+        let path = request.path.as_ref().map_or("", |path| path.as_str());
+        let path = path.split('?').next().unwrap_or_default();
+        let path: String = path.chars().take(LOGGED_PATH).collect();
+        self.watch
+            .set(Idle::Serving(format!("{} {path}", request.method)));
         let response = self
             .application
             .call(request, interim, cancellation)
