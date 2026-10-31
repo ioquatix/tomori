@@ -213,8 +213,8 @@ fn a_refused_directory_holds_no_place_while_it_is_checked() {
     let server = start(FakeBackend::new(), &[&root], 1);
     let mut ada = server.connect("ada", "Ada");
     let missing = format!("{}/missing", root.to_str().unwrap());
-    // Sent together, so the refused requests are still being checked when the allowed one arrives.
-    for _ in 0..10 {
+    // Sent together, so the refused requests are still being checked when the allowed one arrives. Fewer missing paths than the limit on running checks, which would refuse the allowed one too.
+    for _ in 0..server::MAX_RESOLVING / 2 {
         create(&mut ada, "Refused", "/", None);
         create(&mut ada, "Refused", &missing, None);
     }
