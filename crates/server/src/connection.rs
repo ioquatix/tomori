@@ -112,6 +112,7 @@ fn encode(message: &ServerMessage, output: &mut Vec<u8>) {
         log::error!("A server message was not sent: {error}.");
         Frame::server(&ServerMessage::Error {
             error: "A message from the server was too large to send.".to_owned(),
+            space: None,
         })
         .encode_into(output);
     }

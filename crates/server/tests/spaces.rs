@@ -17,11 +17,50 @@ use server::test_support::{TIMEOUT, TestClient, TestServer, TextTranscriber, spe
 fn errors_within(client: &TestClient, window: Duration) -> Vec<String> {
     let mut errors = Vec::new();
     while let Some(message) = client.next_message(window) {
-        if let ServerMessage::Error { error } = message {
+        if let ServerMessage::Error { error, .. } = message {
             errors.push(error);
         }
     }
     errors
+}
+
+#[test]
+fn space_identifiers_are_not_reused_by_a_later_server_run() {
+    // A client restores its space by identifier after a reconnect, so a restarted server must not hand that identifier to an unrelated space.
+    let first = TestServer::start();
+    let mut ada = first.connect("ada", "Ada");
+    let earlier = ada.create_space("Earlier").id;
+    let second = TestServer::start();
+    let mut ada = second.connect("ada", "Ada");
+    let later = ada.create_space("Later").id;
+    assert_ne!(earlier, later);
+    ada.send(&ClientMessage::Join { space: earlier });
+    assert_eq!(ada.error(), "That space does not exist.");
+}
+
+#[test]
+fn a_refused_join_names_the_space() {
+    let server = TestServer::start();
+    let mut ada = server.connect("ada", "Ada");
+    ada.send(&ClientMessage::Join {
+        space: "space-missing".into(),
+    });
+    let (error, space) = ada.wait_for(|message| match message {
+        ServerMessage::Error { error, space } => Some((error.clone(), space.clone())),
+        _ => None,
+    });
+    assert_eq!(error, "That space does not exist.");
+    assert_eq!(space.as_deref(), Some("space-missing"));
+
+    // Other errors name no space.
+    ada.send(&ClientMessage::CancelQueued {
+        entry: "nothing".into(),
+    });
+    let space = ada.wait_for(|message| match message {
+        ServerMessage::Error { space, .. } => Some(space.clone()),
+        _ => None,
+    });
+    assert_eq!(space, None);
 }
 
 /// Join `space` and wait until the snapshot lists `count` participants.
@@ -976,7 +1015,7 @@ fn leaving_right_after_hello_overrides_the_rejoin() {
     carol.wait_for(|message| matches!(message, ServerMessage::Left).then_some(()));
     carol.wait_for(|message| match message {
         ServerMessage::Spaces { .. } => Some(()),
-        ServerMessage::Error { error } => panic!("leaving the lobby failed: {error}"),
+        ServerMessage::Error { error, .. } => panic!("leaving the lobby failed: {error}"),
         _ => None,
     });
 }

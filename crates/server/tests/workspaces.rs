@@ -145,7 +145,7 @@ fn concurrent_creates_cannot_pass_the_space_limit() {
         .filter_map(|client| {
             let mut found = None;
             while let Some(message) = client.next_message(Duration::from_millis(300)) {
-                if let ServerMessage::Error { error } = message {
+                if let ServerMessage::Error { error, .. } = message {
                     found = Some(error);
                 }
             }
@@ -177,7 +177,7 @@ fn concurrent_creates_cannot_pass_the_space_limit() {
         create(&mut dave, "Again", &directory, None);
         let created = dave.wait_for(|message| match message {
             ServerMessage::Space { state } if state.title == "Again" => Some(true),
-            ServerMessage::Error { error } if error.contains("limit") => Some(false),
+            ServerMessage::Error { error, .. } if error.contains("limit") => Some(false),
             _ => None,
         });
         if created {
@@ -221,8 +221,8 @@ fn a_refused_directory_holds_no_place_while_it_is_checked() {
     create(&mut ada, "Allowed", root.to_str().unwrap(), None);
     ada.wait_for(|message| match message {
         ServerMessage::Space { state } if state.title == "Allowed" => Some(()),
-        ServerMessage::Error { error } if error == DIRECTORY_UNAVAILABLE => None,
-        ServerMessage::Error { error } => panic!("the allowed space was refused: {error}"),
+        ServerMessage::Error { error, .. } if error == DIRECTORY_UNAVAILABLE => None,
+        ServerMessage::Error { error, .. } => panic!("the allowed space was refused: {error}"),
         _ => None,
     });
 }

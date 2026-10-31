@@ -334,6 +334,7 @@ fn times_out_when_the_server_does_not_respond() {
 fn requires_welcome_first_and_only_once() {
     let refusal = raw::message(&ServerMessage::Error {
         error: "full".into(),
+        space: None,
     });
     let (reason, _) = raw_disconnect(Some(refusal), TIMEOUT);
     assert_eq!(

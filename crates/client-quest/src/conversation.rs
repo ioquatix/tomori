@@ -208,7 +208,7 @@ impl Conversation {
                     }
                 }
             }
-            ServerMessage::Error { error } => {
+            ServerMessage::Error { error, .. } => {
                 log::warn!("Server error: {error}");
                 let rejoining = self.mode == Mode::Space
                     && self.joining.is_some()
@@ -1058,6 +1058,7 @@ mod tests {
         conversation.take_actions();
         conversation.apply(Event::Message(ServerMessage::Error {
             error: "That request is no longer pending.".into(),
+            space: None,
         }));
         assert!(conversation.is_choosing());
         assert!(conversation.text().contains("ERROR: That request"));
@@ -1186,6 +1187,7 @@ mod tests {
         conversation.apply(connected());
         conversation.apply(Event::Message(ServerMessage::Error {
             error: "That space does not exist.".into(),
+            space: None,
         }));
         assert_eq!(conversation.mode(), Mode::Lobby);
         assert_eq!(sent(&mut conversation), [ClientMessage::ListSpaces]);
@@ -1197,6 +1199,7 @@ mod tests {
         let mut conversation = joined(|_| {});
         conversation.apply(Event::Message(ServerMessage::Error {
             error: "That approval was already decided.".into(),
+            space: None,
         }));
         assert_eq!(conversation.mode(), Mode::Space);
     }

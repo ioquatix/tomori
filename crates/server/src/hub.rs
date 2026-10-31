@@ -80,6 +80,8 @@ pub struct Hub {
 struct HubState {
     next_connection: ConnectionId,
     next_source: u32,
+    /// Random for each server run and part of every space identifier, so a client restoring a space from an earlier run never joins an unrelated space that reused its number.
+    run: String,
     next_space: u64,
     next_utterance: u64,
     next_ping: u64,
@@ -194,9 +196,23 @@ enum Deferred {
 }
 
 /// An error reply, cut to [`limits::ERROR_BYTES`].
+/// 64 random bits as hexadecimal. `RandomState` is seeded from the operating system's random source.
+fn run_token() -> String {
+    use std::hash::{BuildHasher, Hasher};
+    let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+    hasher.write_u128(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos(),
+    );
+    format!("{:016x}", hasher.finish())
+}
+
 fn error_message(error: impl Into<String>) -> ServerMessage {
     ServerMessage::Error {
         error: limits::truncate(&error.into(), limits::ERROR_BYTES),
+        space: None,
     }
 }
 
@@ -402,7 +418,10 @@ impl Hub {
         slots: Arc<SpaceSlots>,
     ) -> Arc<Self> {
         Arc::new_cyclic(|this| Self {
-            state: Mutex::new(HubState::default()),
+            state: Mutex::new(HubState {
+                run: run_token(),
+                ..HubState::default()
+            }),
             backends,
             transcriber,
             jobs,
@@ -807,8 +826,21 @@ impl Hub {
                 }
             }
             ClientMessage::Join { space: target } => {
+                if let Err(error) =
+                    limits::check(&target, limits::IDENTIFIER_BYTES, "space identifier")
+                {
+                    state.error(participant, error);
+                    return;
+                }
                 if state.space(&target).is_none() {
-                    state.error(participant, "That space does not exist.");
+                    // Naming the space lets the client tell this refusal from other errors; it is bounded above.
+                    state.send(
+                        participant,
+                        ServerMessage::Error {
+                            error: "That space does not exist.".to_owned(),
+                            space: Some(target),
+                        },
+                    );
                     return;
                 }
                 state.join(participant, &target);
@@ -1220,7 +1252,7 @@ impl Hub {
             return None;
         }
         state.next_space += 1;
-        let id = format!("space-{}", state.next_space);
+        let id = format!("space-{}-{}", state.run, state.next_space);
         let model = SpaceModel::new(
             id.clone(),
             request.title.clone(),
