@@ -209,20 +209,23 @@ no open microphone for talking to other participants without the agent yet (see
 [design/speech.md](design/speech.md) and
 [design/live-audio.md](design/live-audio.md)).
 
-Recognition runs on the server with Whisper `small.en`, which needs Python 3
-and about 700 MB in `.tools/`. From the repository root:
+Recognition and synthesis run inside the server through sherpa-onnx, whose
+libraries are downloaded and linked when the server is built. Recognition uses
+a streaming transducer that shows words while you speak; synthesis uses Kokoro.
+The models need about 520 MB in `.tools/`. From the repository root:
 
 ```sh
-bash scripts/setup-pc-transcription.sh
+bash scripts/fetch-asr-model.sh
+bash scripts/fetch-tts-model.sh
 cargo run -p server --bin tomori-server -- --backend claude-code --speech-root .
 ```
 
-Whisper uses CUDA on Linux when it is available, and the CPU elsewhere,
-including macOS. Without `--speech-root`, or if Whisper can't start, every
-utterance fails with an error that says so. Replies are spoken with Kokoro,
-which needs another 700 MB; without it the server says "Speech synthesis: off"
-or "unavailable" when it starts, and replies are only shown. See
-[crates/speech/worker/readme.md](crates/speech/worker/readme.md).
+Speech runs on the CPU, including on macOS; see
+[crates/speech/readme.md](crates/speech/readme.md) for CUDA on Linux. Without
+`--speech-root`, or if the recognition model can't load, every utterance fails
+with an error that says so. Replies are spoken with Kokoro, which needs another
+700 MB; without it the server says "Speech synthesis: off" or "unavailable" when
+it starts, and replies are only shown.
 
 ## PC spectator and live audio (prototype)
 
