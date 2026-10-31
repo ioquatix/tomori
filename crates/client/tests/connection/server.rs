@@ -140,8 +140,13 @@ impl<B: ReadableBody> Session<B> {
                     ClientMessage::ListSpaces => {
                         self.reply(ServerMessage::Spaces { spaces: Vec::new() })
                     }
+                    ClientMessage::Ping { nonce } => self.reply(ServerMessage::Pong { nonce }),
                     // A test hook: end the response, which disconnects the client.
                     ClientMessage::Answer { text, .. } if text == "kick" => self.ended = true,
+                    // A test hook: ping the client, which answers with a Pong.
+                    ClientMessage::Answer { text, .. } if text == "ping" => {
+                        self.reply(ServerMessage::Ping { nonce: 7 })
+                    }
                     _ => {}
                 }
             }

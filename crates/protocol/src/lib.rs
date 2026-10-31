@@ -10,11 +10,13 @@
 
 mod audio;
 mod frame;
+mod keepalive;
 mod message;
 mod space;
 
 pub use audio::{AGENT_SOURCE, AUDIO_HEADER_BYTES, AudioError, AudioFrame, Gate};
 pub use frame::{Frame, FrameDecoder, FrameError, FrameKind, MAX_FRAME_BYTES};
+pub use keepalive::Keepalive;
 pub use message::{ClientMessage, Decision, Pose, ServerMessage};
 pub use space::{
     Activity, Approval, Message, Participant, Presentation, PresentationKind, Question, QueueEntry,

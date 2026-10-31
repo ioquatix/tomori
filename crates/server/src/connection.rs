@@ -3,6 +3,8 @@
 
 use std::pin::{Pin, pin};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::task::{Poll, Waker};
 
 use base_http::body::{BodyError, BodyFrame, ReadableBody};
 use base_scheduler::Cancellation;
@@ -14,6 +16,9 @@ use crate::outbox::{Outbox, Popped};
 
 /// Outgoing data is batched into chunks of about this size when frames are already waiting.
 const CHUNK_TARGET: usize = 64 * 1024;
+
+/// The most request reads applied before each outgoing chunk when both directions are busy.
+const INPUT_READS_PER_OUTPUT: usize = 8;
 
 type ReadResult<B> = Result<BodyFrame<<B as ReadableBody>::Data>, <B as ReadableBody>::Error>;
 
@@ -65,6 +70,8 @@ pub struct ConnectionBody<B: ReadableBody> {
     hub: Arc<Hub>,
     id: ConnectionId,
     outbox: Arc<Outbox>,
+    /// Set whenever request data arrives, for the hub's keepalive sweep.
+    received: Arc<AtomicBool>,
     request: Input<B>,
     decoder: FrameDecoder,
     input_ended: bool,
@@ -72,12 +79,14 @@ pub struct ConnectionBody<B: ReadableBody> {
 }
 
 impl<B: ReadableBody> ConnectionBody<B> {
-    pub fn new(hub: Arc<Hub>, request: B) -> Self {
-        let (id, outbox) = hub.connect();
+    /// `cancellation` must end only this connection's HTTP exchange; the hub cancels it when the connection goes silent. See [`Hub::sweep`].
+    pub fn new(hub: Arc<Hub>, request: B, cancellation: Cancellation) -> Self {
+        let (id, outbox, received) = hub.connect(cancellation);
         Self {
             hub,
             id,
             outbox,
+            received,
             request: Input::Idle(request),
             decoder: FrameDecoder::new(),
             input_ended: false,
@@ -105,6 +114,8 @@ impl<B: ReadableBody> ConnectionBody<B> {
     fn input<D: AsRef<[u8]>>(&mut self, frame: BodyFrame<D>) -> Result<(), BodyError> {
         let end = frame.is_end();
         if let BodyFrame::Data { data, .. } = &frame {
+            // Any data counts as liveness, even part of a frame.
+            self.received.store(true, Ordering::Release);
             self.decoder.push(data.as_ref());
             while let Some(frame) = self.decoder.next_frame().map_err(BodyError::new)? {
                 self.hub.receive(self.id, frame);
@@ -113,6 +124,41 @@ impl<B: ReadableBody> ConnectionBody<B> {
         if end {
             self.decoder.finish().map_err(BodyError::new)?;
             self.input_ended = true;
+        }
+        Ok(())
+    }
+
+    /// The request read in progress, starting one if the body is idle. `None` once the request body is closed.
+    fn reading(&mut self, cancellation: &Cancellation) -> Option<&mut PendingRead<B>> {
+        match std::mem::replace(&mut self.request, Input::Closed) {
+            Input::Idle(request) => Some(
+                self.request
+                    .insert_reading(start_read(request, cancellation.clone())),
+            ),
+            Input::Reading(pending) => Some(self.request.insert_reading(pending)),
+            Input::Closed => None,
+        }
+    }
+
+    /// Apply request data that has already arrived, without waiting. Output is only written when the HTTP server asks for it, so without this a connection whose outbox never empties would never read its input, and would look silent to the keepalive sweep.
+    fn take_ready_input(&mut self, cancellation: &Cancellation) -> Result<(), BodyError> {
+        // Bounded, so that a fast sender cannot starve output either.
+        for _ in 0..INPUT_READS_PER_OUTPUT {
+            if self.input_ended {
+                break;
+            }
+            let Some(pending) = self.reading(cancellation) else {
+                break;
+            };
+            // The read stays in `self.request` if it is not ready; the next real wait polls it again with a real waker.
+            let Poll::Ready((request, result)) = pending
+                .as_mut()
+                .poll(&mut std::task::Context::from_waker(Waker::noop()))
+            else {
+                break;
+            };
+            self.request = Input::Idle(request);
+            self.input(result.map_err(BodyError::new)?)?;
         }
         Ok(())
     }
@@ -150,6 +196,7 @@ impl<B: ReadableBody> ReadableBody for ConnectionBody<B> {
             if self.finished {
                 return Ok(BodyFrame::End);
             }
+            self.take_ready_input(cancellation)?;
             let mut output = Vec::new();
             let open = self.drain(&mut output);
             if !output.is_empty() {
@@ -170,15 +217,9 @@ impl<B: ReadableBody> ReadableBody for ConnectionBody<B> {
             if self.outbox.is_ready() {
                 continue;
             }
-            let pending = match std::mem::replace(&mut self.request, Input::Closed) {
-                Input::Idle(request) => self
-                    .request
-                    .insert_reading(start_read(request, cancellation.clone())),
-                Input::Reading(pending) => self.request.insert_reading(pending),
-                Input::Closed => {
-                    self.finished = true;
-                    return Ok(BodyFrame::End);
-                }
+            let Some(pending) = self.reading(cancellation) else {
+                self.finished = true;
+                return Ok(BodyFrame::End);
             };
             // When outgoing frames win, the read stays pending in `self.request`, so no input is lost.
             let received = match select(pin!(listener), pending).await {

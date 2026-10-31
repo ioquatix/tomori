@@ -1,8 +1,15 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-use protocol::{Activity, ClientMessage, QueueState, Role, ServerMessage};
-use server::test_support::{TIMEOUT, TestServer};
+use std::io::{ErrorKind, Read, Write};
+use std::net::TcpStream;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use protocol::{Activity, ClientMessage, Frame, Gate, Keepalive, QueueState, Role, ServerMessage};
+use server::Server;
+use server::fake::FakeBackend;
+use server::test_support::{TIMEOUT, TestServer, TextTranscriber};
 
 #[test]
 fn health_reports_the_protocol_version() {
@@ -80,4 +87,134 @@ fn ending_the_upload_ends_the_connection() {
     let mut ada = server.connect("ada", "Ada");
     ada.finish();
     assert!(ada.is_closed(TIMEOUT));
+}
+
+#[test]
+fn a_silent_client_is_released_and_keeps_its_identity() {
+    let keepalive = Keepalive {
+        interval: Duration::from_millis(50),
+        timeout: Duration::from_millis(500),
+    };
+    let server = TestServer::with_server(FakeBackend::new(), move |backends| {
+        Server::new(backends, Arc::new(TextTranscriber::default())).with_keepalive(keepalive)
+    });
+    // Ada says hello, creates a space and then sends nothing at all, like a headset that left the network.
+    let mut ada = server.connect("ada", "Ada");
+    let space = ada.create_space("Demo").id;
+    let mut bob = server.connect("bob", "Bob");
+    bob.send(&ClientMessage::Join {
+        space: space.clone(),
+    });
+    bob.space(|state| state.participants.len() == 2);
+
+    // The server answers a ping at once, before anything else it has queued.
+    bob.send(&ClientMessage::Ping { nonce: 42 });
+    let pong = bob.wait_for(|message| match message {
+        ServerMessage::Pong { nonce } => Some(*nonce),
+        _ => None,
+    });
+    assert_eq!(pong, 42);
+
+    // Bob stays live by answering the server's pings; Ada is released from the space.
+    let deadline = Instant::now() + TIMEOUT;
+    loop {
+        assert!(Instant::now() < deadline, "Ada was never released");
+        match bob.next_message(Duration::from_millis(10)) {
+            Some(ServerMessage::Ping { nonce }) => bob.send(&ClientMessage::Pong { nonce }),
+            Some(ServerMessage::Space { state })
+                if state
+                    .participants
+                    .iter()
+                    .all(|participant| participant.id != "ada") =>
+            {
+                break;
+            }
+            _ => {}
+        }
+    }
+    // Ada was pinged before the timeout, and her connection has ended.
+    ada.wait_for(|message| matches!(message, ServerMessage::Ping { .. }).then_some(()));
+    assert!(ada.is_closed(TIMEOUT));
+
+    // Reconnecting keeps her identity and rejoins the space.
+    let again = server.connect("ada", "Ada");
+    assert_eq!(again.source, ada.source);
+    let state = again.space(|state| state.id == space);
+    assert_eq!(state.participants.len(), 2);
+}
+
+/// One HTTP/1.1 chunk carrying `message`.
+fn chunk(message: &ClientMessage) -> Vec<u8> {
+    let frame = Frame::client(message).encode();
+    let mut chunk = format!("{:x}\r\n", frame.len()).into_bytes();
+    chunk.extend(frame);
+    chunk.extend(b"\r\n");
+    chunk
+}
+
+/// Connect Ada over a raw socket, say hello and join `space`, without reading anything.
+fn raw_join(server: &TestServer, space: &str) -> TcpStream {
+    let mut stream = TcpStream::connect(server.address).unwrap();
+    let mut request = format!(
+        "POST {} HTTP/1.1\r\nHost: localhost\r\nContent-Type: {}\r\nTransfer-Encoding: chunked\r\n\r\n",
+        protocol::CONNECT_PATH,
+        protocol::CONTENT_TYPE
+    )
+    .into_bytes();
+    request.extend(chunk(&ClientMessage::Hello {
+        protocol: protocol::PROTOCOL_VERSION,
+        participant: "ada".into(),
+        name: "Ada".into(),
+        credentials: None,
+    }));
+    request.extend(chunk(&ClientMessage::Join {
+        space: space.to_owned(),
+    }));
+    stream.write_all(&request).unwrap();
+    stream
+}
+
+#[test]
+fn a_client_that_stops_reading_is_released_even_while_writes_are_blocked() {
+    let keepalive = Keepalive {
+        interval: Duration::from_millis(50),
+        timeout: Duration::from_millis(500),
+    };
+    let server = TestServer::with_server(FakeBackend::new(), move |backends| {
+        Server::new(backends, Arc::new(TextTranscriber::default())).with_keepalive(keepalive)
+    });
+    let mut bob = server.connect("bob", "Bob");
+    let space = bob.create_space("Demo").id;
+
+    // Ada then neither reads nor writes, so the server's writes to her back up.
+    let mut ada = raw_join(&server, &space);
+    bob.space(|state| state.participants.len() == 2);
+
+    // Bob talks without pause, far beyond what the socket buffers hold, until Ada is released.
+    let deadline = Instant::now() + TIMEOUT;
+    'talking: loop {
+        assert!(Instant::now() < deadline, "Ada was never released");
+        for _ in 0..100 {
+            bob.send_audio(Gate::Live, vec![1; 320]);
+        }
+        while let Some(message) = bob.next_message(Duration::ZERO) {
+            if let ServerMessage::Space { state } = message
+                && state.participants.len() == 1
+            {
+                break 'talking;
+            }
+        }
+    }
+
+    // The server abandoned the blocked write and closed the socket: draining it reaches the end.
+    ada.set_read_timeout(Some(TIMEOUT)).unwrap();
+    let mut buffer = vec![0; 64 * 1024];
+    loop {
+        match ada.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(_) => continue,
+            Err(error) if error.kind() == ErrorKind::ConnectionReset => break,
+            Err(error) => panic!("the server kept the connection open: {error}"),
+        }
+    }
 }

@@ -8,12 +8,12 @@ use std::convert::Infallible;
 use std::future::Future;
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::sync::mpsc::{self, SyncSender};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use base_http::body::{BodyFrame, ReadableBody};
 use base_http::{Method, RequestMetadata};
 use base_http_client::{Client as HttpClient, Endpoint, StreamingResponseBody};
-use base_scheduler::{Cancellation, Clock};
+use base_scheduler::{Cancellation, Clock, Timers};
 use base_scheduler_direct::DirectScheduler;
 use futures_lite::future::{or, zip};
 use protocol::{
@@ -192,21 +192,27 @@ async fn exchange(
             if !response.status.is_success() {
                 return Err(Disconnect::Status(response.status.as_u16()));
             }
+            let received = Cell::new(context.scheduler.now());
             let mut reader = FrameReader {
                 body: &mut response.body,
                 decoder: FrameDecoder::new(),
                 ended: false,
                 lifetime,
+                scheduler: context.scheduler,
+                received: &received,
             };
             let first = context
                 .within(context.options.connect_timeout, reader.next())
                 .await?;
             welcome(context, first)?;
             welcomed.set(true);
-            loop {
-                let frame = reader.next().await?;
-                deliver(context, frame)?;
-            }
+            let frames = async {
+                loop {
+                    let frame = reader.next().await?;
+                    deliver(context, frame)?;
+                }
+            };
+            or(frames, async { Err(keepalive(context, &received).await) }).await
         }
         .await;
         match result {
@@ -215,6 +221,44 @@ async fn exchange(
     };
 
     or(upload, download).await
+}
+
+/// Ping the server whenever nothing has been received for the keepalive interval, and end the connection with [`Disconnect::Timeout`] once nothing has been received for the keepalive timeout. `received` is when data last arrived.
+async fn keepalive(context: &Context<'_>, received: &Cell<Instant>) -> Disconnect {
+    let scheduler = context.scheduler;
+    let keepalive = context.options.keepalive;
+    let mut timer = scheduler.timer();
+    let mut nonce = 0;
+    let mut pinged: Option<Instant> = None;
+    loop {
+        let last = received.get();
+        // Ping once the link has been quiet for an interval, and again each interval after that.
+        let ping_at = match pinged {
+            Some(pinged) if pinged >= last => pinged + keepalive.interval,
+            _ => last + keepalive.interval,
+        };
+        let deadline = ping_at.min(last + keepalive.timeout);
+        // Data arriving meanwhile does not wake this; the next wake simply finds a later deadline.
+        if let Err(error) = scheduler
+            .timer_wait_until(&mut timer, deadline, &Cancellation::never())
+            .await
+        {
+            return transport(error);
+        }
+        let now = scheduler.now();
+        let last = received.get();
+        if now >= last + keepalive.timeout {
+            return Disconnect::Timeout;
+        }
+        if now >= ping_at && now >= last + keepalive.interval {
+            context
+                .shared
+                .outbox
+                .keepalive(ClientMessage::Ping { nonce });
+            nonce = nonce.wrapping_add(1);
+            pinged = Some(now);
+        }
+    }
 }
 
 fn welcome(context: &Context<'_>, frame: Frame) -> Result<(), Disconnect> {
@@ -251,6 +295,12 @@ fn deliver(context: &Context<'_>, frame: Frame) -> Result<(), Disconnect> {
             ServerMessage::Welcome { .. } => {
                 return Err(Disconnect::Protocol("unexpected second welcome".into()));
             }
+            // Keepalive is handled here and not reported: receiving it already counted as liveness.
+            ServerMessage::Ping { nonce } => context
+                .shared
+                .outbox
+                .keepalive(ClientMessage::Pong { nonce }),
+            ServerMessage::Pong { .. } => {}
             message => {
                 match &message {
                     ServerMessage::Space { state } => {
@@ -275,6 +325,9 @@ struct FrameReader<'a, 'scope> {
     decoder: FrameDecoder,
     ended: bool,
     lifetime: &'a Cancellation,
+    scheduler: &'a DirectScheduler,
+    /// When data last arrived: any data counts as liveness, even part of a frame.
+    received: &'a Cell<Instant>,
 }
 
 impl FrameReader<'_, '_> {
@@ -291,6 +344,7 @@ impl FrameReader<'_, '_> {
             }
             self.ended = match self.body.read(self.lifetime).await.map_err(transport)? {
                 BodyFrame::Data { data, end } => {
+                    self.received.set(self.scheduler.now());
                     self.decoder.push(data.as_ref());
                     end
                 }

@@ -5,16 +5,19 @@ use std::future::pending;
 use std::net::SocketAddr;
 use std::pin::pin;
 use std::sync::Arc;
+use std::time::Duration;
 
 use backend::{Backend, Event, Session, SessionSpec, Snapshot};
-use base_http_server::{Options, Statistics};
+use base_http_server::{Error, Statistics};
 use base_scheduler::{
     Cancellation, OperationResult, SocketAccept, SocketBind, SocketClose, SocketListen, SocketOpen,
     SocketReuseAddress, SocketSetOption, SocketStreamReading, SocketStreamWriting, SocketType,
+    Timers,
 };
 use futures_lite::future::zip;
 use futures_util::future::{Either, select};
 use futures_util::stream::{FuturesUnordered, StreamExt};
+use protocol::Keepalive;
 
 use crate::application::Application;
 use crate::backends::{AnySession, Backends};
@@ -24,13 +27,17 @@ use crate::voice::{Voice, Voices};
 
 /// A Tomori server: the HTTP application plus the supervisor that owns every space's backend session.
 ///
-/// [`run`](Self::run) serves until cancelled. All work is owned by that one future: connections are joined by the HTTP server, and space drivers by the supervisor. No detached tasks are created. Speech recognition and synthesis run on the speech crate's own threads, which outlive a space only to finish speech already queued.
+/// [`run`](Self::run) serves until cancelled. All work is owned by that one future: connections, space drivers and the keepalive sweep are joined by it. No detached tasks are created. Speech recognition and synthesis run on the speech crate's own threads, which outlive a space only to finish speech already queued.
 pub struct Server {
     hub: Arc<Hub>,
     jobs: async_channel::Receiver<CreateRequest>,
     application: Application,
     voices: Voices,
+    keepalive: Keepalive,
 }
+
+/// The most connections served at once; further peers wait in the listen backlog.
+const MAX_CONNECTIONS: usize = 256;
 
 /// Open a listening TCP socket.
 pub async fn bind<S>(
@@ -63,7 +70,14 @@ impl Server {
             hub,
             jobs,
             voices: Voices::default(),
+            keepalive: Keepalive::default(),
         }
+    }
+
+    /// Change when quiet connections are pinged and when silent ones are released. See `design/connection-liveness.md`.
+    pub fn with_keepalive(mut self, keepalive: Keepalive) -> Self {
+        self.keepalive = keepalive;
+        self
     }
 
     /// Speak each space's assistant replies with `synthesizer`, shared by every space. Without one, spaces are silent.
@@ -79,21 +93,118 @@ impl Server {
         scheduler: &S,
         listener: S::Socket,
         cancellation: &Cancellation,
-    ) -> Result<Statistics, base_http_server::Error>
+    ) -> Result<Statistics, Error>
+    where
+        S: SocketAccept + SocketStreamReading + SocketStreamWriting + SocketClose + Timers,
+        S::Socket: 'static,
+    {
+        let ((served, ()), ()) = zip(
+            zip(
+                self.serve(scheduler, listener, cancellation),
+                self.supervise(cancellation),
+            ),
+            self.sweep(scheduler, cancellation),
+        )
+        .await;
+        served
+    }
+
+    /// Accept and serve HTTP connections until cancelled.
+    ///
+    /// TODO(upstream): this follows `base_http_server::serve`, which passes every handler one cancellation shared by all connections. The keepalive sweep must end one silent connection, including a response write blocked on a peer that is gone, so each connection here gets its own child cancellation. Use `serve` again once it offers per-connection cancellation.
+    async fn serve<S>(
+        &self,
+        scheduler: &S,
+        listener: S::Socket,
+        cancellation: &Cancellation,
+    ) -> Result<Statistics, Error>
     where
         S: SocketAccept + SocketStreamReading + SocketStreamWriting + SocketClose,
         S::Socket: 'static,
     {
-        let options = Options::default();
-        let serving = base_http_server::serve(
-            scheduler,
-            listener,
-            &self.application,
-            &options,
-            cancellation,
-        );
-        let (served, ()) = zip(serving, self.supervise(cancellation)).await;
-        served
+        let options = base_http_server::Options::default().http1;
+        let connections_cancellation = cancellation.child();
+        let mut connections = FuturesUnordered::new();
+        let mut statistics = Statistics::default();
+        let result: Result<(), Error> = async {
+            loop {
+                if connections.len() == MAX_CONNECTIONS {
+                    let outcome = {
+                        let next = pin!(connections.next());
+                        match select(next, pin!(cancellation.cancelled())).await {
+                            Either::Left((outcome, _)) => outcome,
+                            Either::Right(_) => return Err(Error::Cancelled),
+                        }
+                    };
+                    record(&mut statistics, outcome.expect("connections are waiting"));
+                    continue;
+                }
+                // Keep this accept alive while existing connections complete, so an accepted peer is never discarded.
+                let accepted = {
+                    let mut accept = pin!(scheduler.socket_accept(&listener, cancellation));
+                    loop {
+                        let completed = pin!(async {
+                            if connections.is_empty() {
+                                pending().await
+                            } else {
+                                connections.next().await.expect("connections are waiting")
+                            }
+                        });
+                        match select(accept.as_mut(), completed).await {
+                            Either::Left((accepted, _)) => break accepted,
+                            Either::Right((outcome, _)) => record(&mut statistics, outcome),
+                        }
+                    }
+                };
+                let (socket, _) = accepted.map_err(Error::from)?;
+                statistics.connections += 1;
+                let connection = connections_cancellation.child();
+                let options = &options;
+                connections.push(async move {
+                    base_http_server::serve_connection(
+                        scheduler,
+                        socket,
+                        &self.application,
+                        options,
+                        &connection,
+                    )
+                    .await
+                });
+            }
+        }
+        .await;
+        connections_cancellation.cancel();
+        while let Some(outcome) = connections.next().await {
+            record(&mut statistics, outcome);
+        }
+        scheduler.socket_close(listener).await?;
+        match result {
+            Err(_) if cancellation.is_cancelled() => Ok(statistics),
+            Ok(()) => Ok(statistics),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Run the hub's keepalive sweep until cancelled, often enough that a silent connection is released within a quarter of the keepalive interval after its timeout.
+    async fn sweep<S: Timers>(&self, scheduler: &S, cancellation: &Cancellation) {
+        let period =
+            (self.keepalive.interval.min(self.keepalive.timeout) / 4).max(Duration::from_millis(1));
+        let mut timer = scheduler.timer();
+        loop {
+            let deadline = scheduler.now() + period;
+            match scheduler
+                .timer_wait_until(&mut timer, deadline, cancellation)
+                .await
+            {
+                Ok(()) => self.hub.sweep(scheduler.now(), &self.keepalive),
+                Err(error) => {
+                    if !cancellation.is_cancelled() {
+                        log::error!("The keepalive timer failed: {error}");
+                    }
+                    return;
+                }
+            }
+        }
     }
 
     /// Start requested spaces and drive their sessions until cancelled.
@@ -124,6 +235,18 @@ impl Server {
         }
         self.hub.shutdown();
         while spaces.next().await.is_some() {}
+    }
+}
+
+/// Count one finished connection.
+fn record(statistics: &mut Statistics, outcome: Result<u64, Error>) {
+    match outcome {
+        Ok(requests) => statistics.requests += requests,
+        Err(Error::Cancelled) => {}
+        Err(error) => {
+            log::debug!("A connection failed: {error}");
+            statistics.failed_connections += 1;
+        }
     }
 }
 

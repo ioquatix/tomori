@@ -6,7 +6,7 @@ This describes the target design for the Rust server that replaces `bridge/`. Th
 
 The PC server is a Rust program built on `base-http-server`. It replaces the Node bridge and owns spaces, agent backends, speech, live audio routing and the spectator feed.
 
-Each client keeps one long-lived, bidirectional streaming connection to the server. Control messages, events, microphone audio, speech audio and presence are framed over that connection; the server does not require per-action request routes for interactive traffic. Audio frames are self-contained (source, sequence and timing) so that their transport can change without affecting the layers above.
+Each client keeps one long-lived, bidirectional streaming connection to the server. Control messages, events, microphone audio, speech audio and presence are framed over that connection; the server does not require per-action request routes for interactive traffic. Audio frames are self-contained (source, sequence and timing) so that their transport can change without affecting the layers above. Both ends detect a silent peer as described in `connection-liveness.md`.
 
 Initially, audio travels over the same HTTP streaming connection. Later, audio moves to UDP datagrams so that a lost packet is dropped instead of stalling the audio behind it. Over UDP, audio is Opus-encoded with in-band forward error correction, so isolated losses are recovered without a round trip. Transcribed audio must still meet `speech.md`: the server requests any `agent` frame that error correction could not recover, and fails the utterance visibly if the frame does not arrive in time. Live playback never waits for a retransmission.
 

@@ -43,7 +43,7 @@ enum Agent {
 
 /// The outbound queue of one connection. Producers never block; the connection body drains it.
 ///
-/// Control messages go first, then the agent speech stream, then participant audio. The agent speech stream has its own queue so that participant audio never displaces it; see `design/live-audio.md`.
+/// Keepalive messages go first, then control messages, then the agent speech stream, then participant audio. The agent speech stream has its own queue so that participant audio never displaces it; see `design/live-audio.md`.
 #[derive(Default)]
 pub struct Outbox {
     inner: Mutex<Inner>,
@@ -52,6 +52,8 @@ pub struct Outbox {
 
 #[derive(Default)]
 struct Inner {
+    /// `Ping` and `Pong`, which must not wait behind anything else.
+    keepalive: VecDeque<ServerMessage>,
     control: VecDeque<Outgoing>,
     agent: VecDeque<Agent>,
     agent_frames: usize,
@@ -79,6 +81,18 @@ impl Outbox {
     pub fn message(&self, message: ServerMessage) {
         self.update(|inner| {
             inner.control.push_back(Outgoing::Message(message));
+            true
+        });
+    }
+
+    /// A `Ping` or `Pong`, sent before everything already queued.
+    pub fn keepalive(&self, message: ServerMessage) {
+        debug_assert!(matches!(
+            message,
+            ServerMessage::Ping { .. } | ServerMessage::Pong { .. }
+        ));
+        self.update(|inner| {
+            inner.keepalive.push_back(message);
             true
         });
     }
@@ -158,9 +172,12 @@ impl Outbox {
         self.ready.notify(usize::MAX);
     }
 
-    /// The next item: control messages first, then agent speech, then participant audio.
+    /// The next item: keepalive first, then control messages, then agent speech, then participant audio.
     pub fn pop(&self) -> Popped {
         let mut inner = self.inner.lock().unwrap();
+        if let Some(message) = inner.keepalive.pop_front() {
+            return Popped::Control(Outgoing::Message(message));
+        }
         if let Some(item) = inner.control.pop_front() {
             match item {
                 Outgoing::Space => inner.space_pending = false,
@@ -190,6 +207,7 @@ impl Outbox {
     pub fn is_ready(&self) -> bool {
         let inner = self.inner.lock().unwrap();
         inner.closed
+            || !inner.keepalive.is_empty()
             || !inner.control.is_empty()
             || !inner.agent.is_empty()
             || !inner.audio.is_empty()
@@ -232,6 +250,30 @@ mod tests {
         assert!(matches!(outbox.pop(), Popped::Control(Outgoing::Space)));
         outbox.close();
         assert!(matches!(outbox.pop(), Popped::Closed));
+    }
+
+    #[test]
+    fn keepalive_precedes_queued_control_and_audio() {
+        let outbox = Outbox::new();
+        for index in 0..AUDIO_LIMIT {
+            outbox.audio(vec![index as u8]);
+        }
+        outbox.agent_audio(vec![100]);
+        outbox.message(ServerMessage::Left);
+        outbox.keepalive(ServerMessage::Pong { nonce: 1 });
+        outbox.keepalive(ServerMessage::Ping { nonce: 2 });
+        assert!(matches!(
+            outbox.pop(),
+            Popped::Control(Outgoing::Message(ServerMessage::Pong { nonce: 1 }))
+        ));
+        assert!(matches!(
+            outbox.pop(),
+            Popped::Control(Outgoing::Message(ServerMessage::Ping { nonce: 2 }))
+        ));
+        assert!(matches!(
+            outbox.pop(),
+            Popped::Control(Outgoing::Message(ServerMessage::Left))
+        ));
     }
 
     #[test]
