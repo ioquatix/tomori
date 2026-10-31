@@ -1,6 +1,6 @@
 # Speech
 
-This describes the target design for the Rust server that replaces `bridge/`, and for the headset client, which uses it. The current Node bridge differs; changes to it are not reviewed against this document. The headset client sends push-to-talk (`agent`) audio, but does not play audio or offer an open (`live`) microphone yet; that gap is tracked in `readme.md`.
+This describes the target design for the Rust server that replaces `bridge/`, and for the headset client, which uses it. The current Node bridge differs; changes to it are not reviewed against this document. The headset client sends push-to-talk (`agent`) audio and plays other participants and agent speech, but does not offer an open (`live`) microphone yet; that gap is tracked in `readme.md`.
 
 ## Requirement
 
@@ -12,7 +12,7 @@ Speech recognition and synthesis run on the PC server.
 
 **Only speakable text is spoken.** Speakable text is selected from Markdown structure: code blocks, tool output, internal reasoning, raw HTML and Markdown syntax are not spoken, and tables are not read cell by cell. Text whose Markdown structure may still change as more text arrives is held back until it is stable.
 
-**Agent speech is not interrupted by participant input.** Each space has one agent speech stream that every participant receives. Recording, sending or queueing input does not stop, pause or skip it. A participant may mute their own playback locally.
+**Agent speech is not interrupted by participant input.** Each space has one agent speech stream that every participant receives. Recording, sending or queueing input does not stop, pause or skip it. A participant may mute their own playback locally. A client silences its own playback while its participant records push-to-talk, as `live-audio.md` requires, so that the reply is not transcribed as their input; the stream continues meanwhile, and they hear it again, live, when they stop recording.
 
 Only newly produced assistant text is spoken; existing history is not read aloud when joining a space.
 

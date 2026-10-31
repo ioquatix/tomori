@@ -43,6 +43,8 @@ pub enum Mode {
     Unavailable,
     /// Stop reading the request body after Hello, so the client's writes back up.
     Stall,
+    /// Echo each audio frame back attributed to the client itself, as well as to [`ECHO_SOURCE`].
+    EchoToSender,
 }
 
 struct Mini {
@@ -111,6 +113,11 @@ impl<B: ReadableBody> Session<B> {
             FrameKind::Audio => {
                 let mut audio: AudioFrame = frame.to_audio().unwrap();
                 self.record(Received::Audio(audio.sequence));
+                if self.mode == Mode::EchoToSender {
+                    // The client's source is its connection number; see the Welcome below.
+                    audio.source = self.connection;
+                    self.output.push_back(Frame::audio(&audio).encode());
+                }
                 audio.source = ECHO_SOURCE;
                 self.output.push_back(Frame::audio(&audio).encode());
             }

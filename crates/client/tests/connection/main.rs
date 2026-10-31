@@ -151,6 +151,33 @@ fn streams_control_and_audio_in_both_directions_at_once() {
 }
 
 #[test]
+fn audio_attributed_to_this_client_is_never_delivered() {
+    let server = MiniServer::start(localhost(), Mode::EchoToSender);
+    let client = Client::connect(options(server.address)).unwrap();
+    let source = wait_connected(&client);
+    for sequence in 0..5 {
+        client.send_audio(audio(sequence)).unwrap();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let mut received = Vec::new();
+    let deadline = Instant::now() + TIMEOUT;
+    while received.len() < 5 && Instant::now() < deadline {
+        match client.try_audio() {
+            Some(frame) => received.push((frame.source, frame.sequence)),
+            None => std::thread::sleep(Duration::from_millis(5)),
+        }
+    }
+    // Only the copies from another source arrive, and nothing follows them.
+    std::thread::sleep(Duration::from_millis(100));
+    while let Some(frame) = client.try_audio() {
+        received.push((frame.source, frame.sequence));
+    }
+    assert_ne!(source, ECHO_SOURCE);
+    let expected: Vec<_> = (0..5).map(|sequence| (ECHO_SOURCE, sequence)).collect();
+    assert_eq!(received, expected);
+}
+
+#[test]
 fn reconnects_and_restores_the_joined_space_and_gate() {
     let server = MiniServer::start(localhost(), Mode::Normal);
     let client = Client::connect(options(server.address)).unwrap();
