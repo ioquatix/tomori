@@ -272,6 +272,64 @@ fn a_client_that_sends_but_never_reads_is_released() {
     sender.join().unwrap();
 }
 
+#[test]
+fn fragmented_input_is_not_lost_while_output_streams() {
+    let server = TestServer::start();
+    let mut ada = server.connect("ada", "Ada");
+    let space = ada.create_space("Demo").id;
+    let mut bob = server.connect("bob", "Bob");
+    bob.send(&ClientMessage::Join {
+        space: space.clone(),
+    });
+    ada.space(|state| state.participants.len() == 2);
+
+    // Bob talks without pause, so the server keeps streaming audio to Ada and its waits for her input keep losing to outgoing frames.
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let talker = {
+        let stop = stop.clone();
+        std::thread::spawn(move || {
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                for _ in 0..20 {
+                    bob.send_audio(Gate::Live, vec![1; 320]);
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        })
+    };
+
+    // Ada sends numbered pings in small fragments that split chunk headers and frames anywhere, so request reads are dropped part way through both.
+    const COUNT: u64 = 2000;
+    let mut upload = Vec::new();
+    for nonce in 1..=COUNT {
+        upload.extend(chunk(&ClientMessage::Ping { nonce }));
+    }
+    for (index, piece) in upload.chunks(7).enumerate() {
+        ada.write_raw(piece);
+        if index % 16 == 0 {
+            std::thread::sleep(Duration::from_micros(50));
+        }
+    }
+
+    // Every ping is answered in order: no input was lost or reordered.
+    let mut expected = 1;
+    while expected <= COUNT {
+        match ada.next_message(TIMEOUT) {
+            Some(ServerMessage::Pong { nonce }) => {
+                assert_eq!(nonce, expected, "a ping was lost or reordered");
+                expected += 1;
+            }
+            Some(_) => {}
+            None => panic!("timed out waiting for pong {expected}"),
+        }
+    }
+    assert!(
+        ada.next_audio(Duration::ZERO).is_some(),
+        "audio streamed to Ada meanwhile"
+    );
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    talker.join().unwrap();
+}
+
 /// A server whose connections must complete a request head, or say Hello, within `timeout`.
 fn with_request_timeout(timeout: Duration) -> TestServer {
     TestServer::with_server(FakeBackend::new(), move |backends| {
