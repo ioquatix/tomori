@@ -12,13 +12,15 @@ Initially, audio travels over the same HTTP streaming connection. Later, audio m
 
 Whose view the spectator feed shows when a space has several participants is not yet decided.
 
+The server advertises itself on the local network with DNS service discovery over multicast DNS (Bonjour), as service type `_tomori._tcp`, with TXT records for the protocol version and a display name. When a client starts, it browses for that service and lists the servers it finds, so a participant can choose one without typing an address; entering an address manually remains possible. Advertising can be turned off.
+
 Wire types are defined once in a shared protocol crate used by both the server and native clients.
 
-Clients connect over the local network; a USB connection is not required. Authentication is not an initial requirement. It will be added later, likely as tokens carried in cookies or authorization headers; until then, anyone who can reach the server on the local network can join a space. Whether local network traffic is encrypted, and how clients discover the server, is not yet decided. The server exposes no generic filesystem, shell or session-deletion operations and never sends model credentials to clients.
+Clients connect over the local network; a USB connection is not required. Authentication is not an initial requirement. It will be added later, likely as tokens carried in cookies or authorization headers; until then, anyone who can reach the server on the local network can join a space. Whether local network traffic is encrypted is not yet decided. The server exposes no generic filesystem, shell or session-deletion operations and never sends model credentials to clients.
 
 ## Rationale
 
-A single duplex connection per participant keeps the server simple and supports real-time audio in both directions. Sharing one protocol crate prevents the client and server definitions from drifting apart. Local network connections let several headsets share a space without USB cables. Deferring authentication keeps the first server simple; because space participants can approve agent tool use, it must be added before use on untrusted networks. Agreed in the October 2026 design discussion.
+A single duplex connection per participant keeps the server simple and supports real-time audio in both directions. Sharing one protocol crate prevents the client and server definitions from drifting apart. Local network connections let several headsets share a space without USB cables, and discovery lets a headset find the server without typing an address. Deferring authentication keeps the first server simple; because space participants can approve agent tool use, it must be added before use on untrusted networks. Agreed in the October 2026 design discussion.
 
 ## Scope
 
@@ -29,5 +31,6 @@ The server crate, the protocol crate, the shared client crate and network config
 - Inspect dependencies: the server uses `base-http-server`; client and server wire types come from the protocol crate.
 - Test a client session over one connection carrying control messages, events and audio concurrently.
 - Confirm that a headset can connect over the local network without USB.
+- Test that a running server is found by browsing for `_tomori._tcp`, with its protocol version and name, and that it disappears from the list when it stops. On a Quest, confirm that the server list populates on the same Wi-Fi network.
 - Over UDP, test that an isolated lost packet is recovered by error correction, that an unrecovered `agent` frame is requested again, and that playback continues without waiting for it.
 - Review the protocol for operations outside the listed responsibilities.

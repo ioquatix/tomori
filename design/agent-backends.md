@@ -14,6 +14,8 @@ The Claude Code backend drives sessions itself: Tomori starts and owns the `clau
 
 Tomori never approves a tool permission automatically and never changes an agent's persistent permissions, model, agent selection or project configuration.
 
+Sessions run under the user's own agent configuration. Tomori does not override permission modes or rules, so a tool the user's configuration already allows runs without a Tomori approval. Every permission request that does reach Tomori is presented to the space and resolved only by an explicit participant decision.
+
 ## Rationale
 
 Tomori must support multiple agent systems without coupling the protocol, server or headset to one of them. Streaming text from the backend is required to start speech before a reply completes; see `speech.md`. Agreed in the October 2026 design discussion.
