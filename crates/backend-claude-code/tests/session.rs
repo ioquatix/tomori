@@ -403,7 +403,7 @@ fn grants_the_suggested_permissions() {
         let fixture = Fixture::new("grant");
         let session = fixture.create().await;
         session
-            .send(prompt("one", "Touch the marker."))
+            .send(prompt("one", "Run the linter."))
             .await
             .unwrap();
 
@@ -414,22 +414,16 @@ fn grants_the_suggested_permissions() {
         let Some(Event::PermissionRequested(permission)) = events.last() else {
             unreachable!()
         };
-        // The terminal's "don't ask again" row shows the rule and the directory, not the mode change.
+        // The terminal offers to stop asking for the suggested command prefix.
         assert_eq!(
             permission.options,
             vec![PermissionOption {
                 id: "suggestions".into(),
-                grants: vec![
-                    Grant::Rule {
-                        tool: "Bash".into(),
-                        content: Some("touch marker.txt".into()),
-                        scope: GrantScope::Local,
-                    },
-                    Grant::Directory {
-                        path: "/private/tmp/work".into(),
-                        scope: GrantScope::Session,
-                    },
-                ],
+                grants: vec![Grant::Rule {
+                    tool: "Bash".into(),
+                    content: Some("npm run *".into()),
+                    scope: GrantScope::Local,
+                }],
             }]
         );
 
@@ -465,10 +459,9 @@ fn grants_the_suggested_permissions() {
             responses[0]["response"]["response"],
             serde_json::json!({
                 "behavior": "allow",
-                "updatedInput": {"command": "touch marker.txt", "description": "Create marker.txt file with touch"},
+                "updatedInput": {"command": "npm run lint", "description": "Run the lint script"},
                 "updatedPermissions": [
-                    {"type": "addRules", "rules": [{"toolName": "Bash", "ruleContent": "touch marker.txt"}], "behavior": "allow", "destination": "localSettings"},
-                    {"type": "addDirectories", "directories": ["/private/tmp/work"], "destination": "session"},
+                    {"type": "addRules", "rules": [{"toolName": "Bash", "ruleContent": "npm run *"}], "behavior": "allow", "destination": "localSettings"},
                 ],
             })
         );

@@ -7,6 +7,7 @@
 //! knowledge of the process, so it can be tested directly against recorded output.
 
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 
 use backend::{
     AnswerValue, Decision, Error, ErrorKind, Event, Field, FieldKind, FieldOption, Grant,
@@ -27,8 +28,8 @@ const SYNTHETIC_MODEL: &str = "<synthetic>";
 /// The agent-facing reason given when a participant denies a request.
 const DENIED: &str = "The user denied this request.";
 
-/// The id of the one standing option a Claude Code permission can offer: the terminal dialog's "Yes, and don't ask
-/// again" or "Yes, allow all edits during this session" row, which applies the request's permission suggestions.
+/// The id of the one standing option a Claude Code permission can offer: the terminal dialog's standing row, such as
+/// "Yes, and don't ask again for …", which applies the updates that row displays.
 pub(crate) const SUGGESTIONS_OPTION: &str = "suggestions";
 
 /// Tools whose terminal dialog offers to accept edits for the session rather than to add rules.
@@ -46,7 +47,7 @@ pub(crate) struct Effects {
 enum Pending {
     Permission {
         permission: Permission,
-        /// The `permission_suggestions` entries that [`SUGGESTIONS_OPTION`] applies, exactly as Claude Code sent them.
+        /// The permission updates that [`SUGGESTIONS_OPTION`] applies, as the terminal dialog's row would.
         updates: Vec<Value>,
     },
     Question {
@@ -741,80 +742,383 @@ fn control_response(id: &str, response: Value) -> Value {
     })
 }
 
-/// The permission suggestions that the terminal dialog's standing row would apply for this request, as sent, with the
-/// grants they make. Both are empty when the terminal would offer no such row.
+/// The permission updates that the terminal dialog's standing row would apply for this request, with the grants they
+/// make. Both are empty when the terminal would offer no such row.
 ///
-/// As in Claude Code 2.1, the row is withheld when the request sets `suppress_always_allow_rule`. Otherwise the row of
-/// an edit tool applies its `setMode` and `addDirectories` suggestions ("Yes, allow all edits during this session"),
-/// and the row of any other tool applies its `addRules` and `addDirectories` suggestions ("Yes, and don't ask again
-/// for ..."). Other suggestions are not shown in the terminal and are never applied.
+/// This follows the permission dialogs of Claude Code 2.1.311, which build each row from the request's suggestions
+/// and apply only the updates the row displays. Each tool family has its own dialog:
+///
+/// - Bash: one row for the suggested Bash and `Read` rules and directories ("Yes, and allow access to ... and ...
+///   commands"). When the suggestions are Bash rules alone, the terminal instead shows an editable command prefix that
+///   saves one Bash rule to local settings; it is offered here only for a single suggested rule, as that prefix.
+/// - Edit tools: one row that switches to `acceptEdits` for the session, adds the suggested directories for the
+///   session and adds the suggested `Read` rules. A file in a `.claude` folder gets a different row that the terminal
+///   builds itself, which is not offered.
+/// - `Read`: one row for the suggested `Read` rules ("Yes, allow reading from ... during this session").
+/// - `WebFetch`: one row that saves the request's own `domain:` rule to local settings.
+/// - Other tools: one row that saves a rule for the whole tool to local settings, offered when Claude Code suggests
+///   exactly that rule.
+///
+/// No row is offered when the request sets `suppress_always_allow_rule` or `requires_user_interaction`, when a safety
+/// check requires manual approval, or when an organization ceiling or blocked outside reads raised the prompt.
 fn suggestions(tool: &str, request: &Value) -> (Vec<Value>, Vec<Grant>) {
-    if request["suppress_always_allow_rule"].as_bool() == Some(true) {
-        return (Vec::new(), Vec::new());
-    }
-    let Some(suggestions) = request["permission_suggestions"].as_array() else {
-        return (Vec::new(), Vec::new());
-    };
-    let shown: &[&str] = if EDIT_TOOLS.contains(&tool) {
-        &["setMode", "addDirectories"]
-    } else {
-        &["addRules", "addDirectories"]
-    };
+    let updates = standing_row(tool, request).unwrap_or_default();
+    let grants = updates.iter().flat_map(update_grants).collect();
+    (updates, grants)
+}
 
-    let mut updates = Vec::new();
-    let mut grants = Vec::new();
-    for suggestion in suggestions {
-        let Some(kind) = str_field(suggestion, "type").filter(|kind| shown.contains(kind)) else {
-            continue;
-        };
-        let Some(scope) = str_field(suggestion, "destination").and_then(grant_scope) else {
-            continue;
-        };
-        let granted: Option<Vec<Grant>> = match kind {
-            "addRules" if str_field(suggestion, "behavior") == Some("allow") => suggestion["rules"]
-                .as_array()
-                .map(|rules| {
-                    rules
-                        .iter()
-                        .map(|rule| {
-                            Some(Grant::Rule {
-                                tool: str_field(rule, "toolName")?.into(),
-                                content: match rule.get("ruleContent") {
-                                    None | Some(Value::Null) => None,
-                                    Some(content) => Some(content.as_str()?.into()),
-                                },
-                                scope,
-                            })
-                        })
-                        .collect::<Option<Vec<_>>>()
+/// The suggestions one dialog row reads, at most, as in Claude Code.
+const ROW_SUGGESTIONS: usize = 64;
+/// The rules and directories one row shows, at most, as in Claude Code.
+const ROW_ENTRIES: usize = 8;
+/// The length of the names a row lists, joined, beyond which Claude Code drops the row.
+const ROW_LABEL: usize = 160;
+/// The length of a rule, path or prefix beyond which Claude Code does not display it.
+const DISPLAYED_TEXT: usize = 256;
+
+fn standing_row(tool: &str, request: &Value) -> Option<Vec<Value>> {
+    if request["suppress_always_allow_rule"].as_bool() == Some(true)
+        || request["requires_user_interaction"].as_bool() == Some(true)
+        || request["classifier_approvable"].as_bool() == Some(false)
+        || matches!(
+            str_field(request, "decision_reason_code"),
+            Some("org_ask_ceiling" | "outside_reads_blocked")
+        )
+    {
+        return None;
+    }
+    let suggestions = request["permission_suggestions"].as_array()?;
+    if suggestions.is_empty() || suggestions.len() > ROW_SUGGESTIONS {
+        return None;
+    }
+    let input = &request["input"];
+    match tool {
+        "Bash" => bash_row(suggestions, str_field(request, "decision_reason_type")),
+        "Read" => read_row(suggestions),
+        "WebFetch" => web_fetch_row(suggestions, str_field(input, "url")?),
+        tool if EDIT_TOOLS.contains(&tool) => edit_row(suggestions, str_field(input, "file_path")?),
+        // These tools have dialogs of their own, which Tomori does not model.
+        QUESTION_TOOL | "ExitPlanMode" | "PowerShell" => None,
+        tool => tool_row(suggestions, tool),
+    }
+}
+
+fn bash_row(suggestions: &[Value], reason: Option<&str>) -> Option<Vec<Value>> {
+    let row = displayed(
+        suggestions,
+        &["addRules", "addDirectories"],
+        |tool, content| match (tool, content) {
+            ("Bash", Some(content)) => !command_prefix(content).is_empty(),
+            ("Read", Some(content)) => !read_path(content).is_empty(),
+            _ => false,
+        },
+    );
+    let rules: Vec<(&str, &str)> = row_rules(&row).collect();
+    let directories: Vec<&str> = row_directories(&row).collect();
+    let commands = rules.iter().filter(|(tool, _)| *tool == "Bash").count();
+
+    if commands == rules.len() && directories.is_empty() {
+        // The terminal shows its editable command prefix in place of a row of Bash rules alone, seeded from the one
+        // suggested rule of a compound command and otherwise from its own reading of the command. Either way it saves
+        // exactly one Bash rule to local settings, which is offered when there is one rule to save.
+        if let [(_, content)] = rules[..] {
+            return Some(vec![command_rule(content)]);
+        }
+        // A compound command with several suggested rules gets the row itself; any other command gets a prefix that
+        // only the terminal computes.
+        if rules.is_empty() || reason != Some("subcommandResults") {
+            return None;
+        }
+    }
+
+    let names = rules
+        .iter()
+        .map(|(tool, content)| {
+            if *tool == "Bash" {
+                command_prefix(content)
+            } else {
+                read_path(content)
+            }
+        })
+        .chain(directories.iter().copied());
+    fits(rules.len() + directories.len(), names).then_some(row)
+}
+
+fn read_row(suggestions: &[Value]) -> Option<Vec<Value>> {
+    let row = read_rules(suggestions);
+    let rules: Vec<(&str, &str)> = row_rules(&row).collect();
+    fits(
+        rules.len(),
+        rules.iter().map(|(_, content)| read_path(content)),
+    )
+    .then_some(row)
+}
+
+fn edit_row(suggestions: &[Value], file: &str) -> Option<Vec<Value>> {
+    // Claude Code builds its own row for files in a project's or the user's `.claude` folder.
+    if Path::new(file)
+        .components()
+        .any(|component| component.as_os_str() == ".claude")
+    {
+        return None;
+    }
+
+    let mut row = Vec::new();
+    if suggestions.iter().any(|suggestion| {
+        str_field(suggestion, "type") == Some("setMode")
+            && str_field(suggestion, "mode") == Some("acceptEdits")
+    }) {
+        row.push(json!({"type": "setMode", "destination": "session", "mode": "acceptEdits"}));
+    }
+    // The terminal reads the first directory suggestion only, and adds its directories for the session.
+    if let Some(suggestion) = suggestions
+        .iter()
+        .find(|suggestion| str_field(suggestion, "type") == Some("addDirectories"))
+    {
+        let mut directories: Vec<&str> = Vec::new();
+        for directory in suggestion["directories"].as_array().into_iter().flatten() {
+            if let Some(directory) = directory.as_str().filter(|path| displayable_path(path))
+                && !directories.contains(&directory)
+            {
+                directories.push(directory);
+            }
+        }
+        if !directories.is_empty()
+            && directories.len() <= ROW_ENTRIES
+            && directories.join(", ").chars().count() <= ROW_LABEL
+        {
+            row.push(
+                json!({"type": "addDirectories", "destination": "session", "directories": directories}),
+            );
+        }
+    }
+    let rules = read_rules(suggestions);
+    let paths: Vec<&str> = row_rules(&rules)
+        .map(|(_, content)| read_path(content))
+        .collect();
+    if fits(paths.len(), paths.iter().copied()) {
+        row.extend(rules);
+    }
+    (!row.is_empty()).then_some(row)
+}
+
+fn web_fetch_row(suggestions: &[Value], url: &str) -> Option<Vec<Value>> {
+    let rule = format!("domain:{}", url_host(url)?);
+    let suggested = suggestions.iter().any(|suggestion| {
+        str_field(suggestion, "type") == Some("addRules")
+            && str_field(suggestion, "behavior") == Some("allow")
+            && str_field(suggestion, "destination") == Some("localSettings")
+            && suggestion["rules"].as_array().is_some_and(|rules| {
+                rules.iter().any(|candidate| {
+                    str_field(candidate, "toolName") == Some("WebFetch")
+                        && str_field(candidate, "ruleContent") == Some(&rule)
                 })
-                .unwrap_or_default(),
-            "addDirectories" => suggestion["directories"].as_array().and_then(|paths| {
-                paths
-                    .iter()
-                    .map(|path| {
-                        Some(Grant::Directory {
-                            path: path.as_str()?.into(),
-                            scope,
+            })
+    });
+    suggested.then(|| {
+        vec![json!({
+            "type": "addRules",
+            "rules": [{"toolName": "WebFetch", "ruleContent": rule}],
+            "behavior": "allow",
+            "destination": "localSettings",
+        })]
+    })
+}
+
+fn tool_row(suggestions: &[Value], tool: &str) -> Option<Vec<Value>> {
+    let update = json!({
+        "type": "addRules",
+        "rules": [{"toolName": tool}],
+        "behavior": "allow",
+        "destination": "localSettings",
+    });
+    (displayable(tool) && suggestions.contains(&update)).then(|| vec![update])
+}
+
+/// The `addRules` and `addDirectories` updates of `suggestions` that a row displays, as Claude Code's dialogs filter
+/// them: rules that allow, kept in local settings or the session, of the types the row shows, whose rules pass `shown`.
+fn displayed(
+    suggestions: &[Value],
+    types: &[&str],
+    shown: impl Fn(&str, Option<&str>) -> bool,
+) -> Vec<Value> {
+    let mut row = Vec::new();
+    for suggestion in suggestions {
+        let Some(kind) = str_field(suggestion, "type").filter(|kind| types.contains(kind)) else {
+            continue;
+        };
+        let Some(destination) = str_field(suggestion, "destination")
+            .filter(|destination| matches!(*destination, "localSettings" | "session"))
+        else {
+            continue;
+        };
+        match kind {
+            "addRules" if str_field(suggestion, "behavior") == Some("allow") => {
+                let rules: Vec<Value> = suggestion["rules"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|rule| {
+                        let tool = str_field(rule, "toolName").filter(|tool| displayable(tool))?;
+                        let content = match rule.get("ruleContent") {
+                            None => None,
+                            Some(content) => {
+                                Some(content.as_str().filter(|content| displayable(content))?)
+                            }
+                        };
+                        shown(tool, content).then(|| match content {
+                            Some(content) => json!({"toolName": tool, "ruleContent": content}),
+                            None => json!({"toolName": tool}),
                         })
                     })
-                    .collect()
-            }),
-            "setMode" => str_field(suggestion, "mode").map(|mode| {
+                    .collect();
+                if !rules.is_empty() {
+                    row.push(json!({"type": "addRules", "rules": rules, "behavior": "allow", "destination": destination}));
+                }
+            }
+            "addDirectories" => {
+                let directories: Vec<&str> = suggestion["directories"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|directory| {
+                        directory.as_str().filter(|path| displayable_path(path))
+                    })
+                    .collect();
+                if !directories.is_empty() {
+                    row.push(json!({"type": "addDirectories", "directories": directories, "destination": destination}));
+                }
+            }
+            _ => {}
+        }
+    }
+    row
+}
+
+fn read_rules(suggestions: &[Value]) -> Vec<Value> {
+    displayed(suggestions, &["addRules"], |tool, content| {
+        tool == "Read" && content.is_some_and(|content| !read_path(content).is_empty())
+    })
+}
+
+fn row_rules(row: &[Value]) -> impl Iterator<Item = (&str, &str)> {
+    row.iter()
+        .flat_map(|update| update["rules"].as_array().into_iter().flatten())
+        .filter_map(|rule| {
+            Some((
+                str_field(rule, "toolName")?,
+                str_field(rule, "ruleContent")?,
+            ))
+        })
+}
+
+fn row_directories(row: &[Value]) -> impl Iterator<Item = &str> {
+    row.iter()
+        .flat_map(|update| update["directories"].as_array().into_iter().flatten())
+        .filter_map(Value::as_str)
+}
+
+/// Whether a row of `count` entries naming `names` is short enough for Claude Code to show it.
+fn fits<'a>(count: usize, names: impl Iterator<Item = &'a str>) -> bool {
+    let names: Vec<&str> = names.collect();
+    count > 0 && count <= ROW_ENTRIES && names.join(" and ").chars().count() <= ROW_LABEL
+}
+
+/// The one Bash rule that the terminal's command prefix row saves for `prefix`; `*` allows every command.
+fn command_rule(prefix: &str) -> Value {
+    let rule = if prefix == "*" {
+        json!({"toolName": "Bash"})
+    } else {
+        json!({"toolName": "Bash", "ruleContent": prefix})
+    };
+    json!({"type": "addRules", "rules": [rule], "behavior": "allow", "destination": "localSettings"})
+}
+
+/// A Bash rule without its trailing wildcard, as Claude Code names it in a row.
+fn command_prefix(content: &str) -> &str {
+    content
+        .strip_suffix(":*")
+        .or_else(|| content.strip_suffix(" *"))
+        .unwrap_or(content)
+}
+
+/// The path a `Read` rule names, as Claude Code shows it.
+fn read_path(content: &str) -> &str {
+    let path = content.strip_suffix("/**").unwrap_or(content);
+    let path = path.strip_prefix("./").unwrap_or(path);
+    path.strip_prefix('/')
+        .filter(|rest| rest.starts_with('/'))
+        .unwrap_or(path)
+}
+
+/// Text that Claude Code would display in a row unchanged: not blank, short, on one line, with no control characters.
+fn displayable(text: &str) -> bool {
+    !text.trim().is_empty()
+        && text.trim() == text
+        && text.chars().count() <= DISPLAYED_TEXT
+        && !text
+            .chars()
+            .any(|character| character.is_control() || matches!(character, '\u{2028}' | '\u{2029}'))
+}
+
+fn displayable_path(path: &str) -> bool {
+    !path.trim().is_empty()
+        && path.chars().count() <= DISPLAYED_TEXT
+        && !path.chars().any(char::is_control)
+}
+
+/// The lowercase host of an `http` or `https` URL that names a domain, which Claude Code's `domain:` rules match.
+fn url_host(url: &str) -> Option<String> {
+    let rest = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))?;
+    let authority = rest.split(['/', '?', '#']).next()?;
+    let host = authority.rsplit('@').next()?;
+    let host = host.split(':').next()?;
+    let domain = host.contains('.')
+        && host
+            .chars()
+            .any(|character| character.is_ascii_alphabetic())
+        && host
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '.' | '-'));
+    domain.then(|| host.to_ascii_lowercase())
+}
+
+/// The grants one permission update makes.
+fn update_grants(update: &Value) -> Vec<Grant> {
+    let Some(scope) = str_field(update, "destination").and_then(grant_scope) else {
+        return Vec::new();
+    };
+    match str_field(update, "type") {
+        Some("addRules") => update["rules"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|rule| {
+                Some(Grant::Rule {
+                    tool: str_field(rule, "toolName")?.into(),
+                    content: str_field(rule, "ruleContent").map(Into::into),
+                    scope,
+                })
+            })
+            .collect(),
+        Some("addDirectories") => row_directories(std::slice::from_ref(update))
+            .map(|path| Grant::Directory {
+                path: path.into(),
+                scope,
+            })
+            .collect(),
+        Some("setMode") => str_field(update, "mode")
+            .map(|mode| {
                 vec![Grant::Mode {
                     mode: mode.into(),
                     scope,
                 }]
-            }),
-            _ => None,
-        };
-        // A malformed or empty suggestion is left out rather than applied without being described.
-        if let Some(granted) = granted.filter(|granted| !granted.is_empty()) {
-            updates.push(suggestion.clone());
-            grants.extend(granted);
-        }
+            })
+            .unwrap_or_default(),
+        _ => Vec::new(),
     }
-    (updates, grants)
 }
 
 fn grant_scope(destination: &str) -> Option<GrantScope> {
@@ -997,8 +1301,8 @@ mod tests {
         );
     }
 
-    fn suggested(id: &str, tool: &str, suggestions: Value) -> Value {
-        let mut request = can_use_tool(id, tool, json!({"command": "make"}));
+    fn suggested(id: &str, tool: &str, input: Value, suggestions: Value) -> Value {
+        let mut request = can_use_tool(id, tool, input);
         request["request"]["permission_suggestions"] = suggestions;
         request
     }
@@ -1011,83 +1315,331 @@ mod tests {
         permission.options.clone()
     }
 
-    #[test]
-    fn options_follow_the_terminal_dialog() {
-        let suggestions = json!([
-            {"type": "addRules", "rules": [{"toolName": "Bash", "ruleContent": "make:*"}], "behavior": "allow", "destination": "projectSettings"},
-            {"type": "addRules", "rules": [{"toolName": "WebSearch"}], "behavior": "allow", "destination": "userSettings"},
-            {"type": "addDirectories", "directories": ["/work"], "destination": "session"},
-            {"type": "setMode", "mode": "acceptEdits", "destination": "session"},
-        ]);
+    /// The updates the standing option of `request` applies.
+    fn updates(request: Value) -> Option<Value> {
         let mut state = State::new("session".into());
+        let id = request["request_id"].as_str().unwrap().to_owned();
+        if options(&mut state, request).is_empty() {
+            return None;
+        }
+        let (response, _) = state
+            .decide(
+                &id,
+                Decision::Grant {
+                    option: SUGGESTIONS_OPTION.into(),
+                },
+            )
+            .unwrap();
+        Some(response["response"]["response"]["updatedPermissions"].clone())
+    }
 
-        // Other tools grant rules and directories.
+    fn rules(destination: &str, rules: Value) -> Value {
+        json!({"type": "addRules", "rules": rules, "behavior": "allow", "destination": destination})
+    }
+
+    // The suggestion shapes in these tests were sent by Claude Code 2.1.311 for the commands, files and URLs shown.
+
+    #[test]
+    fn bash_rules_alone_offer_the_command_prefix() {
+        let prefix = rules(
+            "localSettings",
+            json!([{"toolName": "Bash", "ruleContent": "npm run *"}]),
+        );
+        let request = suggested(
+            "p1",
+            "Bash",
+            json!({"command": "npm run lint"}),
+            json!([prefix.clone()]),
+        );
         assert_eq!(
-            options(&mut state, suggested("p1", "Bash", suggestions.clone())),
+            options(&mut State::new("session".into()), request.clone()),
             vec![PermissionOption {
                 id: SUGGESTIONS_OPTION.into(),
-                grants: vec![
-                    Grant::Rule {
-                        tool: "Bash".into(),
-                        content: Some("make:*".into()),
-                        scope: GrantScope::Project,
-                    },
-                    Grant::Rule {
-                        tool: "WebSearch".into(),
-                        content: None,
-                        scope: GrantScope::User,
-                    },
-                    Grant::Directory {
-                        path: "/work".into(),
-                        scope: GrantScope::Session,
-                    },
-                ],
+                grants: vec![Grant::Rule {
+                    tool: "Bash".into(),
+                    content: Some("npm run *".into()),
+                    scope: GrantScope::Local,
+                }],
+            }]
+        );
+        assert_eq!(updates(request), Some(json!([prefix])));
+
+        // The prefix row always saves to local settings, and `*` allows every command.
+        let request = suggested(
+            "p2",
+            "Bash",
+            json!({"command": "ls"}),
+            json!([rules(
+                "session",
+                json!([{"toolName": "Bash", "ruleContent": "*"}])
+            )]),
+        );
+        assert_eq!(
+            updates(request),
+            Some(json!([rules(
+                "localSettings",
+                json!([{"toolName": "Bash"}])
+            )]))
+        );
+    }
+
+    #[test]
+    fn compound_bash_commands_offer_their_rules_together() {
+        let suggestion = rules(
+            "localSettings",
+            json!([
+                {"toolName": "Bash", "ruleContent": "mkdir -p build"},
+                {"toolName": "Bash", "ruleContent": "touch build/x"},
+            ]),
+        );
+        let mut request = suggested(
+            "p1",
+            "Bash",
+            json!({"command": "mkdir -p build && touch build/x"}),
+            json!([suggestion.clone()]),
+        );
+        request["request"]["decision_reason_type"] = json!("subcommandResults");
+        assert_eq!(updates(request.clone()), Some(json!([suggestion])));
+
+        // Without the compound reason, the terminal shows a prefix that only it computes.
+        request["request"]["decision_reason_type"] = json!("other");
+        assert_eq!(updates(request), None);
+    }
+
+    #[test]
+    fn bash_outside_the_project_offers_the_command_and_the_read_rule() {
+        let command = rules(
+            "localSettings",
+            json!([{"toolName": "Bash", "ruleContent": "grep -rn \"outside\" /tmp/outside"}]),
+        );
+        let read = rules(
+            "session",
+            json!([{"toolName": "Read", "ruleContent": "//private/tmp/outside/**"}]),
+        );
+        let request = suggested(
+            "p1",
+            "Bash",
+            json!({"command": "grep -rn \"outside\" /tmp/outside"}),
+            json!([command.clone(), read.clone()]),
+        );
+        assert_eq!(updates(request), Some(json!([command, read])));
+    }
+
+    #[test]
+    fn bash_rows_show_only_what_the_terminal_shows() {
+        let request = suggested(
+            "p1",
+            "Bash",
+            json!({"command": "make"}),
+            json!([
+                rules("localSettings", json!([{"toolName": "Bash", "ruleContent": "make"}])),
+                // Other destinations, other tools' rules, denials and other update types are not shown.
+                rules("userSettings", json!([{"toolName": "Bash", "ruleContent": "make:*"}])),
+                rules("projectSettings", json!([{"toolName": "Bash", "ruleContent": "make test"}])),
+                rules("localSettings", json!([{"toolName": "WebSearch"}])),
+                {"type": "addRules", "rules": [{"toolName": "Bash", "ruleContent": "rm"}], "behavior": "deny", "destination": "localSettings"},
+                {"type": "setMode", "mode": "acceptEdits", "destination": "session"},
+                {"type": "addDirectories", "directories": ["/work"], "destination": "session"},
+            ]),
+        );
+        assert_eq!(
+            updates(request),
+            Some(json!([
+                rules("localSettings", json!([{"toolName": "Bash", "ruleContent": "make"}])),
+                {"type": "addDirectories", "directories": ["/work"], "destination": "session"},
+            ]))
+        );
+
+        // A row of more than eight entries is dropped.
+        let many: Vec<Value> = (0..9)
+            .map(|index| json!({"toolName": "Bash", "ruleContent": format!("make {index}")}))
+            .collect();
+        let mut request = suggested(
+            "p2",
+            "Bash",
+            json!({"command": "make"}),
+            json!([rules("localSettings", json!(many))]),
+        );
+        request["request"]["decision_reason_type"] = json!("subcommandResults");
+        assert_eq!(updates(request), None);
+
+        // A rule split over lines is never shown.
+        let request = suggested(
+            "p3",
+            "Bash",
+            json!({"command": "make"}),
+            json!([rules(
+                "localSettings",
+                json!([{"toolName": "Bash", "ruleContent": "make\nrm"}])
+            )]),
+        );
+        assert_eq!(updates(request), None);
+    }
+
+    #[test]
+    fn edits_offer_accept_edits_and_directories_for_the_session() {
+        let request = suggested(
+            "p1",
+            "Write",
+            json!({"file_path": "/work/notes.txt", "content": "hi\n"}),
+            json!([{"type": "setMode", "mode": "acceptEdits", "destination": "session"}]),
+        );
+        assert_eq!(
+            options(&mut State::new("session".into()), request.clone()),
+            vec![PermissionOption {
+                id: SUGGESTIONS_OPTION.into(),
+                grants: vec![Grant::Mode {
+                    mode: "acceptEdits".into(),
+                    scope: GrantScope::Session,
+                }],
             }]
         );
 
-        // Edit tools grant the mode and directories.
+        let request = suggested(
+            "p2",
+            "Write",
+            json!({"file_path": "/tmp/outside/new.txt", "content": "x"}),
+            json!([
+                {"type": "setMode", "mode": "acceptEdits", "destination": "session"},
+                {"type": "addDirectories", "directories": ["/tmp/outside", "/private/tmp/outside"], "destination": "session"},
+                rules("localSettings", json!([{"toolName": "Edit"}])),
+            ]),
+        );
         assert_eq!(
-            options(&mut state, suggested("p2", "Edit", suggestions.clone())),
-            vec![PermissionOption {
-                id: SUGGESTIONS_OPTION.into(),
-                grants: vec![
-                    Grant::Directory {
-                        path: "/work".into(),
-                        scope: GrantScope::Session,
-                    },
-                    Grant::Mode {
-                        mode: "acceptEdits".into(),
-                        scope: GrantScope::Session,
-                    },
-                ],
-            }]
+            updates(request),
+            Some(json!([
+                {"type": "setMode", "destination": "session", "mode": "acceptEdits"},
+                {"type": "addDirectories", "destination": "session", "directories": ["/tmp/outside", "/private/tmp/outside"]},
+            ]))
         );
 
-        // The terminal withholds the row when asked to.
-        let mut request = suggested("p3", "Bash", suggestions.clone());
-        request["request"]["suppress_always_allow_rule"] = json!(true);
-        assert_eq!(options(&mut state, request), Vec::new());
-
-        // Nothing is offered without suggestions, or with only malformed or unshown ones.
-        assert_eq!(
-            options(&mut state, can_use_tool("p4", "Bash", json!({}))),
-            Vec::new()
+        // Claude Code builds its own row for files in a `.claude` folder.
+        let request = suggested(
+            "p3",
+            "Edit",
+            json!({"file_path": "/work/.claude/settings.json"}),
+            json!([{"type": "setMode", "mode": "acceptEdits", "destination": "session"}]),
         );
-        let malformed = json!([
-            {"type": "addRules", "rules": [{"ruleContent": "make"}], "behavior": "allow", "destination": "localSettings"},
-            {"type": "addRules", "rules": [{"toolName": "Bash"}], "behavior": "deny", "destination": "localSettings"},
-            {"type": "addRules", "rules": [{"toolName": "Bash"}], "behavior": "allow", "destination": "cliArg"},
-            {"type": "addRules", "rules": [], "behavior": "allow", "destination": "localSettings"},
-            {"type": "replaceRules", "rules": [{"toolName": "Bash"}], "behavior": "allow", "destination": "localSettings"},
-            {"type": "setMode", "mode": "acceptEdits", "destination": "session"},
+        assert_eq!(updates(request), None);
+    }
+
+    #[test]
+    fn reads_outside_the_project_offer_read_rules_for_the_session() {
+        let suggestions = json!([
+            rules(
+                "session",
+                json!([{"toolName": "Read", "ruleContent": "//tmp/outside/**"}])
+            ),
+            rules(
+                "session",
+                json!([{"toolName": "Read", "ruleContent": "//private/tmp/outside/**"}])
+            ),
         ]);
+        let request = suggested(
+            "p1",
+            "Read",
+            json!({"file_path": "/tmp/outside/data.txt"}),
+            suggestions.clone(),
+        );
+        assert_eq!(updates(request), Some(suggestions));
+
+        let mut request = suggested(
+            "p2",
+            "Read",
+            json!({"file_path": "/tmp/outside/data.txt"}),
+            json!([rules(
+                "session",
+                json!([{"toolName": "Read", "ruleContent": "//tmp/outside/**"}])
+            )]),
+        );
+        request["request"]["decision_reason_code"] = json!("outside_reads_blocked");
+        assert_eq!(updates(request), None);
+    }
+
+    #[test]
+    fn web_fetch_offers_the_request_domain() {
+        let domain = json!({"type": "addRules", "destination": "localSettings", "rules": [{"toolName": "WebFetch", "ruleContent": "domain:example.com"}], "behavior": "allow"});
+        let request = suggested(
+            "p1",
+            "WebFetch",
+            json!({"url": "https://Example.com/page?q=1", "prompt": "Title?"}),
+            json!([domain]),
+        );
         assert_eq!(
-            options(&mut state, suggested("p5", "Bash", malformed)),
+            updates(request),
+            Some(json!([rules(
+                "localSettings",
+                json!([{"toolName": "WebFetch", "ruleContent": "domain:example.com"}])
+            )]))
+        );
+
+        // A rule for another domain is not the row the terminal shows.
+        let request = suggested(
+            "p2",
+            "WebFetch",
+            json!({"url": "https://other.example/", "prompt": "Title?"}),
+            json!([domain]),
+        );
+        assert_eq!(updates(request), None);
+    }
+
+    #[test]
+    fn other_tools_offer_a_rule_for_the_whole_tool() {
+        let tool = rules("localSettings", json!([{"toolName": "WebSearch"}]));
+        let request = suggested(
+            "p1",
+            "WebSearch",
+            json!({"query": "example domain iana"}),
+            json!([tool.clone()]),
+        );
+        assert_eq!(updates(request), Some(json!([tool])));
+
+        // Narrower or differently kept rules are not the terminal's row.
+        let request = suggested(
+            "p2",
+            "mcp__server__tool",
+            json!({}),
+            json!([
+                rules("session", json!([{"toolName": "mcp__server__tool"}])),
+                rules(
+                    "localSettings",
+                    json!([{"toolName": "mcp__server__tool", "ruleContent": "x"}])
+                ),
+            ]),
+        );
+        assert_eq!(updates(request), None);
+    }
+
+    #[test]
+    fn no_option_when_the_terminal_withholds_the_row() {
+        let suggestions = json!([rules(
+            "localSettings",
+            json!([{"toolName": "Bash", "ruleContent": "make"}])
+        )]);
+        for (field, value) in [
+            ("suppress_always_allow_rule", json!(true)),
+            ("requires_user_interaction", json!(true)),
+            ("classifier_approvable", json!(false)),
+            ("decision_reason_code", json!("org_ask_ceiling")),
+        ] {
+            let mut request = suggested(
+                "p1",
+                "Bash",
+                json!({"command": "make"}),
+                suggestions.clone(),
+            );
+            request["request"][field] = value;
+            assert_eq!(updates(request), None, "{field}");
+        }
+
+        let mut state = State::new("session".into());
+        assert_eq!(
+            options(&mut state, can_use_tool("p2", "Bash", json!({}))),
             Vec::new()
         );
         let error = state
             .decide(
-                "p5",
+                "p2",
                 Decision::Grant {
                     option: SUGGESTIONS_OPTION.into(),
                 },
@@ -1097,35 +1649,21 @@ mod tests {
     }
 
     #[test]
-    fn granting_echoes_the_shown_suggestions() {
+    fn allowing_once_grants_nothing() {
         let mut state = State::new("session".into());
-        let rule = json!({"type": "addRules", "rules": [{"toolName": "Bash", "ruleContent": "make"}], "behavior": "allow", "destination": "localSettings"});
-        let mode = json!({"type": "setMode", "mode": "acceptEdits", "destination": "session"});
         handle(
             &mut state,
-            suggested("p1", "Bash", json!([rule.clone(), mode.clone()])),
-        );
-        handle(
-            &mut state,
-            suggested("p2", "Bash", json!([rule.clone(), mode])),
-        );
-
-        let (response, event) = state
-            .decide(
+            suggested(
                 "p1",
-                Decision::Grant {
-                    option: SUGGESTIONS_OPTION.into(),
-                },
-            )
-            .unwrap();
-        assert_eq!(
-            response["response"]["response"],
-            json!({"behavior": "allow", "updatedInput": {"command": "make"}, "updatedPermissions": [rule]})
+                "Bash",
+                json!({"command": "make"}),
+                json!([rules(
+                    "localSettings",
+                    json!([{"toolName": "Bash", "ruleContent": "make"}])
+                )]),
+            ),
         );
-        assert_eq!(event, Event::PermissionResolved { id: "p1".into() });
-
-        // Allowing once grants nothing.
-        let (response, _) = state.decide("p2", Decision::AllowOnce).unwrap();
+        let (response, _) = state.decide("p1", Decision::AllowOnce).unwrap();
         assert_eq!(
             response["response"]["response"],
             json!({"behavior": "allow", "updatedInput": {"command": "make"}})
