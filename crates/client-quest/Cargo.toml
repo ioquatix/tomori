@@ -39,8 +39,10 @@ wgpu-hal = { version = "30.0.1", features = ["vulkan"] }
 android-activity = { version = "0.6", features = ["native-activity"] }
 android_logger = "0.15"
 jni = "0.21"
+ndk = { version = "0.9", features = ["audio", "api-level-29"] }
 
 [target.'cfg(not(target_os = "android"))'.dependencies]
+cpal = "0.18"
 env_logger = "0.11"
 pollster = "0.4"
 ureq = { version = "2.12", default-features = false, features = ["json"] }

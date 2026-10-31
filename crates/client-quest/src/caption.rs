@@ -317,7 +317,7 @@ impl RecordingProgress {
             format!("{:02}:{:02}", seconds / 60, seconds % 60)
         }
         if self.maximum_ms == 0 {
-            return format!("REC {} | LIVE ON PC", clock(self.elapsed_ms / 1000));
+            return format!("REC {} | TO THE AGENT", clock(self.elapsed_ms / 1000));
         }
         format!(
             "REC {} / {} | {} left",
@@ -433,7 +433,7 @@ mod tests {
             1.0
         );
         let live = RecordingProgress::new(Duration::from_secs(125), Duration::ZERO);
-        assert_eq!(live.label(), "REC 02:05 | LIVE ON PC");
+        assert_eq!(live.label(), "REC 02:05 | TO THE AGENT");
         assert_eq!(live.color(), [0.1, 0.85, 0.55]);
         assert_eq!(
             RecordingProgress::new(Duration::from_millis(1001), maximum),

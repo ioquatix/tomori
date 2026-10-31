@@ -3,11 +3,13 @@
 
 //! Carries out the [`Conversation`]'s actions: owns the server connection and browses for servers while the server list shows.
 use crate::{
+    capture::{Capture, Recording},
     conversation::{Action, Conversation},
     identity::{Identity, Store},
     server_choice::{self, Choice, Source},
 };
-use client::{Client, ConnectionState, Event, Options, discovery};
+use client::{Client, ConnectionState, Event, Microphone, Options, discovery};
+use std::sync::{Arc, Mutex, PoisonError};
 
 /// Permission to receive multicast while browsing.
 pub trait Multicast {
@@ -31,6 +33,92 @@ pub struct Connection {
     /// Browsing failed; it is tried again on request rather than every frame.
     failed: bool,
     remembered: Option<String>,
+    voice: Voice,
+}
+
+/// Push-to-talk audio, from the platform microphone through the client's [`Microphone`]. The microphone is open only while recording.
+struct Voice {
+    capture: Box<dyn Capture>,
+    /// Shared with the capture thread.
+    shared: Arc<Mutex<Captured>>,
+    recording: Option<Recording>,
+}
+
+#[derive(Default)]
+struct Captured {
+    /// For the current client, at the rate of the last recording.
+    microphone: Option<Microphone>,
+    /// Why capture stopped early.
+    failure: Option<String>,
+}
+
+impl Voice {
+    fn lock(&self) -> std::sync::MutexGuard<'_, Captured> {
+        self.shared.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn begin(&mut self, client: &Client, utterance: String) -> Result<(), String> {
+        self.recording = None;
+        match self.capture.permit()? {
+            true => {}
+            false => return Err("Allow the microphone, then hold X again.".into()),
+        }
+        self.lock().failure = None;
+        let shared = self.shared.clone();
+        let samples = Box::new(move |samples: &[f32]| {
+            let mut captured = shared.lock().unwrap_or_else(PoisonError::into_inner);
+            if let Some(microphone) = captured.microphone.as_mut() {
+                // Only fails once the client is closed, when nothing more can be sent.
+                let _ = microphone.push_float(samples);
+            }
+        });
+        let shared = self.shared.clone();
+        let failed = Box::new(move |error: String| {
+            log::warn!("{error}");
+            let mut captured = shared.lock().unwrap_or_else(PoisonError::into_inner);
+            captured.failure.get_or_insert(error);
+        });
+        let recording = self.capture.open(samples, failed)?;
+        let mut captured = self.lock();
+        let microphone = match captured.microphone.take() {
+            Some(microphone) if microphone.sample_rate() == recording.sample_rate => microphone,
+            _ => Microphone::new(client.sender(), recording.sample_rate),
+        };
+        let microphone = captured.microphone.insert(microphone);
+        microphone
+            .begin(utterance)
+            .map_err(|error| format!("Cannot send: {error}"))?;
+        drop(captured);
+        self.recording = Some(recording);
+        Ok(())
+    }
+
+    /// Close the microphone, after which every captured sample has been passed on, then end or cancel the utterance.
+    fn finish(&mut self, send: bool) -> Result<(), String> {
+        self.recording = None;
+        let mut captured = self.lock();
+        let Some(microphone) = captured.microphone.as_mut() else {
+            return Ok(());
+        };
+        let result = if send {
+            microphone.end()
+        } else {
+            microphone.cancel()
+        };
+        result.map_err(|error| format!("Cannot send: {error}"))
+    }
+
+    /// The client is going away: close the microphone and forget it.
+    fn reset(&mut self) {
+        self.recording = None;
+        self.lock().microphone = None;
+    }
+
+    /// Why the open microphone stopped, if it did.
+    fn failure(&mut self) -> Option<String> {
+        self.recording.as_ref()?;
+        self.lock().failure.take()
+    }
 }
 
 impl Connection {
@@ -39,6 +127,7 @@ impl Connection {
         identity: Identity,
         store: Store,
         multicast: Box<dyn Multicast>,
+        capture: Box<dyn Capture>,
         conversation: &mut Conversation,
     ) -> Self {
         log::info!(
@@ -60,6 +149,11 @@ impl Connection {
             changed: true,
             failed: false,
             remembered,
+            voice: Voice {
+                capture,
+                shared: Arc::default(),
+                recording: None,
+            },
         }
     }
 
@@ -75,6 +169,9 @@ impl Connection {
                 self.remembered = Some(instance.to_owned());
             }
             conversation.apply(event);
+        }
+        if let Some(error) = self.voice.failure() {
+            conversation.microphone_failed(error);
         }
         self.perform(conversation);
     }
@@ -111,12 +208,34 @@ impl Connection {
                     }
                     None => conversation.fail("Not connected."),
                 },
+                Action::BeginUtterance(utterance) => {
+                    let begun = match &self.client {
+                        Some(client) => self.voice.begin(client, utterance),
+                        None => Err("Not connected.".into()),
+                    };
+                    if let Err(error) = begun {
+                        log::warn!("Cannot record: {error}");
+                        self.voice.recording = None;
+                        conversation.microphone_failed(error);
+                    }
+                }
+                Action::EndUtterance => {
+                    if let Err(error) = self.voice.finish(true) {
+                        conversation.fail(error);
+                    }
+                }
+                Action::CancelUtterance => {
+                    if let Err(error) = self.voice.finish(false) {
+                        conversation.fail(error);
+                    }
+                }
             }
         }
     }
 
     /// Close the connection without stalling the frame: closing waits briefly for the server.
     fn disconnect(&mut self) {
+        self.voice.reset();
         if let Some(client) = self.client.take() {
             let closed = std::thread::Builder::new()
                 .name("tomori-close".into())

@@ -187,6 +187,7 @@ pub fn run(
                         environment_latched = false;
                         choice_latched = false;
                         was_talking = false;
+                        conversation.stop_talking();
                         #[cfg(target_os = "android")]
                         presentation_navigation.release();
                     }
@@ -228,6 +229,7 @@ pub fn run(
             environment_latched = false;
             choice_latched = false;
             was_talking = false;
+            conversation.stop_talking();
             #[cfg(target_os = "android")]
             presentation_navigation.release();
         }
@@ -279,8 +281,9 @@ pub fn run(
         }
         choice_latched = choice_moving;
         let reset = controls.reset && conversation.accept();
-        if controls.talk && !was_talking {
-            conversation.talk();
+        // Hold X to talk to the agent; releasing it while focused sends the utterance.
+        if controls.talk != was_talking {
+            conversation.talk(controls.talk);
         }
         was_talking = controls.talk;
         // Spoken replies and the audience microphone return with server playback.
@@ -297,6 +300,7 @@ pub fn run(
             if choosing { 0.0 } else { right.y },
         );
         caption.set_text(&gpu.queue, &conversation.text());
+        caption.set_recording_progress(&gpu.queue, conversation.recording(), Duration::ZERO);
         if reset {
             swarm = Swarm::new();
         }

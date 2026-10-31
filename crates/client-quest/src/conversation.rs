@@ -9,13 +9,18 @@ use crate::{
     interaction::SessionActivity,
     server_choice::{self, Choice},
 };
-use client::{ConnectionState, Event};
+use client::{ConnectionState, Event, UtteranceFailure};
 use protocol::{
     Activity, ClientMessage, Decision, QueueState, Role, ServerMessage, SpaceState, SpaceSummary,
 };
-use std::sync::Arc;
+use std::{
+    sync::Arc,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+};
 
 const BODY_ROWS: usize = ROWS - 4;
+
+const LOST: &str = "Connection lost; your words were not sent.";
 
 /// What the conversation needs done with the connection.
 #[derive(Clone, Debug, PartialEq)]
@@ -27,6 +32,34 @@ pub enum Action {
     /// Forget the servers found so far and browse again.
     Rescan,
     Send(ClientMessage),
+    /// Open the microphone and send what it hears to the agent as this utterance.
+    BeginUtterance(String),
+    /// Close the microphone and finish the utterance, for the server to transcribe.
+    EndUtterance,
+    /// Close the microphone and abandon the utterance.
+    CancelUtterance,
+}
+
+/// Push-to-talk, from pressing X until the server's transcript or failure. See `design/speech.md`.
+#[derive(Clone, Debug, PartialEq)]
+enum Talk {
+    /// X is held and the microphone is open, sending `agent` audio.
+    Recording {
+        utterance: String,
+        started: Instant,
+        /// The partial transcript so far.
+        heard: String,
+    },
+    /// X was released; waiting for the server's final transcript.
+    Sending { utterance: String, heard: String },
+}
+
+impl Talk {
+    fn utterance(&self) -> &str {
+        match self {
+            Talk::Recording { utterance, .. } | Talk::Sending { utterance, .. } => utterance,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -76,6 +109,10 @@ pub struct Conversation {
     actions: Vec<Action>,
     /// The last body paginated, since the panel is drawn every frame.
     paged: Option<Paged>,
+    talk: Option<Talk>,
+    /// Makes utterance identifiers unique across launches, since the server keys queued text by participant and utterance, and the participant identity persists.
+    launch: String,
+    utterances: u64,
 }
 
 /// A body's text, the rows it was paginated into, and its pages.
@@ -116,6 +153,15 @@ impl Conversation {
             error: None,
             actions: Vec::new(),
             paged: None,
+            talk: None,
+            launch: format!(
+                "{:x}",
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos()
+            ),
+            utterances: 0,
         }
     }
 
@@ -194,12 +240,36 @@ impl Conversation {
         match event {
             Event::State(state) => self.connection_changed(state),
             Event::Message(message) => self.receive(message),
-            // Nothing records utterances yet.
-            Event::UtteranceFailed(_) => {}
+            Event::UtteranceFailed(failed) => {
+                if self.talk.as_ref().map(Talk::utterance) == Some(failed.utterance.as_str()) {
+                    self.stop_talking();
+                    self.talk = None;
+                    self.error = Some(match failed.failure {
+                        UtteranceFailure::Disconnected => LOST.into(),
+                        UtteranceFailure::Congested => {
+                            "Network too slow; your words were not sent.".into()
+                        }
+                    });
+                }
+            }
         }
     }
 
     fn connection_changed(&mut self, state: ConnectionState) {
+        if !matches!(state, ConnectionState::Connected { .. }) {
+            match &self.talk {
+                Some(Talk::Recording { .. }) => {
+                    self.stop_talking();
+                    self.error = Some(LOST.into());
+                }
+                // The server may still queue it, but its transcript cannot reach us.
+                Some(Talk::Sending { .. }) => {
+                    self.talk = None;
+                    self.notice = Some("Connection lost while sending your words.".into());
+                }
+                None => {}
+            }
+        }
         if let ConnectionState::Connected { server, .. } = &state {
             log::info!("Connected to {server}");
             self.error = None;
@@ -271,10 +341,36 @@ impl Conversation {
                 // A refused decision can be tried again.
                 self.decided = None;
             }
-            // Speech, transcripts and presence come with the microphone, playback and presence work.
+            ServerMessage::Transcript {
+                utterance,
+                text,
+                finished,
+            } => {
+                if let Some(talk) = self
+                    .talk
+                    .as_mut()
+                    .filter(|talk| talk.utterance() == utterance)
+                {
+                    if finished {
+                        // The queue entry now shows the words.
+                        self.talk = None;
+                    } else {
+                        let (Talk::Recording { heard, .. } | Talk::Sending { heard, .. }) = talk;
+                        *heard = text;
+                    }
+                }
+            }
+            ServerMessage::TranscriptFailed { utterance, error } => {
+                log::warn!("Utterance {utterance} failed: {error}");
+                if self.talk.as_ref().map(Talk::utterance) == Some(utterance.as_str()) {
+                    self.stop_talking();
+                    self.talk = None;
+                }
+                // Also shown for an earlier utterance, whose words were not sent either.
+                self.error = Some(error);
+            }
+            // Speech and presence come with the playback and presence work.
             ServerMessage::Welcome { .. }
-            | ServerMessage::Transcript { .. }
-            | ServerMessage::TranscriptFailed { .. }
             | ServerMessage::Speech { .. }
             | ServerMessage::Presence { .. }
             | ServerMessage::Ping { .. }
@@ -337,6 +433,7 @@ impl Conversation {
     }
 
     fn close_space(&mut self) {
+        self.stop_talking();
         self.space = None;
         self.joining = None;
         self.message = 0;
@@ -528,9 +625,61 @@ impl Conversation {
         }
     }
 
-    /// X: speaking to the agent returns once the server recognizes speech.
-    pub fn talk(&mut self) {
-        self.notice = Some("Voice is moving to the server; X is not available yet.".into());
+    /// X pressed or released: push-to-talk. While held, the microphone sends `agent` audio, heard by the other participants and transcribed for the agent; releasing sends it to be queued.
+    pub fn talk(&mut self, pressed: bool) {
+        if !pressed {
+            if let Some(Talk::Recording {
+                utterance, heard, ..
+            }) = self.talk.take()
+            {
+                self.actions.push(Action::EndUtterance);
+                self.talk = Some(Talk::Sending { utterance, heard });
+            }
+            return;
+        }
+        if matches!(self.talk, Some(Talk::Recording { .. })) {
+            return;
+        }
+        if self.mode != Mode::Space || self.space.is_none() {
+            self.notice = Some("Join a space to talk to the agent.".into());
+            return;
+        }
+        if !matches!(self.state, Some(ConnectionState::Connected { .. })) {
+            self.error = Some("Offline; cannot record.".into());
+            return;
+        }
+        self.utterances += 1;
+        let utterance = format!("{}-{}", self.launch, self.utterances);
+        self.error = None;
+        self.notice = None;
+        self.actions.push(Action::BeginUtterance(utterance.clone()));
+        self.talk = Some(Talk::Recording {
+            utterance,
+            started: Instant::now(),
+            heard: String::new(),
+        });
+    }
+
+    /// Abandon a recording without sending it, as when the session loses focus. Words already released are still transcribed.
+    pub fn stop_talking(&mut self) {
+        if matches!(self.talk, Some(Talk::Recording { .. })) {
+            self.talk = None;
+            self.actions.push(Action::CancelUtterance);
+        }
+    }
+
+    /// The microphone could not record, so the recording is abandoned.
+    pub fn microphone_failed(&mut self, error: impl Into<String>) {
+        self.stop_talking();
+        self.error = Some(error.into());
+    }
+
+    /// How long X has been held, while recording.
+    pub fn recording(&self) -> Option<Duration> {
+        match &self.talk {
+            Some(Talk::Recording { started, .. }) => Some(started.elapsed()),
+            _ => None,
+        }
     }
 
     /// Your newest entry still waiting in the queue. Entries are matched by participant identity, since display names need not be unique.
@@ -782,8 +931,18 @@ impl Conversation {
             ];
         };
         let choosing = space.approval.as_ref().zip(choice);
-        let status = self.status().unwrap_or_else(|| {
-            if let Some(error) = &space.error {
+        // The open microphone is always shown.
+        let recording = match &self.talk {
+            Some(Talk::Recording { heard, .. }) if heard.is_empty() => {
+                Some("MIC AGENT: listening...".to_owned())
+            }
+            Some(Talk::Recording { heard, .. }) => Some(format!("MIC AGENT: {heard}")),
+            _ => None,
+        };
+        let status = recording.or_else(|| self.status()).unwrap_or_else(|| {
+            if let Some(Talk::Sending { heard, .. }) = &self.talk {
+                format!("Sending: {heard}...")
+            } else if let Some(error) = &space.error {
                 format!("ERROR: {error}")
             } else if let Some(entry) = self.own_queued() {
                 format!("Queued: {}", entry.text)
@@ -794,8 +953,11 @@ impl Conversation {
                     .filter(|entry| entry.state == QueueState::Queued)
                     .count();
                 match waiting {
-                    0 => format!("{} here", space.participants.len()),
-                    count => format!("{count} queued | {} here", space.participants.len()),
+                    0 => format!("Mic off | {} here", space.participants.len()),
+                    count => format!(
+                        "Mic off | {count} queued | {} here",
+                        space.participants.len()
+                    ),
                 }
             }
         });
@@ -809,7 +971,9 @@ impl Conversation {
             short(&format!("p{}/{} {label}", self.page + 1, pages.len())),
         ];
         lines.extend(pages[self.page].iter().cloned());
-        let footer = if let Some((approval, choice)) = choosing {
+        let footer = if matches!(self.talk, Some(Talk::Recording { .. })) {
+            "Release X to send"
+        } else if let Some((approval, choice)) = choosing {
             while lines.len() + choice.len() < ROWS - 1 {
                 lines.push(String::new());
             }
@@ -824,7 +988,7 @@ impl Conversation {
         } else if self.own_queued().is_some() {
             "B cancel queued | stick pages"
         } else {
-            "B leave | Y refresh | stick pages"
+            "X talk | B leave | Y refresh"
         };
         while lines.len() < ROWS - 1 {
             lines.push(String::new());
@@ -1604,15 +1768,171 @@ mod tests {
         assert_eq!(conversation.take_actions(), [Action::Rescan]);
     }
 
+    fn transcript(utterance: &str, text: &str, finished: bool) -> Event {
+        Event::Message(ServerMessage::Transcript {
+            utterance: utterance.into(),
+            text: text.into(),
+            finished,
+        })
+    }
+
+    /// Press X and return the utterance it began.
+    fn press(conversation: &mut Conversation) -> String {
+        conversation.talk(true);
+        match conversation.take_actions().as_slice() {
+            [Action::BeginUtterance(utterance)] => utterance.clone(),
+            actions => panic!("{actions:?}"),
+        }
+    }
+
     #[test]
-    fn x_explains_that_voice_is_moving() {
+    fn holding_x_records_an_utterance_and_releasing_sends_it() {
         let mut conversation = joined(|_| {});
-        conversation.talk();
+        assert!(conversation.text().contains("Mic off"));
+        assert!(conversation.text().contains("X talk"));
+        let utterance = press(&mut conversation);
+        assert!(conversation.recording().is_some());
+        assert!(conversation.text().contains("MIC AGENT: listening..."));
+        assert!(conversation.text().contains("Release X to send"));
+        // Held: no second utterance.
+        conversation.talk(true);
+        assert!(conversation.take_actions().is_empty());
+
+        conversation.apply(transcript(&utterance, "hello the", false));
+        assert!(conversation.text().contains("MIC AGENT: hello the"));
+        conversation.talk(false);
+        assert_eq!(conversation.take_actions(), [Action::EndUtterance]);
+        assert_eq!(conversation.recording(), None);
+        assert!(conversation.text().contains("Sending: hello the..."));
+        conversation.apply(transcript(&utterance, "hello there", false));
+        assert!(conversation.text().contains("Sending: hello there..."));
+        conversation.apply(transcript(&utterance, "Hello there.", true));
+        assert!(conversation.text().contains("Mic off"));
+        // Releasing again does nothing.
+        conversation.talk(false);
+        assert!(conversation.take_actions().is_empty());
+    }
+
+    #[test]
+    fn utterances_are_unique_within_and_across_launches() {
+        let mut conversation = joined(|_| {});
+        let first = press(&mut conversation);
+        conversation.talk(false);
+        conversation.take_actions();
+        let second = press(&mut conversation);
+        assert_ne!(first, second);
+        std::thread::sleep(Duration::from_millis(1));
+        let mut relaunched = joined(|_| {});
+        assert_ne!(press(&mut relaunched), first);
+    }
+
+    #[test]
+    fn a_failed_transcript_is_shown() {
+        let mut conversation = joined(|_| {});
+        let utterance = press(&mut conversation);
+        conversation.talk(false);
+        conversation.take_actions();
+        conversation.apply(Event::Message(ServerMessage::TranscriptFailed {
+            utterance,
+            error: "Nothing was heard, so nothing was sent.".into(),
+        }));
+        assert!(conversation.text().contains("ERROR: Nothing was heard"));
+        // The next press clears it.
+        press(&mut conversation);
+        assert!(conversation.text().contains("MIC AGENT"));
+    }
+
+    #[test]
+    fn a_failure_while_recording_closes_the_microphone() {
+        let mut conversation = joined(|_| {});
+        let utterance = press(&mut conversation);
+        conversation.apply(Event::Message(ServerMessage::TranscriptFailed {
+            utterance: utterance.clone(),
+            error: "Some of the recording was lost, so nothing was sent. Please try again.".into(),
+        }));
+        assert_eq!(conversation.take_actions(), [Action::CancelUtterance]);
+        assert_eq!(conversation.recording(), None);
+        conversation.talk(false);
+        assert!(conversation.take_actions().is_empty());
         assert!(
             conversation
                 .text()
-                .contains("Voice is moving to the server")
+                .contains("Some of the recording was lost")
         );
+
+        let utterance = press(&mut conversation);
+        conversation.apply(Event::UtteranceFailed(client::FailedUtterance {
+            utterance,
+            failure: UtteranceFailure::Congested,
+        }));
+        assert_eq!(conversation.take_actions(), [Action::CancelUtterance]);
+        assert!(conversation.text().contains("Network too slow"));
+
+        press(&mut conversation);
+        conversation.microphone_failed("No microphone is available.");
+        assert_eq!(conversation.take_actions(), [Action::CancelUtterance]);
+        assert!(conversation.text().contains("No microphone is available."));
+    }
+
+    #[test]
+    fn losing_focus_the_connection_or_the_space_cancels_recording() {
+        let mut conversation = joined(|_| {});
+        press(&mut conversation);
+        conversation.stop_talking();
+        assert_eq!(conversation.take_actions(), [Action::CancelUtterance]);
+        // A released utterance is still transcribed.
+        press(&mut conversation);
+        conversation.talk(false);
+        conversation.take_actions();
+        conversation.stop_talking();
+        assert!(conversation.take_actions().is_empty());
+
+        press(&mut conversation);
+        conversation.apply(Event::State(ConnectionState::Disconnected {
+            reason: client::Disconnect::Timeout,
+            retry_in: Duration::from_secs(1),
+        }));
+        assert_eq!(conversation.take_actions(), [Action::CancelUtterance]);
+        assert!(conversation.text().contains("Connection lost"));
+        // Offline, nothing is recorded.
+        conversation.talk(true);
+        assert!(conversation.take_actions().is_empty());
+        assert!(conversation.text().contains("Offline; cannot record."));
+
+        conversation.apply(connected());
+        conversation.take_actions();
+        press(&mut conversation);
+        conversation.back();
+        assert_eq!(
+            conversation.take_actions(),
+            [Action::CancelUtterance, Action::Send(ClientMessage::Leave)]
+        );
+    }
+
+    #[test]
+    fn x_outside_a_space_explains_itself() {
+        let mut conversation = Conversation::new("ada", "Ada");
+        conversation.connect(Choice::new("Studio", "10.0.0.1:8765", Source::Discovered));
+        conversation.apply(connected());
+        conversation.take_actions();
+        conversation.talk(true);
+        assert!(conversation.take_actions().is_empty());
+        assert!(
+            conversation
+                .text()
+                .contains("Join a space to talk to the agent.")
+        );
+    }
+
+    #[test]
+    fn the_recording_panel_fits() {
+        let long = "word ".repeat(200);
+        let mut conversation = joined(|_| {});
+        let utterance = press(&mut conversation);
+        conversation.apply(transcript(&utterance, &long, false));
+        assert_fits(&mut conversation);
+        conversation.talk(false);
+        assert_fits(&mut conversation);
     }
 
     #[test]

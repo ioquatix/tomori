@@ -10,8 +10,8 @@ the PC, which runs the agent sessions.
 Tomori is the name of both the system and its conversational coordinator; see
 [naming.md](naming.md). The Rust package and executable are named `tomori`.
 The headset finds servers with Bonjour or over USB; several participants can share
-a space. Voice is moving from the PC bridge to the server, so the headset is
-text-only for now. Sky is an early environment blockout, not finished artwork.
+a space. Hold **X** to talk to the space's agent: the server transcribes what
+you say and queues it. Replies are not spoken yet. Sky is an early environment blockout, not finished artwork.
 Private workspace memory and session state are not included in this public
 source repository.
 
@@ -104,6 +104,7 @@ selection first.
 - **Pending question:** answer it on the PC for now.
 - **B:** deny a pending approval, otherwise cancel your newest queued entry,
   otherwise leave the space.
+- **Hold X:** talk to the agent; release to send. See [Voice](#voice).
 
 The server keeps the conversation: after a dropped connection the headset
 reconnects and rejoins the space by itself. If the space is gone, as after the
@@ -185,9 +186,35 @@ sits lower so it doesn't obscure the swarm.
 
 ### Voice
 
-Speech recognition and spoken replies are moving from the PC bridge to the
-server (see [design/speech.md](design/speech.md)). Until they arrive, **X** shows
-a notice instead of recording, and replies are not spoken.
+In a space, hold **X** to talk to the agent. The microphone is open only while
+**X** is held: the panel shows **MIC AGENT** with the words recognized so far,
+and a **REC** timer above it counts up. Release **X** to send; the server
+finishes the transcript and queues it like typed input, where **B** can still
+cancel it.
+Otherwise the microphone is off, and the panel says **Mic off**. The first
+press asks for microphone permission; allow it and hold **X** again.
+
+If anything stops the words reaching the agent intact, such as lost audio, a
+dropped connection, nothing being heard or a full queue, the panel shows the
+error and nothing is sent. Losing focus, as when the system menu opens, cancels
+a recording that is still held. The audio is also relayed to the other
+participants in the space, though nothing plays it yet, and replies are not
+spoken yet (see [design/speech.md](design/speech.md) and
+[design/live-audio.md](design/live-audio.md)).
+
+Recognition runs on the server with Whisper `small.en`, which needs Python 3
+and about 700 MB in `.tools/`. From the repository root:
+
+```sh
+bash scripts/setup-pc-transcription.sh
+cargo run -p server --bin tomori-server -- --backend claude-code --speech-root .
+```
+
+Whisper uses CUDA on Linux when it is available, and the CPU elsewhere,
+including macOS. Without `--speech-root`, or if Whisper can't start, every
+utterance fails with an error that says so. The server can also synthesize
+replies with Kokoro (another 700 MB) for when the headset plays them; see
+[crates/speech/worker/readme.md](crates/speech/worker/readme.md).
 
 ## PC spectator and live audio (prototype)
 
@@ -424,8 +451,12 @@ cargo run -p client-quest -- --console [--server HOST:PORT] [--name NAME]
 ```
 
 Type the controller buttons as commands, such as `a`, `b`, `y`, `u` and `d`
-for the left stick, and `<` `>` for the right stick. `--server` (or
-`TOMORI_SERVER`) and `--name` also apply to `--xr`.
+for the left stick, and `<` `>` for the right stick. A terminal can't tell
+when a key is released, so `x` starts talking to the agent through the
+computer's default microphone and `x` again sends it. `--server` (or
+`TOMORI_SERVER`) and `--name` also apply to `--xr`, where **X** is held as on
+the headset. On Linux, building the desktop client needs the ALSA development
+files (`libasound2-dev` or `alsa-lib-devel`) for the microphone.
 
 ## Tests / desktop OpenXR
 

@@ -10,7 +10,7 @@ use std::{
     time::Duration,
 };
 
-const HELP: &str = "Commands, one or more per line: u/d/l/r (left stick), < > (right stick), a, b, y, x, q (quit).";
+const HELP: &str = "Commands, one or more per line: u/d/l/r (left stick), < > (right stick), a, b, y, x (start talking to the agent, x again to send), q (quit).";
 
 pub fn run(mut conversation: Conversation, mut connection: Connection) -> Result<()> {
     let (sender, input) = mpsc::channel();
@@ -47,7 +47,11 @@ pub fn run(mut conversation: Conversation, mut connection: Connection) -> Result
                         }
                         "b" => conversation.back(),
                         "y" => conversation.refresh(),
-                        "x" => conversation.talk(),
+                        // A terminal reports no key releases, so x starts recording and x again sends it.
+                        "x" => {
+                            let recording = conversation.recording().is_some();
+                            conversation.talk(!recording);
+                        }
                         "q" => return Ok(()),
                         _ => println!("{HELP}"),
                     }

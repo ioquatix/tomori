@@ -86,7 +86,6 @@ impl Android {
     }
 
     /// Whether the app holds `permission`, requesting it once if not. The request is answered asynchronously, so check again later.
-    #[allow(dead_code)] // The microphone requests RECORD_AUDIO once it moves to the server.
     pub fn check_or_request(&self, permission: &str, requested: &mut bool) -> Result<bool> {
         self.with(|env, activity| {
             let name = env.new_string(permission)?;
