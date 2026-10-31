@@ -5,6 +5,12 @@
 //!
 //! Backends are concrete types from separate crates. To add one: add a variant to [`AnyBackend`] and [`AnySession`] (behind a Cargo feature if it is optional), a `From` conversion for each, and an arm to the `dispatch!` macro below. Nothing else in the server names a concrete backend.
 
+// Built without any backend, the backend enums are empty and every match on them is vacuous.
+#![cfg_attr(
+    not(feature = "fake"),
+    allow(unused_variables, unused_mut, unreachable_code)
+)]
+
 use backend::{
     AnswerValue, Backend, Capabilities, Decision, Event, Prompt, Result, Session, SessionSpec,
     SessionSummary, Snapshot,

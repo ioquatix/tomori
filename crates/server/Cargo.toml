@@ -12,6 +12,14 @@ publish = false
 name = "tomori-server"
 path = "src/main.rs"
 
+[[test]]
+name = "connection"
+required-features = ["fake"]
+
+[[test]]
+name = "spaces"
+required-features = ["fake"]
+
 [features]
 default = ["fake"]
 # A scripted in-memory backend for tests and for manual testing without an agent.

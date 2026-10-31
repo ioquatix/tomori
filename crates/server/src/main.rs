@@ -5,6 +5,12 @@
 //!
 //! Serves Tomori clients on the local network. There is no authentication yet: anyone who can reach the port can join a space. See `design/server.md`.
 
+// Built without any backend, the backend enums are empty and every match on them is vacuous.
+#![cfg_attr(
+    not(feature = "fake"),
+    allow(unused_variables, unused_mut, unreachable_code)
+)]
+
 use std::net::SocketAddr;
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -52,14 +58,18 @@ fn parse(mut arguments: impl Iterator<Item = String>) -> Result<Arguments, Strin
     Ok(parsed)
 }
 
+fn backend(name: &str) -> Result<server::AnyBackend, String> {
+    match name {
+        #[cfg(feature = "fake")]
+        "fake" => Ok(server::fake::FakeBackend::new().into()),
+        other => Err(format!("unknown backend {other:?}")),
+    }
+}
+
 fn backends(names: &[String]) -> Result<Backends, String> {
     let mut backends = Backends::new();
     for name in names {
-        backends = match name.as_str() {
-            #[cfg(feature = "fake")]
-            "fake" => backends.with(server::fake::FakeBackend::new()),
-            other => return Err(format!("unknown backend {other:?}")),
-        };
+        backends = backends.with(backend(name)?);
     }
     Ok(backends)
 }
