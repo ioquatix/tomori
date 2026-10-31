@@ -11,7 +11,7 @@ license = "MIT OR Apache-2.0"
 crate-type = ["cdylib", "rlib"]
 
 [workspace]
-members = ["crates/environment-sky"]
+members = ["crates/environment-sky", "bake"]
 resolver = "3"
 
 [dependencies]
