@@ -275,3 +275,25 @@ fn hello_is_reserved_and_closing_drains_control() {
     assert_eq!(SendError::Closed.to_string(), "the client is closed");
     assert!(SendError::Reserved.to_string().contains("hello"));
 }
+
+#[test]
+fn membership_follows_the_server_unless_a_change_is_queued() {
+    let outbox = Outbox::new(8);
+    outbox.connect();
+    outbox
+        .send(ClientMessage::Join { space: "a".into() })
+        .unwrap();
+
+    // The queued join takes precedence over a report for an earlier space.
+    outbox.joined(None);
+    assert_eq!(outbox.membership().space.as_deref(), Some("a"));
+
+    items(&outbox);
+    outbox.joined(Some("a".into()));
+    assert_eq!(outbox.membership().space.as_deref(), Some("a"));
+
+    // The server left the space on the client's behalf, so a reconnection does not rejoin it.
+    outbox.joined(None);
+    outbox.disconnect();
+    assert!(outbox.connect().is_empty());
+}

@@ -180,6 +180,18 @@ impl Outbox {
         self.lock().membership.clone()
     }
 
+    /// Follow the space the server reports, so a reconnection does not rejoin a space the server left on the client's behalf. A queued `Join` or `Leave` takes precedence; any later message for an in-flight one corrects it.
+    pub fn joined(&self, space: Option<String>) {
+        let mut state = self.lock();
+        let pending = state
+            .control
+            .iter()
+            .any(|message| matches!(message, ClientMessage::Join { .. } | ClientMessage::Leave));
+        if !pending {
+            state.membership.space = space;
+        }
+    }
+
     pub fn is_closed(&self) -> bool {
         self.lock().closed
     }

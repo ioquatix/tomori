@@ -252,6 +252,13 @@ fn deliver(context: &Context<'_>, frame: Frame) -> Result<(), Disconnect> {
                 return Err(Disconnect::Protocol("unexpected second welcome".into()));
             }
             message => {
+                match &message {
+                    ServerMessage::Space { state } => {
+                        context.shared.outbox.joined(Some(state.id.clone()))
+                    }
+                    ServerMessage::Left => context.shared.outbox.joined(None),
+                    _ => {}
+                }
                 let _ = context.events.send(Event::Message(message));
             }
         },
