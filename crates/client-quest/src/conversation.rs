@@ -45,6 +45,8 @@ pub struct Conversation {
     server: usize,
     /// Whether the stick moved the server selection; until then the best choice, listed first, stays selected as servers appear.
     chosen: bool,
+    /// The address of the chosen server while it is missing from the list, as while browsing restarts, so that it is selected again when it reappears.
+    missing: Option<String>,
     /// Whether the remembered server may still be connected to when it appears: only once, before the participant moves the selection or connects.
     automatic: bool,
     /// The server chosen in the server list, while in the lobby or a space.
@@ -91,6 +93,7 @@ impl Conversation {
             servers: Vec::new(),
             server: 0,
             chosen: false,
+            missing: None,
             automatic: true,
             connected: None,
             state: None,
@@ -134,14 +137,22 @@ impl Conversation {
 
     /// Replace the server list, keeping the selection on the same server.
     pub fn set_servers(&mut self, servers: Vec<Choice>) {
-        let selected = self
-            .servers
-            .get(self.server)
-            .filter(|_| self.chosen)
-            .map(|choice| &choice.address);
-        self.server = selected
-            .and_then(|address| servers.iter().position(|choice| &choice.address == address))
-            .unwrap_or(0);
+        let selected = self.missing.take().or_else(|| {
+            self.servers
+                .get(self.server)
+                .filter(|_| self.chosen)
+                .map(|choice| choice.address.clone())
+        });
+        match selected {
+            Some(address) => match servers.iter().position(|choice| choice.address == address) {
+                Some(index) => self.server = index,
+                None => {
+                    self.server = 0;
+                    self.missing = Some(address);
+                }
+            },
+            None => self.server = 0,
+        }
         self.servers = servers;
         if self.automatic
             && !self.chosen
@@ -343,7 +354,10 @@ impl Conversation {
         match self.mode {
             Mode::Servers => {
                 self.server = shift(self.server, vertical, self.servers.len());
-                self.chosen |= vertical != 0;
+                if vertical != 0 {
+                    self.chosen = true;
+                    self.missing = None;
+                }
             }
             Mode::Lobby => self.selected = shift(self.selected, vertical, self.spaces.len()),
             Mode::Space => {
@@ -1544,6 +1558,36 @@ mod tests {
             conversation.take_actions().as_slice(),
             [Action::Connect(choice)] if choice.address == "b"
         ));
+    }
+
+    #[test]
+    fn selects_the_used_server_again_when_browsing_finds_it_after_returning() {
+        let mut conversation = Conversation::new("ada", "Ada");
+        let usb = Choice::new("USB", USB, Source::Usb);
+        let servers = vec![
+            Choice::new("A", "a", Source::Discovered),
+            Choice::new("B", "b", Source::Discovered),
+            usb.clone(),
+        ];
+        conversation.set_servers(servers.clone());
+        conversation.navigate(0, 1);
+        conversation.accept();
+        conversation.back();
+        conversation.take_actions();
+        // Browsing restarts with only the USB entry, then finds the servers again.
+        conversation.set_servers(vec![usb.clone()]);
+        conversation.set_servers(servers);
+        conversation.accept();
+        assert!(matches!(
+            conversation.take_actions().as_slice(),
+            [Action::Connect(choice)] if choice.address == "b"
+        ));
+        // Moving the selection while the server is missing forgets it.
+        conversation.back();
+        conversation.set_servers(vec![usb.clone()]);
+        conversation.navigate(0, 1);
+        conversation.set_servers(vec![usb, Choice::new("B", "b", Source::Discovered)]);
+        assert!(conversation.text().contains("> USB"));
     }
 
     fn remembered() -> Choice {
