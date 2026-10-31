@@ -15,6 +15,8 @@ Scene content can be produced by modules running on the server. An agent can wri
 
 Scene content can be interactive. Participant input on a node is delivered to the module that owns it.
 
+At least initially, the scene graph and modules are independent of agent interactions. They do not depend on agent backends, sessions or the conversation, and agent features do not depend on them. Agents author modules through ordinary tools; the scene graph does not need to know which agent wrote a module.
+
 The scene model is meant to grow better lighting and physics over time.
 
 Open questions, not yet decided:
