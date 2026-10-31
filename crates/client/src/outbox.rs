@@ -129,6 +129,8 @@ struct State {
     utterance_limit: usize,
     utterance: Option<OpenUtterance>,
     membership: Membership,
+    /// A `Leave` the server has not confirmed, sent again after the next Hello because the server rejoins the last space on reconnection.
+    leave_unconfirmed: bool,
     connected: bool,
     closed: bool,
     /// Alternates between control and the stream when both are waiting, so neither starves the other.
@@ -202,6 +204,7 @@ impl Outbox {
                 utterance_limit: utterance_limit.max(1),
                 utterance: None,
                 membership: Membership::default(),
+                leave_unconfirmed: false,
                 connected: false,
                 closed: false,
                 prefer_stream: false,
@@ -241,10 +244,12 @@ impl Outbox {
             }
             ClientMessage::Join { space } => {
                 state.membership.space = Some(space.clone());
+                state.leave_unconfirmed = false;
                 true
             }
             ClientMessage::Leave => {
                 state.membership.space = None;
+                state.leave_unconfirmed = true;
                 true
             }
             ClientMessage::Gate { gate } => {
@@ -399,6 +404,7 @@ impl Outbox {
         });
         if !pending {
             state.membership.space = space;
+            state.leave_unconfirmed = false;
         }
     }
 
@@ -414,6 +420,8 @@ impl Outbox {
     }
 
     /// Start a connection: return the messages that restore membership, which supersede any queued membership changes.
+    ///
+    /// The server rejoins a reconnecting participant's last space, so a `Leave` it has not confirmed with `Left` is sent again, whether it was sent while disconnected or lost with the previous connection. A redundant `Leave` is harmless.
     pub fn connect(&self) -> Vec<ClientMessage> {
         let mut state = self.lock();
         state.connected = true;
@@ -428,7 +436,12 @@ impl Outbox {
                     | ClientMessage::Presence { .. }
             )
         });
-        state.membership.messages()
+        let mut messages = Vec::new();
+        if state.membership.space.is_none() && state.leave_unconfirmed {
+            messages.push(ClientMessage::Leave);
+        }
+        messages.extend(state.membership.messages());
+        messages
     }
 
     /// The connection ended. Unsent control messages wait for the next one; queued audio is discarded.

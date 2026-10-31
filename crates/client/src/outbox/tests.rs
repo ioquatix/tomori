@@ -343,6 +343,50 @@ fn keepalive_precedes_queued_traffic_and_is_not_deferred() {
     }
 }
 
+#[test]
+fn a_leave_the_server_has_not_confirmed_is_restored() {
+    let outbox = Outbox::new(16, 64);
+    outbox.connect();
+    outbox
+        .send(ClientMessage::Join { space: "a".into() })
+        .unwrap();
+    items(&outbox);
+    outbox.joined(Some("a".into()));
+
+    // Leaving while disconnected: the server would rejoin the space it remembers.
+    outbox.disconnect();
+    outbox.send(ClientMessage::Leave).unwrap();
+    assert_eq!(outbox.connect(), [ClientMessage::Leave]);
+
+    // Still unconfirmed when that connection ends, so it is sent again.
+    outbox.disconnect();
+    assert_eq!(outbox.connect(), [ClientMessage::Leave]);
+
+    // The server's `Left` confirms it.
+    outbox.joined(None);
+    outbox.disconnect();
+    assert!(outbox.connect().is_empty());
+
+    // A leave lost with its connection is sent again too.
+    outbox
+        .send(ClientMessage::Join { space: "b".into() })
+        .unwrap();
+    outbox.send(ClientMessage::Leave).unwrap();
+    items(&outbox);
+    outbox.disconnect();
+    assert_eq!(outbox.connect(), [ClientMessage::Leave]);
+
+    // Joining again supersedes it.
+    outbox.disconnect();
+    outbox
+        .send(ClientMessage::Join { space: "c".into() })
+        .unwrap();
+    assert_eq!(
+        outbox.connect(),
+        [ClientMessage::Join { space: "c".into() }]
+    );
+}
+
 fn agent(sequence: u32) -> AudioFrame {
     AudioFrame {
         gate: Gate::Agent,

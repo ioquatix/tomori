@@ -137,6 +137,7 @@ impl<B: ReadableBody> Session<B> {
                             ..Default::default()
                         }),
                     }),
+                    ClientMessage::Leave => self.reply(ServerMessage::Left),
                     ClientMessage::ListSpaces => {
                         self.reply(ServerMessage::Spaces { spaces: Vec::new() })
                     }

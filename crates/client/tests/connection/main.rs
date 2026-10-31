@@ -183,8 +183,11 @@ fn reconnects_and_restores_the_joined_space_and_gate() {
         }
     );
 
-    // Leaving clears what is restored next time.
+    // Leaving, once the server confirms it, clears what is restored next time.
     client.send(ClientMessage::Leave).unwrap();
+    wait_for(&client, |event| {
+        matches!(event, Event::Message(ServerMessage::Left))
+    });
     client.send(kick()).unwrap();
     assert_eq!(wait_connected(&client), 3);
     client.send(ClientMessage::ListSpaces).unwrap();
