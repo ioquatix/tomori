@@ -208,20 +208,20 @@ impl Conversation {
                     }
                 }
             }
-            ServerMessage::Error { error, .. } => {
+            ServerMessage::Error { error, space } => {
                 log::warn!("Server error: {error}");
-                let rejoining = self.mode == Mode::Space
-                    && self.joining.is_some()
-                    && self.joining.as_deref()
-                        == self.space.as_ref().map(|space| space.id.as_str());
-                if rejoining {
-                    // The space is gone, as after the server restarts.
+                if space.is_some() && space == self.joining {
+                    // Our join was refused: the space is gone, as after the server restarts. The client restores the
+                    // membership a join records when it reconnects, so leave explicitly rather than ask for it again.
                     self.close_space();
                     self.mode = Mode::Lobby;
-                    self.list();
+                    self.leaving = true;
+                    self.send(ClientMessage::Leave);
+                } else if self.mode == Mode::Lobby {
+                    // An older server does not name the space it refuses.
+                    self.joining = None;
                 }
-                // A refused join or decision can be tried again.
-                self.joining = None;
+                // A refused decision can be tried again.
                 self.decided = None;
                 self.error = Some(error);
             }
@@ -896,6 +896,14 @@ mod tests {
             .collect()
     }
 
+    /// The server's refusal of a join of `space`.
+    fn refused(space: &str) -> Event {
+        Event::Message(ServerMessage::Error {
+            error: "That space does not exist.".into(),
+            space: Some(space.into()),
+        })
+    }
+
     /// A conversation connected to a server and joined to [`SPACE`].
     fn joined(change: impl FnOnce(&mut SpaceState)) -> Conversation {
         let mut conversation = Conversation::new("ada", "Ada");
@@ -1185,13 +1193,60 @@ mod tests {
             retry_in: Duration::from_secs(1),
         }));
         conversation.apply(connected());
+        conversation.apply(refused(SPACE));
+        assert_eq!(conversation.mode(), Mode::Lobby);
+        // Leaving keeps the client from asking for the space again on the next reconnect; the server lists spaces after it.
+        assert_eq!(sent(&mut conversation), [ClientMessage::Leave]);
+        assert!(conversation.text().contains("That space does not exist."));
+        conversation.apply(Event::Message(ServerMessage::Left));
+        assert_eq!(conversation.mode(), Mode::Lobby);
+        assert!(conversation.take_actions().is_empty());
+    }
+
+    #[test]
+    fn another_error_while_rejoining_stays_in_the_space() {
+        let mut conversation = joined(|_| {});
+        conversation.apply(Event::State(ConnectionState::Disconnected {
+            reason: client::Disconnect::Closed,
+            retry_in: Duration::from_secs(1),
+        }));
+        conversation.apply(connected());
+        // Such as a decision sent before the connection dropped, refused once it was delivered.
         conversation.apply(Event::Message(ServerMessage::Error {
-            error: "That space does not exist.".into(),
+            error: "That request is no longer pending.".into(),
             space: None,
         }));
+        assert_eq!(conversation.mode(), Mode::Space);
+        assert!(conversation.take_actions().is_empty());
+        // Nor does a refusal of some other space.
+        conversation.apply(refused("space-other"));
+        assert_eq!(conversation.mode(), Mode::Space);
+        conversation.apply(space(|_| {}));
+        assert_eq!(conversation.mode(), Mode::Space);
+    }
+
+    #[test]
+    fn a_refused_join_from_the_lobby_leaves() {
+        let mut conversation = Conversation::new("ada", "Ada");
+        conversation.connect(Choice::new("Studio", "10.0.0.1:8765", Source::Discovered));
+        conversation.apply(connected());
+        conversation.apply(Event::Message(ServerMessage::Spaces {
+            spaces: vec![SpaceSummary {
+                id: SPACE.into(),
+                title: "Tomori".into(),
+                backend: "claude-code".into(),
+                directory: "/work/tomori".into(),
+                activity: Activity::Idle,
+                participants: 0,
+            }],
+        }));
+        conversation.take_actions();
+        conversation.accept();
+        conversation.take_actions();
+        conversation.apply(refused(SPACE));
         assert_eq!(conversation.mode(), Mode::Lobby);
-        assert_eq!(sent(&mut conversation), [ClientMessage::ListSpaces]);
-        assert!(conversation.text().contains("That space does not exist."));
+        assert_eq!(sent(&mut conversation), [ClientMessage::Leave]);
+        assert!(!conversation.text().contains("Joining..."));
     }
 
     #[test]
