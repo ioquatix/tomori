@@ -13,6 +13,7 @@ use client::{ConnectionState, Event};
 use protocol::{
     Activity, ClientMessage, Decision, QueueState, Role, ServerMessage, SpaceState, SpaceSummary,
 };
+use std::sync::Arc;
 
 const BODY_ROWS: usize = ROWS - 4;
 
@@ -69,6 +70,15 @@ pub struct Conversation {
     notice: Option<String>,
     error: Option<String>,
     actions: Vec<Action>,
+    /// The last body paginated, since the panel is drawn every frame.
+    paged: Option<Paged>,
+}
+
+/// A body's text, the rows it was paginated into, and its pages.
+struct Paged {
+    text: String,
+    rows: usize,
+    pages: Arc<[Vec<String>]>,
 }
 
 impl Conversation {
@@ -99,6 +109,7 @@ impl Conversation {
             notice: None,
             error: None,
             actions: Vec::new(),
+            paged: None,
         }
     }
 
@@ -689,9 +700,18 @@ impl Conversation {
                 }
                 lines
             });
-        let pages = match &choice {
-            Some(choice) => paginate(&body, BODY_ROWS - choice.len()),
-            None => pages(&body),
+        let rows = BODY_ROWS - choice.as_ref().map_or(0, Vec::len);
+        let pages = match &self.paged {
+            Some(paged) if paged.text == body && paged.rows == rows => paged.pages.clone(),
+            _ => {
+                let pages: Arc<[Vec<String>]> = paginate(&body, rows).into();
+                self.paged = Some(Paged {
+                    text: body,
+                    rows,
+                    pages: pages.clone(),
+                });
+                pages
+            }
         };
         self.page = self.page.min(pages.len() - 1);
         let Some(space) = &self.space else {
@@ -1159,6 +1179,19 @@ mod tests {
             field: "test".into(),
             supported: true,
         }
+    }
+
+    #[test]
+    fn redraws_a_message_whose_text_changes_to_the_same_length() {
+        let mut conversation = joined(|state| {
+            state.messages = vec![message("m1", Role::Assistant, "Hello")];
+        });
+        assert!(conversation.text().contains("Hello"));
+        conversation.apply(space(|state| {
+            state.messages = vec![message("m1", Role::Assistant, "Howdy")];
+        }));
+        let text = conversation.text();
+        assert!(text.contains("Howdy") && !text.contains("Hello"));
     }
 
     #[test]
