@@ -796,9 +796,12 @@ fn standing_row(tool: &str, request: &Value) -> Option<Vec<Value>> {
         "Bash" => bash_row(suggestions, str_field(request, "decision_reason_type")),
         "Read" => read_row(suggestions),
         "WebFetch" => web_fetch_row(suggestions, str_field(input, "url")?),
-        tool if EDIT_TOOLS.contains(&tool) => edit_row(suggestions, str_field(input, "file_path")?),
+        tool if EDIT_TOOLS.contains(&tool) => edit_row(
+            suggestions,
+            str_field(input, "file_path").or_else(|| str_field(input, "notebook_path"))?,
+        ),
         // These tools have dialogs of their own, which Tomori does not model.
-        QUESTION_TOOL | "ExitPlanMode" | "PowerShell" => None,
+        QUESTION_TOOL | "ExitPlanMode" | "EnterPlanMode" | "PowerShell" | "Skill" => None,
         tool => tool_row(suggestions, tool),
     }
 }
@@ -1521,6 +1524,18 @@ mod tests {
             json!([{"type": "setMode", "mode": "acceptEdits", "destination": "session"}]),
         );
         assert_eq!(updates(request), None);
+
+        // A notebook names its file differently.
+        let request = suggested(
+            "p4",
+            "NotebookEdit",
+            json!({"notebook_path": "/work/notes.ipynb", "new_source": "x"}),
+            json!([{"type": "setMode", "mode": "acceptEdits", "destination": "session"}]),
+        );
+        assert_eq!(
+            updates(request),
+            Some(json!([{"type": "setMode", "destination": "session", "mode": "acceptEdits"}]))
+        );
     }
 
     #[test]
