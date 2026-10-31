@@ -16,6 +16,8 @@ The server advertises itself on the local network with DNS service discovery ove
 
 Wire types are defined once in a shared protocol crate used by both the server and native clients.
 
+Shutting the server down closes every space's session and ends every connection, and completes even while a space is being created: a session that finishes starting after shutdown has begun is closed at once rather than registered.
+
 The server serves a bounded number of connections at once, so a connection that is not doing useful work must not keep its slot. A connection that has not completed a request head within the request timeout of being accepted, or of finishing its previous response, is closed; so is a `/connect` exchange that has not said Hello within the request timeout. The request timeout defaults to 10 seconds and is configurable. Once a participant has said Hello, `connection-liveness.md` applies instead.
 
 No frame exceeds the protocol's frame limit (`MAX_FRAME_BYTES`, 1 MiB), which every receiver enforces. Encoding a larger frame is an error rather than a corrupt or oversized frame, and the server never panics on it.
@@ -41,5 +43,6 @@ The server crate, the protocol crate, the shared client crate and network config
 - Test that a running server is found by browsing for `_tomori._tcp`, with its protocol version and name, and that it disappears from the list when it stops. On a Quest, confirm that the server list populates on the same Wi-Fi network.
 - Over UDP, test that an isolated lost packet is recovered by error correction, that an unrecovered `agent` frame is requested again, and that playback continues without waiting for it.
 - Review the protocol for operations outside the listed responsibilities.
+- Test that shutdown completes when a session finishes starting after shutdown began, and that the session is closed.
 - Test with a short request timeout that more silent sockets than the connection limit do not prevent a new `GET /health` from being served, and that an idle keep-alive connection, an incomplete request head and a `/connect` without Hello are closed.
 - Test that oversized client strings are rejected without being repeated, that a large conversation and a large lobby listing arrive within the snapshot budget, and that encoding an oversized frame fails without producing it.

@@ -49,8 +49,10 @@ pub struct CreateRequest {
     pub backend: String,
     pub directory: String,
     pub session: Option<String>,
-    /// The participant who asked; they join the space once it exists.
+    /// The participant who asked; they join the space once it exists, unless they have joined another space meanwhile.
     pub creator: String,
+    /// The space the creator was in when they asked.
+    pub creator_space: Option<String>,
 }
 
 pub struct Hub {
@@ -73,6 +75,8 @@ struct HubState {
     /// In creation order.
     spaces: Vec<SpaceRecord>,
     utterances: HashMap<UtteranceId, UtteranceRecord>,
+    /// Set once shutdown has begun: no further spaces are registered.
+    shutting_down: bool,
 }
 
 struct ConnectionRecord {
@@ -662,6 +666,7 @@ impl Hub {
                     directory,
                     session,
                     creator: participant.to_owned(),
+                    creator_space: space.map(str::to_owned),
                 };
                 if self.jobs.try_send(request).is_err() {
                     state.error(participant, "The server is shutting down.");
@@ -990,15 +995,18 @@ impl Hub {
         }
     }
 
-    /// Add a space for a newly started session, and move its creator into it.
+    /// Add a space for a newly started session, and move its creator into it unless they have joined another space since asking. Returns `None`, registering nothing, once shutdown has begun: the caller must close the session.
     pub(crate) fn register_space(
         &self,
         request: &CreateRequest,
         session: String,
         snapshot: Snapshot,
         commands: async_channel::Sender<SpaceCommand>,
-    ) -> String {
+    ) -> Option<String> {
         let mut state = self.lock();
+        if state.shutting_down {
+            return None;
+        }
         state.next_space += 1;
         let id = format!("space-{}", state.next_space);
         let model = SpaceModel::new(
@@ -1016,16 +1024,19 @@ impl Hub {
             model.session
         );
         state.spaces.push(SpaceRecord { model, commands });
-        if state
+        let creator_waiting = state
             .participants
             .get(&request.creator)
-            .is_some_and(|record| record.connection.is_some())
-        {
+            .is_some_and(|record| {
+                record.connection.is_some()
+                    && (record.space.is_none() || record.space == request.creator_space)
+            });
+        if creator_waiting {
             state.join(&request.creator, &id);
         }
         state.pump(&id);
         state.touch_lobby();
-        id
+        Some(id)
     }
 
     pub(crate) fn create_failed(&self, creator: &str, error: String) {
@@ -1205,7 +1216,9 @@ impl Hub {
     /// Ask every space driver to close its session, and end every connection.
     pub fn shutdown(&self) {
         self.jobs.close();
-        let state = self.lock();
+        let mut state = self.lock();
+        // Spaces still being created are closed as soon as their session starts; see `register_space`.
+        state.shutting_down = true;
         for space in &state.spaces {
             let _ = space.commands.try_send(SpaceCommand::Close);
         }

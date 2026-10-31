@@ -165,6 +165,85 @@ fn input_to_a_closed_space_fails_visibly() {
     assert_eq!(session.log().prompts.len(), 1);
 }
 
+/// Wait until `backend` has `count` sessions whose creation is held.
+fn wait_creating(backend: &FakeBackend, count: u64) {
+    let deadline = std::time::Instant::now() + TIMEOUT;
+    while backend.creating() != count {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "creation never started"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn shutdown_completes_while_a_space_is_being_created() {
+    let backend = FakeBackend::new();
+    backend.hold_creation();
+    let server = TestServer::with_backend(backend.clone());
+    let mut ada = server.connect("ada", "Ada");
+    ada.send(&ClientMessage::CreateSpace {
+        title: "Slow".to_owned(),
+        backend: "fake".to_owned(),
+        directory: "/tmp".to_owned(),
+        session: None,
+    });
+    wait_creating(&backend, 1);
+
+    // Shut down, and let the session finish starting only once shutdown has begun.
+    let (done, stopped) = std::sync::mpsc::channel();
+    let stopping = std::thread::spawn(move || {
+        drop(server);
+        done.send(()).unwrap();
+    });
+    assert!(ada.is_closed(TIMEOUT));
+    backend.release_creation();
+    stopped
+        .recv_timeout(TIMEOUT)
+        .expect("shutdown waited for ever on the new space");
+    stopping.join().unwrap();
+    let session = backend.started()[0].clone();
+    assert!(session.log().closed);
+}
+
+#[test]
+fn a_creator_who_moved_on_is_not_moved_into_the_new_space() {
+    let backend = FakeBackend::new();
+    let server = TestServer::with_backend(backend.clone());
+    let mut ada = server.connect("ada", "Ada");
+    let mut bob = server.connect("bob", "Bob");
+    let other = bob.create_space("Other").id;
+
+    backend.hold_creation();
+    ada.send(&ClientMessage::CreateSpace {
+        title: "Slow".to_owned(),
+        backend: "fake".to_owned(),
+        directory: "/tmp".to_owned(),
+        session: None,
+    });
+    wait_creating(&backend, 1);
+    join(&mut ada, &other, 2);
+    backend.release_creation();
+
+    // The space is created empty, and Ada stays in the space she went to.
+    let carol = server.connect("carol", "Carol");
+    let participants = carol.wait_for(|message| match message {
+        ServerMessage::Spaces { spaces } => spaces
+            .iter()
+            .find(|space| space.title == "Slow")
+            .map(|space| space.participants),
+        _ => None,
+    });
+    assert_eq!(participants, 0);
+    let window = Duration::from_millis(200);
+    while let Some(message) = ada.next_message(window) {
+        if let ServerMessage::Space { state } = message {
+            assert_eq!(state.id, other, "Ada was moved into the new space");
+        }
+    }
+}
+
 #[test]
 fn a_repeated_utterance_is_queued_once() {
     let server = TestServer::with_backend(FakeBackend::manual());

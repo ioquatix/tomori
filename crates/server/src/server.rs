@@ -309,7 +309,13 @@ async fn run_space(hub: Arc<Hub>, request: CreateRequest, voices: Voices) {
         Err(error) => (Snapshot::default(), Some(error.message)),
     };
     let (commands, receiver) = async_channel::unbounded();
-    let space = hub.register_space(&request, session.id(), snapshot, commands);
+    let Some(space) = hub.register_space(&request, session.id(), snapshot, commands) else {
+        // The server began shutting down while the session started.
+        if let Err(error) = session.close().await {
+            log::warn!("Closing a session started during shutdown failed: {error}");
+        }
+        return;
+    };
     if let Some(error) = error {
         hub.space_event(&space, Event::Error { message: error });
     }

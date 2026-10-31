@@ -6,7 +6,7 @@ This describes the target design for the Rust server that replaces `bridge/`. Th
 
 A space is bound to exactly one agent session. Every participant in a space interacts with that same session; a space never fans one participant's input out to several sessions, and a participant never addresses a session outside the space they have joined.
 
-The server hosts multiple spaces concurrently. Clients can list, create, join, leave and move between spaces. Creating a space either starts a new agent session or binds an existing one, where the backend supports binding. A client is a participant in at most one space at a time; moving to another space leaves the previous one.
+The server hosts multiple spaces concurrently. Clients can list, create, join, leave and move between spaces. Creating a space either starts a new agent session or binds an existing one, where the backend supports binding. A client is a participant in at most one space at a time; moving to another space leaves the previous one. Starting a session can take time; once it has started, the creator joins the new space, unless they have joined another space since asking.
 
 Shared space state is held by the server and is the same for every participant: the conversation, the input queue, pending approvals and questions (including partially answered forms), delegated workers, presentation cards and worker visibility. Per-participant state is limited to presence, local presentation choices such as mute or paging, and the participant's own in-progress recording.
 
