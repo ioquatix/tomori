@@ -70,6 +70,8 @@ pub struct Conversation {
     /// The approval a decision was sent for, so another press cannot send a second one.
     decided: Option<String>,
     notice: Option<String>,
+    /// Shown in the lobby after a space you were in or joining has gone, until dismissed with B or another choice.
+    ended: Option<String>,
     error: Option<String>,
     actions: Vec<Action>,
     /// The last body paginated, since the panel is drawn every frame.
@@ -110,6 +112,7 @@ impl Conversation {
             option: 0,
             decided: None,
             notice: None,
+            ended: None,
             error: None,
             actions: Vec::new(),
             paged: None,
@@ -177,6 +180,7 @@ impl Conversation {
         self.mode = Mode::Lobby;
         self.error = None;
         self.notice = None;
+        self.ended = None;
     }
 
     /// Report a problem the connection found, such as a client that could not start.
@@ -236,6 +240,18 @@ impl Conversation {
                     // Our join was refused because the space does not exist, as after the server restarts. The client
                     // sends the membership it last recorded again after every reconnect, which would be this join, so
                     // record a leave in its place.
+                    let title = self
+                        .space
+                        .as_ref()
+                        .map(|space| space.title.clone())
+                        .or_else(|| {
+                            self.spaces
+                                .iter()
+                                .find(|summary| summary.id == gone)
+                                .map(|summary| summary.title.clone())
+                        })
+                        .unwrap_or_else(|| "The space".into());
+                    self.ended = Some(format!("{title} has ended."));
                     self.spaces.retain(|summary| summary.id != gone);
                     self.selected = self.selected.min(self.spaces.len().saturating_sub(1));
                     self.listed = false;
@@ -243,10 +259,11 @@ impl Conversation {
                     self.mode = Mode::Lobby;
                     self.leaving = true;
                     self.send(ClientMessage::Leave);
+                } else {
+                    self.error = Some(error);
                 }
                 // A refused decision can be tried again.
                 self.decided = None;
-                self.error = Some(error);
             }
             // Speech, transcripts and presence come with the microphone, playback and presence work.
             ServerMessage::Welcome { .. }
@@ -412,6 +429,8 @@ impl Conversation {
                     let space = space.id.clone();
                     self.joining = Some(space.clone());
                     self.leaving = false;
+                    self.error = None;
+                    self.ended = None;
                     self.send(ClientMessage::Join { space });
                 }
                 false
@@ -440,10 +459,14 @@ impl Conversation {
         }
     }
 
-    /// B: deny the pending approval, cancel your newest queued input, or leave the space; in the lobby, return to the server list.
+    /// B: deny the pending approval, cancel your newest queued input, or leave the space; in the lobby, dismiss what is shown or return to the server list.
     pub fn back(&mut self) {
         match self.mode {
             Mode::Servers => {}
+            Mode::Lobby if self.dismissable() => {
+                self.error = None;
+                self.ended = None;
+            }
             Mode::Lobby => {
                 self.actions.push(Action::Disconnect);
                 self.connected = None;
@@ -453,6 +476,7 @@ impl Conversation {
                 self.close_space();
                 self.leaving = false;
                 self.error = None;
+                self.ended = None;
                 self.mode = Mode::Servers;
             }
             Mode::Space => {
@@ -551,6 +575,11 @@ impl Conversation {
         lines.join("\n")
     }
 
+    /// Whether the lobby shows an error or an ended space, which B dismisses before it returns to the server list.
+    fn dismissable(&self) -> bool {
+        self.error.is_some() || self.ended.is_some()
+    }
+
     fn status(&self) -> Option<String> {
         if let Some(error) = &self.error {
             return Some(format!("ERROR: {error}"));
@@ -612,17 +641,22 @@ impl Conversation {
             (self.selected + 1).min(self.spaces.len()),
             self.spaces.len()
         ))];
-        lines.push(short(&self.status().unwrap_or_else(|| {
-            if self.joining.is_some() {
-                "Joining...".into()
-            } else if !self.listed {
-                "Listing spaces...".into()
-            } else if self.spaces.is_empty() {
-                "No spaces yet; create one from the PC.".into()
-            } else {
-                format!("You are {}.", self.name)
-            }
-        })));
+        lines.push(short(
+            &self
+                .status()
+                .or_else(|| self.ended.clone())
+                .unwrap_or_else(|| {
+                    if self.joining.is_some() {
+                        "Joining...".into()
+                    } else if !self.listed {
+                        "Listing spaces...".into()
+                    } else if self.spaces.is_empty() {
+                        "No spaces yet; create one from the PC.".into()
+                    } else {
+                        format!("You are {}.", self.name)
+                    }
+                }),
+        ));
         let rows = ROWS - 3;
         let start = window(self.selected, self.spaces.len(), rows);
         for (index, space) in self.spaces.iter().enumerate().skip(start).take(rows) {
@@ -640,7 +674,11 @@ impl Conversation {
         while lines.len() < ROWS - 1 {
             lines.push(String::new());
         }
-        lines.push("A join | B servers | Y refresh".into());
+        lines.push(if self.dismissable() {
+            "A join | B dismiss | Y refresh".into()
+        } else {
+            "A join | B servers | Y refresh".into()
+        });
         lines
     }
 
@@ -1245,10 +1283,24 @@ mod tests {
         assert_eq!(conversation.mode(), Mode::Lobby);
         // Leaving keeps the client from asking for the space again on the next reconnect; the server lists spaces after it.
         assert_eq!(sent(&mut conversation), [ClientMessage::Leave]);
-        assert!(conversation.text().contains("That space does not exist."));
         conversation.apply(Event::Message(ServerMessage::Left));
         assert_eq!(conversation.mode(), Mode::Lobby);
         assert!(conversation.take_actions().is_empty());
+        // The lobby says the space has ended, rather than showing the server's error, and B dismisses it before it leaves the server.
+        let text = conversation.text();
+        assert!(text.contains("Tomori has ended."), "{text}");
+        assert!(!text.contains("ERROR"), "{text}");
+        assert!(text.contains("B dismiss"), "{text}");
+        conversation.back();
+        assert_eq!(conversation.mode(), Mode::Lobby);
+        assert!(conversation.take_actions().is_empty());
+        let text = conversation.text();
+        assert!(
+            !text.contains("has ended") && text.contains("B servers"),
+            "{text}"
+        );
+        conversation.back();
+        assert_eq!(conversation.mode(), Mode::Servers);
     }
 
     #[test]
@@ -1296,8 +1348,9 @@ mod tests {
         assert_eq!(sent(&mut conversation), [ClientMessage::Leave]);
         // The gone space is no longer offered while the listing that follows the leave is awaited.
         let text = conversation.text();
-        assert!(!text.contains("Joining...") && !text.contains("Tomori"));
+        assert!(!text.contains("Joining...") && !text.contains("> Tomori"));
         assert!(text.contains("SPACES 0/0"));
+        assert!(text.contains("Tomori has ended."), "{text}");
     }
 
     #[test]

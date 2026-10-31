@@ -93,7 +93,8 @@ selection first.
   searches again. A server with an incompatible protocol is listed with its
   version but can't be chosen.
 - **Spaces:** flick the left stick up/down to choose; **A** joins; **B** returns
-  to the servers; **Y** lists again.
+  to the servers, or first dismisses an error or a note that a space has ended;
+  **Y** lists again.
 - **In a space:** flick the left stick up/down to page through text and
   left/right to move between messages; the queue follows the last message.
   **Y** fetches the space again.
