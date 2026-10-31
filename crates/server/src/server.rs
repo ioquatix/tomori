@@ -25,7 +25,10 @@ use crate::backends::{AnySession, Backends};
 use crate::hub::{CreateRequest, Hub, SpaceCommand};
 use crate::transcriber::Transcriber;
 use crate::voice::{Voice, Voices};
-use crate::workspace::{DEFAULT_MAX_SPACES, DIRECTORY_UNAVAILABLE, SpaceSlots, WorkspaceRoots};
+use crate::workspace::{
+    DEFAULT_MAX_SPACES, DIRECTORY_UNAVAILABLE, RESOLVE_TIMEOUT, Resolving, SpaceSlots,
+    WorkspaceRoots,
+};
 
 /// A Tomori server: the HTTP application plus the supervisor that owns every space's backend session.
 ///
@@ -149,7 +152,7 @@ impl Server {
         let ((served, ()), ((), ())) = zip(
             zip(
                 self.serve(scheduler, listener, cancellation),
-                self.supervise(cancellation),
+                self.supervise(scheduler, cancellation),
             ),
             zip(
                 self.sweep(scheduler, cancellation),
@@ -304,7 +307,7 @@ impl Server {
     }
 
     /// Start requested spaces and drive their sessions until cancelled.
-    async fn supervise(&self, cancellation: &Cancellation) {
+    async fn supervise<S: Timers>(&self, scheduler: &S, cancellation: &Cancellation) {
         let roots = match &self.roots {
             Some(roots) => roots.clone(),
             None => WorkspaceRoots::home().unwrap_or_else(|error| {
@@ -312,6 +315,7 @@ impl Server {
                 WorkspaceRoots::none()
             }),
         };
+        let resolving = Arc::new(Resolving::default());
         let mut spaces = FuturesUnordered::new();
         let mut cancelled = pin!(cancellation.cancelled());
         loop {
@@ -331,10 +335,16 @@ impl Server {
             };
             match job {
                 Ok(request) => spaces.push(run_space(
+                    scheduler,
                     self.hub.clone(),
                     request,
                     self.voices.clone(),
-                    &roots,
+                    Places {
+                        roots: &roots,
+                        resolving: &resolving,
+                        slots: &self.slots,
+                    },
+                    cancellation,
                 )),
                 Err(_) => break,
             }
@@ -356,24 +366,38 @@ fn record(statistics: &mut Statistics, outcome: Result<u64, Error>) {
     }
 }
 
+/// Where spaces may run, and how many.
+struct Places<'a> {
+    roots: &'a WorkspaceRoots,
+    resolving: &'a Arc<Resolving>,
+    slots: &'a Arc<SpaceSlots>,
+}
+
 /// Start one space's session, then drive it until it closes or the server shuts down.
-async fn run_space(
+async fn run_space<S: Timers>(
+    scheduler: &S,
     hub: Arc<Hub>,
     mut request: CreateRequest,
     voices: Voices,
-    roots: &WorkspaceRoots,
+    places: Places<'_>,
+    cancellation: &Cancellation,
 ) {
     let Some(backend) = hub.backends.get(&request.backend) else {
         return;
     };
     // Creating and attaching both run the agent in the directory, so both are confined to the workspace roots. The space shows the canonical directory.
-    match roots.resolve_str(&request.directory) {
-        Ok(directory) => request.directory = directory,
-        Err(_) => {
+    match resolve(scheduler, &places, &request.directory, cancellation).await {
+        Some(directory) => request.directory = directory,
+        None => {
             hub.create_failed(&request.creator, DIRECTORY_UNAVAILABLE.to_owned());
             return;
         }
     }
+    // Only an accepted directory takes a place, which is held until the session has closed or failed to start. Spaces still starting count, so concurrent requests cannot pass the limit together.
+    let Some(_slot) = places.slots.acquire() else {
+        hub.create_failed(&request.creator, places.slots.full_error());
+        return;
+    };
     let session = match &request.session {
         Some(id) => backend.attach(id, &request.directory).await,
         None => {
@@ -418,6 +442,31 @@ async fn run_space(
     hub.space_ended(&space, error);
     if let Err(error) = session.close().await {
         log::warn!("Closing the session of {space} failed: {error}");
+    }
+}
+
+/// The canonical form of a client's directory, checked on its own thread for at most [`RESOLVE_TIMEOUT`] so that a slow file system cannot stall the server, or `None` if it is refused.
+async fn resolve<S: Timers>(
+    scheduler: &S,
+    places: &Places<'_>,
+    directory: &str,
+    cancellation: &Cancellation,
+) -> Option<String> {
+    let resolved = places
+        .roots
+        .resolve_in_background(directory, places.resolving)
+        .ok()?;
+    let mut timer = scheduler.timer();
+    let deadline = scheduler.now() + RESOLVE_TIMEOUT;
+    let timeout = scheduler.timer_wait_until(&mut timer, deadline, cancellation);
+    match select(pin!(resolved.recv()), pin!(timeout)).await {
+        Either::Left((result, _)) => result.ok()?.ok(),
+        Either::Right(_) => {
+            log::warn!(
+                "Refused directory {directory:?}: checking it took longer than {RESOLVE_TIMEOUT:?}."
+            );
+            None
+        }
     }
 }
 

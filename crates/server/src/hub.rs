@@ -24,7 +24,7 @@ use crate::limits;
 use crate::outbox::{Outbox, Outgoing};
 use crate::space::{AnswerOutcome, SpaceModel};
 use crate::transcriber::{Transcriber, TranscriptSink, UtteranceId};
-use crate::workspace::{SpaceSlot, SpaceSlots};
+use crate::workspace::SpaceSlots;
 
 pub type ConnectionId = u64;
 
@@ -59,8 +59,6 @@ pub struct CreateRequest {
     pub creator: String,
     /// The space the creator was in when they asked.
     pub creator_space: Option<String>,
-    /// This space's place under the running space limit, held until its session has closed or failed to start.
-    pub slot: SpaceSlot,
 }
 
 pub struct Hub {
@@ -740,17 +738,11 @@ impl Hub {
                     );
                     return;
                 }
-                // Spaces still starting count, so concurrent requests cannot pass the limit together. The directory is checked when the session starts, outside the lock.
-                let Some(slot) = self.slots.acquire() else {
-                    state.error(
-                        participant,
-                        format!(
-                            "This server already runs its limit of {} spaces; try again when one closes.",
-                            self.slots.limit()
-                        ),
-                    );
+                // Refuse early when the limit is already reached. The supervisor checks the directory outside the lock and only then takes a place, so that a refused directory never holds one.
+                if self.slots.is_full() {
+                    state.error(participant, self.slots.full_error());
                     return;
-                };
+                }
                 let request = CreateRequest {
                     title,
                     backend,
@@ -758,7 +750,6 @@ impl Hub {
                     session,
                     creator: participant.to_owned(),
                     creator_space: space.map(str::to_owned),
-                    slot,
                 };
                 if self.jobs.try_send(request).is_err() {
                     state.error(participant, "The server is shutting down.");

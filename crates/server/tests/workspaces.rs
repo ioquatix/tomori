@@ -205,3 +205,24 @@ fn a_refused_directory_does_not_keep_a_place() {
     create(&mut ada, "Allowed", root.to_str().unwrap(), None);
     ada.space(|state| state.title == "Allowed");
 }
+
+#[test]
+fn a_refused_directory_holds_no_place_while_it_is_checked() {
+    let scratch = Scratch::new("pipelined");
+    let root = scratch.directory("root");
+    let server = start(FakeBackend::new(), &[&root], 1);
+    let mut ada = server.connect("ada", "Ada");
+    let missing = format!("{}/missing", root.to_str().unwrap());
+    // Sent together, so the refused requests are still being checked when the allowed one arrives.
+    for _ in 0..10 {
+        create(&mut ada, "Refused", "/", None);
+        create(&mut ada, "Refused", &missing, None);
+    }
+    create(&mut ada, "Allowed", root.to_str().unwrap(), None);
+    ada.wait_for(|message| match message {
+        ServerMessage::Space { state } if state.title == "Allowed" => Some(()),
+        ServerMessage::Error { error } if error == DIRECTORY_UNAVAILABLE => None,
+        ServerMessage::Error { error } => panic!("the allowed space was refused: {error}"),
+        _ => None,
+    });
+}
