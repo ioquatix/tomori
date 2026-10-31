@@ -4,6 +4,7 @@
 #[cfg(target_os = "android")]
 mod android;
 mod caption;
+mod capture;
 mod connection;
 #[cfg(not(target_os = "android"))]
 mod console;
@@ -89,7 +90,13 @@ fn desktop_connection(
     let store = identity::Store::new(None);
     let identity = identity::Identity::new(&store, identity::host_name().as_deref(), overrides);
     let mut conversation = conversation::Conversation::new(&identity.participant, &identity.name);
-    let connection = connection::Connection::new(identity, store, Box::new(()), &mut conversation);
+    let connection = connection::Connection::new(
+        identity,
+        store,
+        Box::new(()),
+        Box::new(capture::Desktop),
+        &mut conversation,
+    );
     (conversation, connection)
 }
 
@@ -271,8 +278,10 @@ fn android_connection(
     let store = identity::Store::new(android.data());
     let identity = identity::Identity::new(&store, device.as_deref(), overrides);
     let mut conversation = conversation::Conversation::new(&identity.participant, &identity.name);
+    let capture = Box::new(capture::Android::new(android.clone()));
     let multicast = Box::new(android::MulticastLock::new(android));
-    let connection = connection::Connection::new(identity, store, multicast, &mut conversation);
+    let connection =
+        connection::Connection::new(identity, store, multicast, capture, &mut conversation);
     (conversation, connection)
 }
 

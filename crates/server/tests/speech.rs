@@ -255,6 +255,74 @@ fn push_to_talk_shows_partials_then_queues_the_final_transcript() {
     }
 }
 
+/// Wait for a message from the server through a real client.
+fn receive<T>(client: &client::Client, mut select: impl FnMut(ServerMessage) -> Option<T>) -> T {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .expect("the message arrives in time");
+        if let client::Event::Message(message) = client.events().recv_timeout(remaining).unwrap()
+            && let Some(value) = select(message)
+        {
+            return value;
+        }
+    }
+}
+
+#[test]
+fn the_client_microphone_sends_push_to_talk_that_is_transcribed_and_queued() {
+    let server = recognizing_server(FakeBackend::manual());
+    let ada = client::Client::connect(client::Options::new(
+        server.address.to_string(),
+        "ada",
+        "Ada",
+    ))
+    .unwrap();
+    ada.sender()
+        .send(ClientMessage::CreateSpace {
+            title: "Microphone".into(),
+            backend: server::fake::FAKE_BACKEND_NAME.into(),
+            directory: "/tmp".into(),
+            session: None,
+        })
+        .unwrap();
+    let space = receive(&ada, |message| match message {
+        ServerMessage::Space { state } => Some(state.id),
+        _ => None,
+    });
+    let mut bob = server.connect("bob", "Bob");
+    bob.send(&ClientMessage::Join { space });
+    bob.space(|state| state.participants.len() == 2);
+
+    let mut microphone = client::Microphone::new(ada.sender(), RATE);
+    // Audio before pressing is not sent, and capture delivers buffers that are not whole frames.
+    microphone.push(&spoken(&["fail"])).unwrap();
+    microphone.begin("launch-1").unwrap();
+    for buffer in spoken(&["run", "the", "tests"]).chunks(441) {
+        microphone.push(buffer).unwrap();
+    }
+    microphone.end().unwrap();
+
+    let text = receive(&ada, |message| match message {
+        ServerMessage::Transcript {
+            utterance,
+            text,
+            finished: true,
+        } if utterance == "launch-1" => Some(text),
+        ServerMessage::TranscriptFailed { error, .. } => panic!("{error}"),
+        _ => None,
+    });
+    assert_eq!(text, "run the tests");
+    // Bob heard it too, as push-to-talk audio.
+    let heard = bob.next_audio(Duration::from_secs(5)).unwrap();
+    assert_eq!(heard.gate, Gate::Agent);
+    let state = bob.space(|state| !state.queue.is_empty());
+    assert_eq!(state.queue[0].text, "run the tests");
+    assert_eq!(state.queue[0].participant, "ada");
+    ada.close();
+}
+
 #[test]
 fn a_recognizer_failure_fails_the_utterance() {
     let server = recognizing_server(FakeBackend::manual());
@@ -277,12 +345,56 @@ fn a_recognizer_failure_fails_the_utterance() {
     assert!(error.contains("the worker exited"), "{error}");
     assert!(error.contains("nothing was sent"), "{error}");
     // Nothing was queued: no snapshot with a queue entry follows.
+    // Nor is the end refused, if the failure came first.
     while let Some(message) = ada.next_message(Duration::from_millis(200)) {
-        if let ServerMessage::Space { state } = message {
-            assert!(state.queue.is_empty());
+        match message {
+            ServerMessage::Space { state } => assert!(state.queue.is_empty()),
+            ServerMessage::Error { error, .. } => panic!("{error}"),
+            _ => {}
         }
     }
     assert!(server.backend.started()[0].log().prompts.is_empty());
+}
+
+#[test]
+fn a_recognizer_failure_while_recording_closes_the_utterance() {
+    let server = recognizing_server(FakeBackend::manual());
+    let mut ada = server.connect("ada", "Ada");
+    ada.create_space("Failure");
+    ada.send(&ClientMessage::UtteranceBegin {
+        utterance: "u1".into(),
+    });
+    speak(&mut ada, &["please", "fail", "please", "please"]);
+    // Still recording: the failure arrives before any end.
+    ada.wait_for(|message| match message {
+        ServerMessage::TranscriptFailed { utterance, .. } if utterance == "u1" => Some(()),
+        _ => None,
+    });
+    // An end already on its way when the failure was reported is ignored, not refused.
+    ada.send(&ClientMessage::UtteranceEnd {
+        utterance: "u1".into(),
+    });
+    // The client forgets it without cancelling, as the server has closed it; the next utterance neither fails it again nor is refused.
+    ada.send(&ClientMessage::UtteranceBegin {
+        utterance: "u2".into(),
+    });
+    speak(&mut ada, &["run", "the", "tests"]);
+    ada.send(&ClientMessage::UtteranceEnd {
+        utterance: "u2".into(),
+    });
+    let text = ada.wait_for(|message| match message {
+        ServerMessage::TranscriptFailed { utterance, error } => {
+            panic!("{utterance} failed: {error}")
+        }
+        ServerMessage::Error { error, .. } => panic!("{error}"),
+        ServerMessage::Transcript {
+            utterance,
+            text,
+            finished: true,
+        } if utterance == "u2" => Some(text.clone()),
+        _ => None,
+    });
+    assert!(text.contains("run the tests"), "{text}");
 }
 
 #[test]

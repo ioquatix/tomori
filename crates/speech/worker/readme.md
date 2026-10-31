@@ -17,7 +17,7 @@ bash scripts/fetch-tts-model.sh                    # .tools/tts/kokoro-multi-lan
 .tools/asr-venv/bin/pip install 'sherpa-onnx==1.13.8'
 ```
 
-Both workers share the `.tools/asr-venv` environment. `WhisperConfig::from_root` and `KokoroConfig::from_root` expect this layout. The Whisper config also puts the environment's CUDA libraries on `LD_LIBRARY_PATH`. Whisper runs on CUDA when it is available; set `WhisperConfig::device` to force `cpu`. Kokoro runs on the CPU with two threads.
+Both workers share the `.tools/asr-venv` environment. `WhisperConfig::from_root` and `KokoroConfig::from_root` expect this layout. The Whisper config also puts the environment's CUDA libraries on `LD_LIBRARY_PATH`. Whisper runs on CUDA when it is available; set `WhisperConfig::device` to force `cpu`. The CUDA libraries are installed only on Linux; on macOS Whisper runs on the CPU. Kokoro runs on the CPU with two threads.
 
 To check the real engines:
 

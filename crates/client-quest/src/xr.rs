@@ -160,6 +160,8 @@ pub fn run(
     let mut environment_latched = false;
     let mut choice_latched = false;
     let mut was_talking = false;
+    // After focus loss, X must be released before it records again, so that holding it through a system menu does not start a recording.
+    let mut talk_blocked = false;
     let mut signals = crate::interaction::Signals::default();
     #[cfg(target_os = "android")]
     let mut delegation_scene = crate::delegation::Scene::new();
@@ -187,6 +189,8 @@ pub fn run(
                         environment_latched = false;
                         choice_latched = false;
                         was_talking = false;
+                        talk_blocked = true;
+                        conversation.stop_talking();
                         #[cfg(target_os = "android")]
                         presentation_navigation.release();
                     }
@@ -228,6 +232,8 @@ pub fn run(
             environment_latched = false;
             choice_latched = false;
             was_talking = false;
+            talk_blocked = true;
+            conversation.stop_talking();
             #[cfg(target_os = "android")]
             presentation_navigation.release();
         }
@@ -279,10 +285,15 @@ pub fn run(
         }
         choice_latched = choice_moving;
         let reset = controls.reset && conversation.accept();
-        if controls.talk && !was_talking {
-            conversation.talk();
+        // Hold X to talk to the agent; releasing it while focused sends the utterance.
+        if focused && !controls.talk {
+            talk_blocked = false;
         }
-        was_talking = controls.talk;
+        let talking = controls.talk && !talk_blocked;
+        if talking != was_talking {
+            conversation.talk(talking);
+        }
+        was_talking = talking;
         // Spoken replies and the audience microphone return with server playback.
         let _ = (
             controls.sound_toggle,
@@ -297,6 +308,7 @@ pub fn run(
             if choosing { 0.0 } else { right.y },
         );
         caption.set_text(&gpu.queue, &conversation.text());
+        caption.set_recording_progress(&gpu.queue, conversation.recording(), Duration::ZERO);
         if reset {
             swarm = Swarm::new();
         }
