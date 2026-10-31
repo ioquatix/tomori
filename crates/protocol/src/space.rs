@@ -22,6 +22,8 @@ pub enum Activity {
     Running,
     /// A permission or question needs a participant's input.
     Waiting,
+    /// The agent session has ended. The space keeps its state, but input is no longer accepted; `SpaceState::error` says why.
+    Closed,
     #[default]
     Unknown,
 }

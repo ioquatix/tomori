@@ -1,7 +1,7 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-//! `tomori-server [--bind ADDRESS] [--backend NAME]... [--speech-root PATH] [--name NAME] [--no-advertise]`
+//! `tomori-server [--bind ADDRESS] [--backend NAME]... [--speech-root PATH] [--name NAME] [--no-advertise] [--keepalive-interval SECONDS] [--keepalive-timeout SECONDS] [--request-timeout SECONDS]`
 //!
 //! Serves Tomori clients on the local network, advertised with Bonjour as `_tomori._tcp`. There is no authentication yet: anyone who can reach the port can join a space. See `design/server.md`.
 
@@ -15,14 +15,17 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
+use std::time::Duration;
 
 use base_scheduler::{Cancellation, SocketLocalAddress};
 use base_scheduler_direct::{DirectOptions, DirectScheduler};
 use futures_lite::future::block_on;
+use protocol::Keepalive;
 use server::{Backends, NullTranscriber, Server, Transcriber};
 
 const USAGE: &str = "Usage: tomori-server [--bind ADDRESS] [--backend NAME]... [--speech-root PATH]
-                     [--name NAME] [--no-advertise]
+                     [--name NAME] [--no-advertise] [--keepalive-interval SECONDS]
+                     [--keepalive-timeout SECONDS] [--request-timeout SECONDS]
 
 Options:
   --bind ADDRESS       Listen address (default 0.0.0.0:8765).
@@ -33,6 +36,14 @@ Options:
   --name NAME          The name clients list for this server (default: the host name).
   --no-advertise       Do not advertise the server with Bonjour (_tomori._tcp); clients must enter
                        its address.
+  --keepalive-interval SECONDS
+                       Ping a connection that has been quiet this long (default 5).
+  --keepalive-timeout SECONDS
+                       Release a connection that has received nothing, or accepted no output,
+                       for this long (default 15). Must be longer than the interval.
+  --request-timeout SECONDS
+                       Close a connection that has not sent a request, or said Hello, within this
+                       long (default 10).
   --help               Show this help.";
 
 struct Arguments {
@@ -41,6 +52,19 @@ struct Arguments {
     speech_root: Option<PathBuf>,
     name: Option<String>,
     advertise: bool,
+    keepalive: Keepalive,
+    request_timeout: Option<Duration>,
+}
+
+/// A positive number of seconds, such as `5` or `0.5`.
+fn seconds(flag: &str, value: Option<String>) -> Result<Duration, String> {
+    let value = value.ok_or_else(|| format!("{flag} needs a number of seconds"))?;
+    value
+        .parse::<f64>()
+        .ok()
+        .filter(|seconds| seconds.is_finite() && *seconds > 0.0)
+        .and_then(|seconds| Duration::try_from_secs_f64(seconds).ok())
+        .ok_or_else(|| format!("{flag} needs a positive number of seconds, not {value:?}"))
 }
 
 fn parse(mut arguments: impl Iterator<Item = String>) -> Result<Arguments, String> {
@@ -50,6 +74,8 @@ fn parse(mut arguments: impl Iterator<Item = String>) -> Result<Arguments, Strin
         speech_root: None,
         name: None,
         advertise: true,
+        keepalive: Keepalive::DEFAULT,
+        request_timeout: None,
     };
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
@@ -72,9 +98,24 @@ fn parse(mut arguments: impl Iterator<Item = String>) -> Result<Arguments, Strin
             }
             "--name" => parsed.name = Some(arguments.next().ok_or("--name needs a name")?),
             "--no-advertise" => parsed.advertise = false,
+            "--keepalive-interval" => {
+                parsed.keepalive.interval = seconds(&argument, arguments.next())?
+            }
+            "--keepalive-timeout" => {
+                parsed.keepalive.timeout = seconds(&argument, arguments.next())?
+            }
+            "--request-timeout" => {
+                parsed.request_timeout = Some(seconds(&argument, arguments.next())?)
+            }
             "--help" | "-h" => return Err(USAGE.to_owned()),
             other => return Err(format!("unknown argument {other:?}\n\n{USAGE}")),
         }
+    }
+    if parsed.keepalive.timeout <= parsed.keepalive.interval {
+        return Err(format!(
+            "--keepalive-timeout ({:?}) must be longer than --keepalive-interval ({:?}), so that a ping can be answered first",
+            parsed.keepalive.timeout, parsed.keepalive.interval
+        ));
     }
     if parsed.backends.is_empty() {
         parsed.backends.push("fake".to_owned());
@@ -241,7 +282,11 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let server = synthesis(Server::new(backends, transcriber), root);
+    let mut server = Server::new(backends, transcriber).with_keepalive(arguments.keepalive);
+    if let Some(timeout) = arguments.request_timeout {
+        server = server.with_request_timeout(timeout);
+    }
+    let server = synthesis(server, root);
     let cancellation = Cancellation::new();
     // Stop on Ctrl-C or SIGTERM by shutting down in order, so that the Bonjour advertisement is withdrawn rather than left to expire.
     #[cfg(unix)]
@@ -294,6 +339,51 @@ impl base_scheduler::Notify<libc::c_int> for Shutdown {
             eprintln!("Shutting down; signal again to exit immediately.");
         } else {
             std::process::exit(128 + signal);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn arguments(list: &[&str]) -> Result<Arguments, String> {
+        parse(list.iter().map(|argument| argument.to_string()))
+    }
+
+    #[test]
+    fn keepalive_and_request_timeouts_are_configurable() {
+        let parsed = arguments(&[]).unwrap();
+        assert_eq!(parsed.keepalive, Keepalive::DEFAULT);
+        assert_eq!(parsed.request_timeout, None);
+
+        let parsed = arguments(&[
+            "--keepalive-interval",
+            "0.5",
+            "--keepalive-timeout",
+            "2",
+            "--request-timeout",
+            "3",
+        ])
+        .unwrap();
+        assert_eq!(parsed.keepalive.interval, Duration::from_millis(500));
+        assert_eq!(parsed.keepalive.timeout, Duration::from_secs(2));
+        assert_eq!(parsed.request_timeout, Some(Duration::from_secs(3)));
+    }
+
+    #[test]
+    fn invalid_timeouts_are_refused() {
+        for list in [
+            &["--keepalive-interval"][..],
+            &["--keepalive-interval", "0"],
+            &["--keepalive-interval", "-1"],
+            &["--keepalive-timeout", "soon"],
+            &["--request-timeout", "inf"],
+            // The timeout must exceed the interval.
+            &["--keepalive-interval", "20"],
+            &["--keepalive-interval", "4", "--keepalive-timeout", "4"],
+        ] {
+            assert!(arguments(list).is_err(), "{list:?} was accepted");
         }
     }
 }

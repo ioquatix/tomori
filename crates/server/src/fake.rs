@@ -24,6 +24,8 @@ pub struct FakeLog {
     pub decisions: Vec<(String, Decision)>,
     pub answers: Vec<(String, Vec<(String, AnswerValue)>)>,
     pub interrupts: usize,
+    /// Whether the server closed the session.
+    pub closed: bool,
 }
 
 #[derive(Clone, Default)]
@@ -34,6 +36,10 @@ pub struct FakeBackend {
 #[derive(Default)]
 struct FakeShared {
     manual: AtomicBool,
+    /// While set, session creation waits; see [`FakeBackend::hold_creation`].
+    held: AtomicBool,
+    released: event_listener::Event,
+    creating: AtomicU64,
     next: AtomicU64,
     sessions: Mutex<Vec<FakeSession>>,
 }
@@ -49,6 +55,21 @@ impl FakeBackend {
         let backend = Self::default();
         backend.shared.manual.store(true, Ordering::SeqCst);
         backend
+    }
+
+    /// Make session creation wait until [`release_creation`](Self::release_creation), as a slow agent start would.
+    pub fn hold_creation(&self) {
+        self.shared.held.store(true, Ordering::SeqCst);
+    }
+
+    pub fn release_creation(&self) {
+        self.shared.held.store(false, Ordering::SeqCst);
+        self.shared.released.notify(usize::MAX);
+    }
+
+    /// Sessions whose creation is waiting.
+    pub fn creating(&self) -> u64 {
+        self.shared.creating.load(Ordering::SeqCst)
     }
 
     /// Every session created or attached so far, oldest first.
@@ -109,6 +130,15 @@ impl Backend for FakeBackend {
     }
 
     async fn create(&self, spec: SessionSpec) -> Result<FakeSession> {
+        self.shared.creating.fetch_add(1, Ordering::SeqCst);
+        while self.shared.held.load(Ordering::SeqCst) {
+            let listener = self.shared.released.listen();
+            if !self.shared.held.load(Ordering::SeqCst) {
+                break;
+            }
+            listener.await;
+        }
+        self.shared.creating.fetch_sub(1, Ordering::SeqCst);
         Ok(self.start(&spec.title, &spec.directory))
     }
 
@@ -284,6 +314,7 @@ impl Session for FakeSession {
     }
 
     async fn close(&self) -> Result<()> {
+        self.inner.log.lock().unwrap().closed = true;
         if !self.inner.closed.load(Ordering::SeqCst) {
             self.emit(Event::Closed { reason: None });
         }

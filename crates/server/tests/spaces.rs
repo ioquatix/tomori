@@ -107,22 +107,175 @@ fn queued_input_is_visible_to_everyone_and_anyone_can_cancel_it() {
 }
 
 #[test]
-fn a_repeated_utterance_is_queued_once() {
+fn input_to_a_closed_space_fails_visibly() {
     let server = TestServer::with_backend(FakeBackend::manual());
-    let (mut ada, _bob, _) = pair(&server);
+    let (mut ada, _bob, space) = pair(&server);
+    let lobby = server.connect("carol", "Carol");
     ada.say("u1", "first");
     ada.say("u2", "second");
-    ada.say("u3", "third");
-    // Messages on one connection are handled in order, so this snapshot includes the repeat.
-    let state = ada.space(|state| state.queue.iter().any(|entry| entry.text == "third"));
-    assert_eq!(
+    ada.space(|state| {
         state
             .queue
             .iter()
-            .filter(|entry| entry.text == "second")
-            .count(),
-        1
+            .any(|entry| entry.text == "second" && entry.state == QueueState::Queued)
+    });
+
+    // The session ends: queued input fails instead of waiting forever, and the space shows it is closed.
+    let session = server.backend.started()[0].clone();
+    session.emit(Event::Closed {
+        reason: Some("agent exited".to_owned()),
+    });
+    let state = ada.space(|state| state.activity == Activity::Closed);
+    assert_eq!(state.error.as_deref(), Some("agent exited"));
+    let states: Vec<(&str, QueueState)> = state
+        .queue
+        .iter()
+        .map(|entry| (entry.text.as_str(), entry.state))
+        .collect();
+    assert_eq!(
+        states,
+        [
+            ("first", QueueState::Delivered),
+            ("second", QueueState::Failed)
+        ]
     );
+    lobby.wait_for(|message| match message {
+        ServerMessage::Spaces { spaces } => spaces
+            .iter()
+            .any(|summary| summary.id == space && summary.activity == Activity::Closed)
+            .then_some(()),
+        _ => None,
+    });
+
+    // New input is refused rather than queued.
+    ada.say("u3", "third");
+    let error = ada.wait_for(|message| match message {
+        ServerMessage::TranscriptFailed { utterance, error } if utterance == "u3" => {
+            Some(error.clone())
+        }
+        _ => None,
+    });
+    assert!(error.contains("ended"), "{error}");
+    let window = Duration::from_millis(200);
+    while let Some(message) = ada.next_message(window) {
+        if let ServerMessage::Space { state } = message {
+            assert!(!state.queue.iter().any(|entry| entry.text == "third"));
+        }
+    }
+    assert_eq!(session.log().prompts.len(), 1);
+}
+
+/// Wait until `backend` has `count` sessions whose creation is held.
+fn wait_creating(backend: &FakeBackend, count: u64) {
+    let deadline = std::time::Instant::now() + TIMEOUT;
+    while backend.creating() != count {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "creation never started"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn shutdown_completes_while_a_space_is_being_created() {
+    let backend = FakeBackend::new();
+    backend.hold_creation();
+    let server = TestServer::with_backend(backend.clone());
+    let mut ada = server.connect("ada", "Ada");
+    ada.send(&ClientMessage::CreateSpace {
+        title: "Slow".to_owned(),
+        backend: "fake".to_owned(),
+        directory: "/tmp".to_owned(),
+        session: None,
+    });
+    wait_creating(&backend, 1);
+
+    // Shut down, and let the session finish starting only once shutdown has begun.
+    let (done, stopped) = std::sync::mpsc::channel();
+    let stopping = std::thread::spawn(move || {
+        drop(server);
+        done.send(()).unwrap();
+    });
+    assert!(ada.is_closed(TIMEOUT));
+    backend.release_creation();
+    stopped
+        .recv_timeout(TIMEOUT)
+        .expect("shutdown waited for ever on the new space");
+    stopping.join().unwrap();
+    let session = backend.started()[0].clone();
+    assert!(session.log().closed);
+}
+
+#[test]
+fn a_creator_who_moved_on_is_not_moved_into_the_new_space() {
+    let backend = FakeBackend::new();
+    let server = TestServer::with_backend(backend.clone());
+    let mut ada = server.connect("ada", "Ada");
+    let mut bob = server.connect("bob", "Bob");
+    let other = bob.create_space("Other").id;
+
+    backend.hold_creation();
+    ada.send(&ClientMessage::CreateSpace {
+        title: "Slow".to_owned(),
+        backend: "fake".to_owned(),
+        directory: "/tmp".to_owned(),
+        session: None,
+    });
+    wait_creating(&backend, 1);
+    join(&mut ada, &other, 2);
+    backend.release_creation();
+
+    // The space is created empty, and Ada stays in the space she went to.
+    let carol = server.connect("carol", "Carol");
+    let participants = carol.wait_for(|message| match message {
+        ServerMessage::Spaces { spaces } => spaces
+            .iter()
+            .find(|space| space.title == "Slow")
+            .map(|space| space.participants),
+        _ => None,
+    });
+    assert_eq!(participants, 0);
+    let window = Duration::from_millis(200);
+    while let Some(message) = ada.next_message(window) {
+        if let ServerMessage::Space { state } = message {
+            assert_eq!(state.id, other, "Ada was moved into the new space");
+        }
+    }
+}
+
+#[test]
+fn a_repeated_utterance_is_queued_once() {
+    let server = TestServer::with_backend(FakeBackend::manual());
+    let (mut ada, _bob, _) = pair(&server);
+    let finished = |client: &TestClient, id: &str| {
+        client.wait_for(|message| match message {
+            ServerMessage::Transcript {
+                utterance,
+                text,
+                finished: true,
+            } if utterance == id => Some(text.clone()),
+            ServerMessage::TranscriptFailed { utterance, error } if utterance == id => {
+                panic!("{id} failed: {error}")
+            }
+            _ => None,
+        })
+    };
+    ada.say("u1", "first");
+    ada.say("u2", "second");
+    assert_eq!(finished(&ada, "u2"), "second");
+    // The client finalizes the same utterance again, as after a reconnect. It is acknowledged with the text queued the first time, and not queued again.
+    ada.say("u2", "second retried");
+    assert_eq!(finished(&ada, "u2"), "second");
+    ada.say("u3", "third");
+    // Messages on one connection are handled in order, so this snapshot follows the repeat.
+    let state = ada.space(|state| state.queue.iter().any(|entry| entry.text == "third"));
+    let texts: Vec<&str> = state
+        .queue
+        .iter()
+        .map(|entry| entry.text.as_str())
+        .collect();
+    assert_eq!(texts, ["first", "second", "third"]);
 }
 
 #[test]
@@ -178,6 +331,51 @@ fn the_first_decision_wins() {
         decision: Decision::Deny,
     });
     assert_eq!(ada.error(), "That approval is no longer pending.");
+}
+
+#[test]
+fn parallel_permissions_are_decided_in_turn() {
+    let server = TestServer::start();
+    let (mut ada, bob, _) = pair(&server);
+    let session = server.backend.started()[0].clone();
+    for id in ["p1", "p2"] {
+        session.emit(Event::PermissionRequested(Permission {
+            id: id.to_owned(),
+            tool: "Bash".to_owned(),
+            input: serde_json::Value::Null,
+            description: None,
+        }));
+    }
+
+    // The oldest request is presented first, and the second waits its turn.
+    let state = bob.space(|state| state.approval.as_ref().is_some_and(|a| a.id == "p1"));
+    assert_eq!(state.activity, Activity::Waiting);
+    ada.send(&ClientMessage::Decide {
+        request: "p2".to_owned(),
+        decision: Decision::Deny,
+    });
+    assert_eq!(ada.error(), "That approval is no longer pending.");
+
+    ada.send(&ClientMessage::Decide {
+        request: "p1".to_owned(),
+        decision: Decision::AllowOnce,
+    });
+    let state = bob.space(|state| state.approval.as_ref().is_some_and(|a| a.id == "p2"));
+    assert_eq!(state.activity, Activity::Waiting);
+    ada.send(&ClientMessage::Decide {
+        request: "p2".to_owned(),
+        decision: Decision::Deny,
+    });
+    // Once the backend confirms the last decision, nothing is pending.
+    bob.space(|state| state.approval.is_none() && state.activity != Activity::Waiting);
+
+    assert_eq!(
+        session.log().decisions,
+        [
+            ("p1".to_owned(), backend::Decision::AllowOnce),
+            ("p2".to_owned(), backend::Decision::Deny)
+        ]
+    );
 }
 
 #[test]
@@ -314,6 +512,58 @@ fn audio_is_relayed_within_the_space_with_the_server_assigned_source() {
 }
 
 #[test]
+fn a_frame_lost_before_the_first_one_received_fails_the_utterance() {
+    let server = TestServer::start();
+    let (mut ada, _bob, _) = pair(&server);
+    // Open-microphone audio before the utterance sets the sequence the utterance must continue from.
+    ada.send_audio(Gate::Live, speech("ab"));
+    ada.send(&ClientMessage::UtteranceBegin {
+        utterance: "u1".to_owned(),
+    });
+    // The utterance's first frame is lost; the next one arrives.
+    ada.skip_sequence(1);
+    ada.send_audio(Gate::Agent, speech("cd"));
+    ada.send(&ClientMessage::UtteranceEnd {
+        utterance: "u1".to_owned(),
+    });
+    let error = ada.wait_for(|message| match message {
+        ServerMessage::TranscriptFailed { utterance, error } if utterance == "u1" => {
+            Some(error.clone())
+        }
+        ServerMessage::Transcript {
+            utterance,
+            finished: true,
+            ..
+        } if utterance == "u1" => panic!("a cut utterance was queued"),
+        _ => None,
+    });
+    assert!(error.contains("lost"), "{error}");
+
+    // Audio while not in a space still counts, so a contiguous utterance after joining succeeds.
+    ada.send(&ClientMessage::Leave);
+    ada.wait_for(|message| matches!(message, ServerMessage::Left).then_some(()));
+    ada.send_audio(Gate::Live, speech("ef"));
+    let id = ada.wait_for(|message| match message {
+        ServerMessage::Spaces { spaces } if !spaces.is_empty() => Some(spaces[0].id.clone()),
+        _ => None,
+    });
+    join(&mut ada, &id, 2);
+    ada.say("u2", "again");
+    let text = ada.wait_for(|message| match message {
+        ServerMessage::Transcript {
+            utterance,
+            text,
+            finished: true,
+        } if utterance == "u2" => Some(text.clone()),
+        ServerMessage::TranscriptFailed { utterance, error } if utterance == "u2" => {
+            panic!("u2 failed: {error}")
+        }
+        _ => None,
+    });
+    assert_eq!(text, "again");
+}
+
+#[test]
 fn a_lost_frame_fails_the_utterance() {
     let server = TestServer::start();
     let (mut ada, _bob, _) = pair(&server);
@@ -402,4 +652,122 @@ fn participants_move_between_spaces_and_the_lobby() {
         text: "x".to_owned(),
     });
     assert_eq!(ada.error(), "Join a space first.");
+}
+
+#[test]
+fn a_streaming_reply_sends_paced_snapshots_ending_with_the_latest_state() {
+    let server = TestServer::with_backend(FakeBackend::manual());
+    let (ada, _bob, _) = pair(&server);
+    let session = server.backend.started()[0].clone();
+    // Drain the snapshots of joining.
+    while ada.next_message(Duration::from_millis(200)).is_some() {}
+
+    // About 250 deltas over half a second: unpaced, nearly every one would produce a full snapshot.
+    let message = session.start_message();
+    let started = std::time::Instant::now();
+    for _ in 0..250 {
+        session.delta(&message, "x");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    let elapsed = started.elapsed();
+
+    let mut snapshots = 0;
+    let state = ada.wait_for(|message| match message {
+        ServerMessage::Space { state } => {
+            snapshots += 1;
+            state
+                .messages
+                .last()
+                .is_some_and(|last| last.text.len() == 250)
+                .then(|| (**state).clone())
+        }
+        _ => None,
+    });
+    // The latest state arrives without a further event to carry it.
+    assert_eq!(state.messages.last().unwrap().text, "x".repeat(250));
+    // At most one snapshot per interval, plus the first and the deferred last one.
+    let limit = (elapsed.as_millis() / 100) as usize + 3;
+    assert!(
+        snapshots <= limit,
+        "{snapshots} snapshots in {elapsed:?}, expected at most {limit}"
+    );
+    assert!(snapshots >= 2, "snapshots were not sent while streaming");
+}
+
+/// End `client`'s connection and wait until the server has released it.
+fn hang_up(mut client: TestClient) {
+    client.finish();
+    assert!(client.is_closed(TIMEOUT));
+}
+
+#[test]
+fn leaving_right_after_hello_overrides_the_rejoin() {
+    let server = TestServer::start();
+    let (ada, bob, space) = pair(&server);
+    hang_up(ada);
+    bob.space(|state| state.participants.len() == 1);
+
+    // Ada left while disconnected; her client says so as soon as it is welcomed, without waiting for the rejoin.
+    let mut ada = TestClient::open(server.address);
+    ada.hello("ada", "Ada");
+    ada.send(&ClientMessage::Leave);
+    ada.wait_for(|message| matches!(message, ServerMessage::Left).then_some(()));
+    let spaces = ada.wait_for(|message| match message {
+        ServerMessage::Spaces { spaces } => Some(spaces.clone()),
+        _ => None,
+    });
+    let listed = spaces.iter().find(|listed| listed.id == space).unwrap();
+    assert_eq!(listed.participants, 1);
+    bob.space(|state| state.participants.len() == 1);
+
+    // The leave is remembered: reconnecting again does not rejoin.
+    hang_up(ada);
+    let again = server.connect("ada", "Ada");
+    again.wait_for(|message| match message {
+        ServerMessage::Spaces { .. } => Some(()),
+        ServerMessage::Space { .. } => panic!("rejoined a space that was left"),
+        _ => None,
+    });
+
+    // Leaving while in the lobby is harmless.
+    let mut carol = server.connect("carol", "Carol");
+    carol.send(&ClientMessage::Leave);
+    carol.wait_for(|message| matches!(message, ServerMessage::Left).then_some(()));
+    carol.wait_for(|message| match message {
+        ServerMessage::Spaces { .. } => Some(()),
+        ServerMessage::Error { error } => panic!("leaving the lobby failed: {error}"),
+        _ => None,
+    });
+}
+
+#[test]
+fn a_participant_gone_longer_than_the_retention_is_forgotten() {
+    let retention = Duration::from_millis(800);
+    let server = TestServer::with_server(FakeBackend::new(), move |backends| {
+        server::Server::new(
+            backends,
+            std::sync::Arc::new(server::test_support::TextTranscriber::default()),
+        )
+        .with_participant_retention(retention)
+    });
+    let (ada, bob, space) = pair(&server);
+    let source = ada.source;
+
+    // Within the retention, Ada keeps her source and rejoins.
+    hang_up(ada);
+    let ada = server.connect("ada", "Ada");
+    assert_eq!(ada.source, source);
+    ada.space(|state| state.id == space);
+
+    // After it, she is a new participant in the lobby.
+    hang_up(ada);
+    bob.space(|state| state.participants.len() == 1);
+    std::thread::sleep(retention * 2);
+    let ada = server.connect("ada", "Ada");
+    assert_ne!(ada.source, source);
+    ada.wait_for(|message| match message {
+        ServerMessage::Spaces { .. } => Some(()),
+        ServerMessage::Space { .. } => panic!("a forgotten participant rejoined"),
+        _ => None,
+    });
 }

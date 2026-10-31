@@ -16,6 +16,20 @@ The server advertises itself on the local network with DNS service discovery ove
 
 Wire types are defined once in a shared protocol crate used by both the server and native clients.
 
+Shutting the server down closes every space's session and ends every connection, and completes even while a space is being created: a session that finishes starting after shutdown has begun is closed at once rather than registered.
+
+The server serves a bounded number of connections at once, so a connection that is not doing useful work must not keep its slot. A connection that has not completed a request head within the request timeout of being accepted, or of finishing its previous response, is closed; so is a `/connect` exchange that has not said Hello within the request timeout. The request timeout defaults to 10 seconds and is configurable, as are the keepalive interval and timeout, with `tomori-server` options. Once a participant has said Hello, `connection-liveness.md` applies instead.
+
+No frame exceeds the protocol's frame limit (`MAX_FRAME_BYTES`, 1 MiB), which every receiver enforces. Encoding a larger frame is an error rather than a corrupt or oversized frame, and the server never panics on it.
+
+- The server bounds the strings that clients supply when they arrive: participant identity and display name, space title, directory and session, utterance identifiers, answer text and queued transcripts. It also bounds how many entries wait in a space's queue. A value over its limit is rejected with a short error that names the field but does not repeat the value. A display name must not be empty or only whitespace, and must not start with `/`, because it begins each attributed prompt where a leading slash could read as a command to the agent; the error replies of the server never repeat unbounded client input, and are themselves cut to a fixed length.
+- Space snapshots and the lobby listing are kept within a byte budget of a quarter of the frame limit (256 KiB of JSON), because they also carry agent output. A snapshot over budget drops its oldest messages first, then cuts the newest message text with a visible marker, then drops finished queue entries, cuts approval and question text and drops the oldest workers. A listing over budget shortens long directories to their final part, then leaves out closed spaces, then the oldest spaces. What remains is bounded by the input limits and the connection limit.
+
+What waits to be sent on one connection is bounded too, so that a slow or careless client cannot grow the server's memory or crowd out agent speech:
+
+- A relayed pose replaces any pose from the same participant that has not been sent yet, and a partial transcript replaces the unsent partial transcript of the same utterance; each keeps the place of the one it replaces. At most a few error replies wait at once, and further errors are dropped until they are sent. A client that keeps making requests without reading the replies until its control queue reaches a fixed limit is disconnected.
+- Space snapshots are full states, coalesced so that one waits at a time. Changes caused by agent events, such as a streaming reply, send a snapshot at most every 100 milliseconds per space: the first change is sent at once, and later changes within the interval are sent together at its end, so the latest state always arrives. Changes made by participants are sent at once.
+
 Clients connect over the local network; a USB connection is not required. Authentication is not an initial requirement. It will be added later, likely as tokens carried in cookies or authorization headers; until then, anyone who can reach the server on the local network can join a space. Whether local network traffic is encrypted is not yet decided. The server exposes no generic filesystem, shell or session-deletion operations and never sends model credentials to clients.
 
 ## Rationale
@@ -34,3 +48,8 @@ The server crate, the protocol crate, the shared client crate and network config
 - Test that a running server is found by browsing for `_tomori._tcp`, with its protocol version and name, and that it disappears from the list when it stops. On a Quest, confirm that the server list populates on the same Wi-Fi network.
 - Over UDP, test that an isolated lost packet is recovered by error correction, that an unrecovered `agent` frame is requested again, and that playback continues without waiting for it.
 - Review the protocol for operations outside the listed responsibilities.
+- Test that shutdown completes when a session finishes starting after shutdown began, and that the session is closed.
+- Test with a short request timeout that more silent sockets than the connection limit do not prevent a new `GET /health` from being served, and that an idle keep-alive connection, an incomplete request head and a `/connect` without Hello are closed.
+- Test that queued poses and partial transcripts keep only the latest, that error replies and the control queue are bounded, and that a fast streaming reply sends about ten snapshots a second ending with its final text.
+- Test that a Hello with an empty, blank or slash-prefixed name is refused, and that the server's timeout options are parsed and validated.
+- Test that oversized client strings are rejected without being repeated, that a large conversation and a large lobby listing arrive within the snapshot budget, and that encoding an oversized frame fails without producing it.

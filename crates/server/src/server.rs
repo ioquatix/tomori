@@ -19,6 +19,7 @@ use futures_util::future::{Either, select};
 use futures_util::stream::{FuturesUnordered, StreamExt};
 use protocol::Keepalive;
 
+use crate::admission::{Admission, Admitted, DEFAULT_REQUEST_TIMEOUT};
 use crate::application::Application;
 use crate::backends::{AnySession, Backends};
 use crate::hub::{CreateRequest, Hub, SpaceCommand};
@@ -34,7 +35,13 @@ pub struct Server {
     application: Application,
     voices: Voices,
     keepalive: Keepalive,
+    admission: Admission,
+    request_timeout: Duration,
+    retention: Duration,
 }
+
+/// How long a disconnected participant keeps their identity, audio source and space, so that a headset that slept or walked out of range for a while comes back where it was. See `design/spaces.md`.
+pub const DEFAULT_PARTICIPANT_RETENTION: Duration = Duration::from_secs(12 * 60 * 60);
 
 /// The most connections served at once; further peers wait in the listen backlog.
 const MAX_CONNECTIONS: usize = 256;
@@ -71,7 +78,22 @@ impl Server {
             jobs,
             voices: Voices::default(),
             keepalive: Keepalive::default(),
+            admission: Admission::default(),
+            request_timeout: DEFAULT_REQUEST_TIMEOUT,
+            retention: DEFAULT_PARTICIPANT_RETENTION,
         }
+    }
+
+    /// Change how long a disconnected participant is remembered; see [`DEFAULT_PARTICIPANT_RETENTION`].
+    pub fn with_participant_retention(mut self, retention: Duration) -> Self {
+        self.retention = retention;
+        self
+    }
+
+    /// Change how long a connection may go without a complete request head, or a `/connect` exchange without Hello, before it is closed. The default is 10 seconds. See `design/server.md`.
+    pub fn with_request_timeout(mut self, timeout: Duration) -> Self {
+        self.request_timeout = timeout;
+        self
     }
 
     /// Change when quiet connections are pinged and when silent ones are released. See `design/connection-liveness.md`.
@@ -98,15 +120,47 @@ impl Server {
         S: SocketAccept + SocketStreamReading + SocketStreamWriting + SocketClose + Timers,
         S::Socket: 'static,
     {
-        let ((served, ()), ()) = zip(
+        let ((served, ()), ((), ())) = zip(
             zip(
                 self.serve(scheduler, listener, cancellation),
                 self.supervise(cancellation),
             ),
-            self.sweep(scheduler, cancellation),
+            zip(
+                self.sweep(scheduler, cancellation),
+                self.pace(scheduler, cancellation),
+            ),
         )
         .await;
         served
+    }
+
+    /// Send space snapshots that were deferred to keep a streaming reply within [`crate::hub::SNAPSHOT_INTERVAL`], when they are due. Sleeps until a space defers one.
+    async fn pace<S: Timers>(&self, scheduler: &S, cancellation: &Cancellation) {
+        let mut timer = scheduler.timer();
+        loop {
+            let listener = self.hub.listen_snapshots();
+            match self.hub.snapshot_deadline() {
+                Some(deadline) => {
+                    if let Err(error) = scheduler
+                        .timer_wait_until(&mut timer, deadline, cancellation)
+                        .await
+                    {
+                        if !cancellation.is_cancelled() {
+                            log::error!("The snapshot timer failed: {error}");
+                        }
+                        return;
+                    }
+                    self.hub.flush_snapshots(scheduler.now());
+                }
+                None => {
+                    if let Either::Right(_) =
+                        select(pin!(listener), pin!(cancellation.cancelled())).await
+                    {
+                        return;
+                    }
+                }
+            }
+        }
     }
 
     /// Accept and serve HTTP connections until cancelled.
@@ -160,11 +214,16 @@ impl Server {
                 statistics.connections += 1;
                 let connection = connections_cancellation.child();
                 let options = &options;
+                // Each connection is watched so that one which never completes a request is closed, freeing its slot.
+                let handler = Admitted {
+                    application: &self.application,
+                    watch: self.admission.watch(connection.clone()),
+                };
                 connections.push(async move {
                     base_http_server::serve_connection(
                         scheduler,
                         socket,
-                        &self.application,
+                        &handler,
                         options,
                         &connection,
                     )
@@ -185,10 +244,16 @@ impl Server {
         }
     }
 
-    /// Run the hub's keepalive sweep until cancelled, often enough that a silent connection is released within a quarter of the keepalive interval after its timeout.
+    /// Run the keepalive and request deadline sweeps until cancelled, often enough that a connection is released within a quarter of the shortest interval after its deadline.
     async fn sweep<S: Timers>(&self, scheduler: &S, cancellation: &Cancellation) {
-        let period =
-            (self.keepalive.interval.min(self.keepalive.timeout) / 4).max(Duration::from_millis(1));
+        let period = (self
+            .keepalive
+            .interval
+            .min(self.keepalive.timeout)
+            .min(self.request_timeout)
+            .min(self.retention)
+            / 4)
+        .max(Duration::from_millis(1));
         let mut timer = scheduler.timer();
         loop {
             let deadline = scheduler.now() + period;
@@ -196,7 +261,12 @@ impl Server {
                 .timer_wait_until(&mut timer, deadline, cancellation)
                 .await
             {
-                Ok(()) => self.hub.sweep(scheduler.now(), &self.keepalive),
+                Ok(()) => {
+                    let now = scheduler.now();
+                    self.admission.sweep(now, self.request_timeout);
+                    self.hub.sweep(now, &self.keepalive, self.request_timeout);
+                    self.hub.forget_departed(now, self.retention);
+                }
                 Err(error) => {
                     if !cancellation.is_cancelled() {
                         log::error!("The keepalive timer failed: {error}");
@@ -284,7 +354,13 @@ async fn run_space(hub: Arc<Hub>, request: CreateRequest, voices: Voices) {
         Err(error) => (Snapshot::default(), Some(error.message)),
     };
     let (commands, receiver) = async_channel::unbounded();
-    let space = hub.register_space(&request, session.id(), snapshot, commands);
+    let Some(space) = hub.register_space(&request, session.id(), snapshot, commands) else {
+        // The server began shutting down while the session started.
+        if let Err(error) = session.close().await {
+            log::warn!("Closing a session started during shutdown failed: {error}");
+        }
+        return;
+    };
     if let Some(error) = error {
         hub.space_event(&space, Event::Error { message: error });
     }

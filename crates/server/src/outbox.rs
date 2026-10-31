@@ -15,6 +15,12 @@ const AUDIO_LIMIT: usize = 32;
 /// The space sends agent speech at its playback rate, so only a stalled connection reaches this. Frames beyond it could no longer play in real time, so the oldest are dropped, which the client sees as a sequence gap.
 const AGENT_AUDIO_LIMIT: usize = 50;
 
+/// Error replies waiting for one connection. Further errors are dropped until these are sent, so a client that repeats an invalid request faster than it reads cannot grow the queue.
+const ERROR_LIMIT: usize = 8;
+
+/// Control items waiting for one connection. Presence and partial transcripts replace their queued predecessors and errors are capped, so only a client that keeps making requests without reading the replies reaches this; its connection is closed rather than queueing without bound.
+const CONTROL_LIMIT: usize = 1024;
+
 /// Something to send on one connection, in order.
 #[derive(Debug)]
 pub enum Outgoing {
@@ -60,7 +66,52 @@ struct Inner {
     audio: VecDeque<Vec<u8>>,
     space_pending: bool,
     spaces_pending: bool,
+    /// Queued [`ServerMessage::Error`] replies.
+    errors: usize,
     closed: bool,
+}
+
+impl Inner {
+    /// Replace a queued message that `message` supersedes, returning false if there is none: a relayed pose from the same source, or a partial transcript of the same utterance.
+    fn supersede(&mut self, message: &mut ServerMessage) -> bool {
+        let slot = self.control.iter_mut().find_map(|item| match item {
+            Outgoing::Message(queued) if supersedes(message, queued) => Some(queued),
+            _ => None,
+        });
+        match slot {
+            Some(queued) => {
+                std::mem::swap(queued, message);
+                true
+            }
+            None => false,
+        }
+    }
+}
+
+/// Whether `newer` makes `queued` pointless to send.
+fn supersedes(newer: &ServerMessage, queued: &ServerMessage) -> bool {
+    match (newer, queued) {
+        (
+            ServerMessage::Presence { source, .. },
+            ServerMessage::Presence {
+                source: queued_source,
+                ..
+            },
+        ) => source == queued_source,
+        (
+            ServerMessage::Transcript {
+                utterance,
+                finished: false,
+                ..
+            },
+            ServerMessage::Transcript {
+                utterance: queued_utterance,
+                finished: false,
+                ..
+            },
+        ) => utterance == queued_utterance,
+        _ => false,
+    }
 }
 
 impl Outbox {
@@ -78,8 +129,26 @@ impl Outbox {
         }
     }
 
-    pub fn message(&self, message: ServerMessage) {
+    /// A control message, in order with the others. A relayed pose replaces a queued pose from the same source, and a partial transcript a queued partial transcript of the same utterance, keeping its place; errors beyond [`ERROR_LIMIT`] are dropped. See `design/server.md`.
+    pub fn message(&self, mut message: ServerMessage) {
         self.update(|inner| {
+            if inner.supersede(&mut message) {
+                return true;
+            }
+            if matches!(message, ServerMessage::Error { .. }) {
+                if inner.errors == ERROR_LIMIT {
+                    log::debug!(
+                        "An error reply was dropped because the client is not reading them."
+                    );
+                    return false;
+                }
+                inner.errors += 1;
+            }
+            if inner.control.len() == CONTROL_LIMIT {
+                log::warn!("Closing a connection whose client is not reading control messages.");
+                inner.closed = true;
+                return true;
+            }
             inner.control.push_back(Outgoing::Message(message));
             true
         });
@@ -182,6 +251,7 @@ impl Outbox {
             match item {
                 Outgoing::Space => inner.space_pending = false,
                 Outgoing::Spaces => inner.spaces_pending = false,
+                Outgoing::Message(ServerMessage::Error { .. }) => inner.errors -= 1,
                 Outgoing::Message(_) => {}
             }
             return Popped::Control(item);
@@ -274,6 +344,91 @@ mod tests {
             outbox.pop(),
             Popped::Control(Outgoing::Message(ServerMessage::Left))
         ));
+    }
+
+    fn presence(source: u32, x: f32) -> ServerMessage {
+        ServerMessage::Presence {
+            source,
+            head: protocol::Pose {
+                position: [x, 0.0, 0.0],
+                orientation: [0.0, 0.0, 0.0, 1.0],
+            },
+            left: None,
+            right: None,
+        }
+    }
+
+    fn partial(utterance: &str, text: &str) -> ServerMessage {
+        ServerMessage::Transcript {
+            utterance: utterance.into(),
+            text: text.into(),
+            finished: false,
+        }
+    }
+
+    fn drain(outbox: &Outbox) -> Vec<ServerMessage> {
+        let mut messages = Vec::new();
+        while let Popped::Control(Outgoing::Message(message)) = outbox.pop() {
+            messages.push(message);
+        }
+        messages
+    }
+
+    #[test]
+    fn presence_and_partial_transcripts_keep_only_the_latest() {
+        let outbox = Outbox::new();
+        for step in 0..1000 {
+            outbox.message(presence(1, step as f32));
+            outbox.message(presence(2, -(step as f32)));
+            outbox.message(partial("u", &format!("text {step}")));
+        }
+        outbox.message(ServerMessage::Transcript {
+            utterance: "u".into(),
+            text: "done".into(),
+            finished: true,
+        });
+        assert_eq!(
+            drain(&outbox),
+            vec![
+                presence(1, 999.0),
+                presence(2, -999.0),
+                partial("u", "text 999"),
+                ServerMessage::Transcript {
+                    utterance: "u".into(),
+                    text: "done".into(),
+                    finished: true,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn errors_are_capped_until_they_are_sent() {
+        let outbox = Outbox::new();
+        for index in 0..100 {
+            outbox.message(ServerMessage::Error {
+                error: format!("error {index}"),
+            });
+        }
+        outbox.message(ServerMessage::Left);
+        let messages = drain(&outbox);
+        assert_eq!(messages.len(), ERROR_LIMIT + 1);
+        assert_eq!(messages.last(), Some(&ServerMessage::Left));
+        // Once sent, errors are reported again.
+        outbox.message(ServerMessage::Error {
+            error: "again".into(),
+        });
+        assert_eq!(drain(&outbox).len(), 1);
+    }
+
+    #[test]
+    fn an_unread_control_queue_closes_the_connection() {
+        let outbox = Outbox::new();
+        for _ in 0..CONTROL_LIMIT * 2 {
+            outbox.message(ServerMessage::Left);
+        }
+        assert_eq!(drain(&outbox).len(), CONTROL_LIMIT);
+        assert!(matches!(outbox.pop(), Popped::Closed));
     }
 
     #[test]
