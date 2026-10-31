@@ -90,6 +90,16 @@ impl TestServer {
     }
 
     pub fn with_backend(backend: FakeBackend) -> Self {
+        Self::with_server(backend, |backends| {
+            Server::new(backends, Arc::new(TextTranscriber::default()))
+        })
+    }
+
+    /// A server built by `build` from the backends, such as with another transcriber or a synthesizer.
+    pub fn with_server(
+        backend: FakeBackend,
+        build: impl FnOnce(Backends) -> Server + Send + 'static,
+    ) -> Self {
         let cancellation = Cancellation::new();
         let (sender, receiver) = channel();
         let thread = {
@@ -101,10 +111,7 @@ impl TestServer {
                     capacity: 256,
                 })
                 .expect("the scheduler starts");
-                let server = Server::new(
-                    Backends::new().with(backend),
-                    Arc::new(TextTranscriber::default()),
-                );
+                let server = build(Backends::new().with(backend));
                 block_on(async {
                     let address = "127.0.0.1:0".parse().unwrap();
                     let listener = crate::bind(&scheduler, address, &cancellation)

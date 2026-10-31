@@ -3,7 +3,7 @@
 
 //! A scripted in-memory backend for tests and for running the server without an agent.
 //!
-//! In automatic mode, each prompt is answered immediately with a streamed echo. In manual mode, a turn stays busy until the test calls [`FakeSession::reply`], so input queues up behind it. Tests can inject any [`Event`] and inspect what reached the session.
+//! In automatic mode, each prompt is answered immediately with a streamed echo. In manual mode, a turn stays busy until the test calls [`FakeSession::reply`] or scripts the reply's text deltas with [`FakeSession::stream`], so input queues up behind it. Tests can inject any [`Event`] and inspect what reached the session.
 
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -154,24 +154,43 @@ impl FakeSession {
 
     /// Stream an assistant reply in two deltas, complete it, and end the turn.
     pub fn reply(&self, text: &str) {
+        let middle = text.char_indices().nth(text.chars().count() / 2);
+        let (first, second) = text.split_at(middle.map_or(text.len(), |(index, _)| index));
+        self.stream(&[first, second]);
+    }
+
+    /// Stream an assistant reply as exactly these text deltas, complete it, and end the turn. Returns the message identifier.
+    pub fn stream(&self, deltas: &[&str]) -> String {
+        let message = self.start_message();
+        for delta in deltas {
+            self.delta(&message, delta);
+        }
+        self.emit(Event::MessageCompleted {
+            message: message.clone(),
+        });
+        self.emit(Event::Idle);
+        message
+    }
+
+    /// Start a new assistant message and return its identifier. Follow with [`delta`](Self::delta) and a [`Event::MessageCompleted`].
+    pub fn start_message(&self) -> String {
         let number = self.inner.next_message.fetch_add(1, Ordering::SeqCst) + 1;
         let message = format!("{}-reply-{number}", self.inner.id);
         self.emit(Event::MessageStarted {
             message: message.clone(),
             role: Role::Assistant,
         });
-        let middle = text.char_indices().nth(text.chars().count() / 2);
-        let (first, second) = text.split_at(middle.map_or(text.len(), |(index, _)| index));
-        for part in [first, second] {
-            if !part.is_empty() {
-                self.emit(Event::TextDelta {
-                    message: message.clone(),
-                    text: part.to_owned(),
-                });
-            }
+        message
+    }
+
+    /// Stream one text delta of an assistant message. Empty deltas are skipped.
+    pub fn delta(&self, message: &str, text: &str) {
+        if !text.is_empty() {
+            self.emit(Event::TextDelta {
+                message: message.to_owned(),
+                text: text.to_owned(),
+            });
         }
-        self.emit(Event::MessageCompleted { message });
-        self.emit(Event::Idle);
     }
 
     pub fn log(&self) -> FakeLog {

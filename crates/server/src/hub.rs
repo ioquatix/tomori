@@ -939,6 +939,47 @@ impl Hub {
         state.touch_space(space);
     }
 
+    /// Announce an agent speech segment to the space's current participants, in order with its frames.
+    #[cfg_attr(not(feature = "speech"), allow(dead_code))]
+    pub(crate) fn agent_speech(&self, space: &str, message: ServerMessage) {
+        let state = self.lock();
+        let Some(record) = state.space(space) else {
+            return;
+        };
+        for participant in &record.model.participants {
+            if let Some(outbox) = state.outbox(participant) {
+                outbox.agent_message(message.clone());
+            }
+        }
+    }
+
+    /// Send one agent speech frame to the space's current participants. A participant who joined mid-segment receives from here on.
+    #[cfg_attr(not(feature = "speech"), allow(dead_code))]
+    pub(crate) fn agent_audio(&self, space: &str, frame: &AudioFrame) {
+        let encoded = Frame::audio(frame).encode();
+        let state = self.lock();
+        let Some(record) = state.space(space) else {
+            return;
+        };
+        for participant in &record.model.participants {
+            if let Some(outbox) = state.outbox(participant) {
+                outbox.agent_audio(encoded.clone());
+            }
+        }
+    }
+
+    /// Tell the space's participants that agent speech could not be produced.
+    #[cfg_attr(not(feature = "speech"), allow(dead_code))]
+    pub(crate) fn speech_failed(&self, space: &str, error: String) {
+        let state = self.lock();
+        let Some(record) = state.space(space) else {
+            return;
+        };
+        for participant in &record.model.participants {
+            state.error(participant, error.clone());
+        }
+    }
+
     /// Render a deferred outgoing item for one connection.
     pub fn render(&self, connection: ConnectionId, item: Outgoing) -> Option<ServerMessage> {
         match item {

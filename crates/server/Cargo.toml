@@ -20,12 +20,18 @@ required-features = ["fake"]
 name = "spaces"
 required-features = ["fake"]
 
+[[test]]
+name = "speech"
+required-features = ["fake", "speech"]
+
 [features]
-default = ["fake", "claude-code"]
+default = ["fake", "claude-code", "speech"]
 # A scripted in-memory backend for tests and for manual testing without an agent.
 fake = []
 # Claude Code, driven as a persistent `claude` process per space.
 claude-code = ["dep:backend-claude-code"]
+# Speech recognition and synthesis with the speech crate's engines.
+speech = ["dep:speech"]
 
 [dependencies]
 async-channel = "2"
@@ -41,3 +47,4 @@ futures-util = { version = "0.3", default-features = false, features = ["alloc",
 log = "0.4"
 protocol = { path = "../protocol" }
 serde_json = "1"
+speech = { path = "../speech", optional = true }
