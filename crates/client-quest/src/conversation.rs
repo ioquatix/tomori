@@ -221,16 +221,16 @@ impl Conversation {
             }
             ServerMessage::Error { error, space } => {
                 log::warn!("Server error: {error}");
-                if space.is_some() && space == self.joining {
-                    // Our join was refused: the space is gone, as after the server restarts. The client restores the
-                    // membership a join records when it reconnects, so leave explicitly rather than ask for it again.
+                if let Some(gone) = space.filter(|space| Some(space) == self.joining.as_ref()) {
+                    // Our join was refused because the space does not exist, as after the server restarts. The client
+                    // would ask for the space again on every reconnect until it is told otherwise, so leave explicitly.
+                    self.spaces.retain(|summary| summary.id != gone);
+                    self.selected = self.selected.min(self.spaces.len().saturating_sub(1));
+                    self.listed = false;
                     self.close_space();
                     self.mode = Mode::Lobby;
                     self.leaving = true;
                     self.send(ClientMessage::Leave);
-                } else if self.mode == Mode::Lobby {
-                    // An older server does not name the space it refuses.
-                    self.joining = None;
                 }
                 // A refused decision can be tried again.
                 self.decided = None;
@@ -1279,7 +1279,10 @@ mod tests {
         conversation.apply(refused(SPACE));
         assert_eq!(conversation.mode(), Mode::Lobby);
         assert_eq!(sent(&mut conversation), [ClientMessage::Leave]);
-        assert!(!conversation.text().contains("Joining..."));
+        // The gone space is no longer offered while the listing that follows the leave is awaited.
+        let text = conversation.text();
+        assert!(!text.contains("Joining...") && !text.contains("Tomori"));
+        assert!(text.contains("SPACES 0/0"));
     }
 
     #[test]
