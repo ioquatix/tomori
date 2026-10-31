@@ -1,3 +1,6 @@
+// Released under the MIT License.
+// Copyright, 2026, by Samuel Williams.
+
 //! Read-only projection of the Quest's actual scene. The headset remains the
 //! simulation authority; a bounded channel drops stale frames under load.
 use serde::{Deserialize, Serialize};

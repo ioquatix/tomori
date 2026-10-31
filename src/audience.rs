@@ -1,3 +1,6 @@
+// Released under the MIT License.
+// Copyright, 2026, by Samuel Williams.
+
 //! Live, opt-in microphone and assistant audio to the PC spectator. Bounded
 //! queues drop audio rather than blocking capture/rendering or building latency.
 use crate::speech::{SAMPLE_RATE, audio_frame_count};

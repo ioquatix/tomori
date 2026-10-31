@@ -1,3 +1,6 @@
+// Released under the MIT License.
+// Copyright, 2026, by Samuel Williams.
+
 //! Shared Quest-scene rendering for the windowed and headless spectators.
 use crate::{caption::Caption, graphics::Renderer, spectator, swarm::Swarm};
 use glam::{Mat4, Vec3};

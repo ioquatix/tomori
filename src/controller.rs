@@ -1,3 +1,6 @@
+// Released under the MIT License.
+// Copyright, 2026, by Samuel Williams.
+
 //! Controller poses and static glTF geometry shared by XR and the spectator.
 use anyhow::{Context, Result, ensure};
 use bytemuck::{Pod, Zeroable};

@@ -1,3 +1,6 @@
+// Released under the MIT License.
+// Copyright, 2026, by Samuel Williams.
+
 //! GPU rendering for two tracked controller poses, with simple fallback meshes.
 use crate::{
     controller::{self, Model, Part, Pose, Texture, Vertex},

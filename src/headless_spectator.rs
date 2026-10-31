@@ -1,3 +1,6 @@
+// Released under the MIT License.
+// Copyright, 2026, by Samuel Williams.
+
 //! Render the Quest spectator directly to PipeWire without a display surface.
 use crate::{
     desktop::Camera,

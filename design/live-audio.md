@@ -1,0 +1,37 @@
+# Live Audio
+
+This describes the target design for the Rust server that replaces `bridge/`. The current Node bridge and headset client differ where noted in `readme.md`; changes to them are not reviewed against this document until they move to the new server.
+
+## Requirement
+
+Participants in a space can talk to each other. Each participant sends one microphone stream, and each audio frame carries a gate:
+
+- `off`: nothing is sent.
+- `live`: heard by the other participants and the spectator feed.
+- `agent` (push-to-talk): heard by the other participants and the spectator feed, and also transcribed for the agent.
+
+Push-to-talk audio is not a separate upload path. Only `agent` audio is transcribed; open-microphone conversation between participants never reaches the agent.
+
+Each client mixes every incoming participant stream together with the space's agent speech stream into a single output. A participant does not hear their own microphone. The server mixes the same sources once for the spectator feed.
+
+Playback and mixing are real time: audio that arrives too late to play is dropped from playback rather than delayed or replayed. This does not apply to transcription: every `agent` frame reaches recognition, in order, and a gap in `agent` audio fails the utterance with a visible error, as `speech.md` requires.
+
+Echo cancellation happens on the capturing device, so that a participant's playback does not feed back into their microphone stream.
+
+## Rationale
+
+The existing audience microphone and push-to-talk recording are separate paths that only reach OBS and the transcription bridge. A shared workspace needs people to hear each other, including when someone addresses the agent. Agreed in the October 2026 design discussion.
+
+## Scope
+
+Client audio capture and playback, the microphone gate, server routing and the spectator mixer.
+
+## Validation
+
+- Test that `agent` frames are both forwarded and transcribed, `live` frames are only forwarded, and `off` produces no frames.
+- Test that a client's output contains other participants and agent speech but not its own microphone.
+- Test that frames arriving too late for playback are dropped from playback and mixing, while the same `agent` frames still reach recognition.
+- Test that a missing `agent` frame fails the utterance visibly instead of producing a partial transcript.
+- On a headset, confirm that agent speech and other participants playing through the speakers are not transcribed from the local microphone.
+
+Latency targets for participant-to-participant audio are not yet agreed.

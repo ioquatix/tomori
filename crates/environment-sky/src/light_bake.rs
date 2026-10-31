@@ -1,3 +1,6 @@
+// Released under the MIT License.
+// Copyright, 2026, by Samuel Williams.
+
 //! Build-time static lighting: cosine-weighted AO and occluded lantern irradiance.
 //! Ray/box queries use the exact cuboids which generate the rendering mesh.
 use crate::mesh::{ATLAS_SIZE, Cuboid, Face, LANTERNS, Scene};

@@ -1,3 +1,6 @@
+// Released under the MIT License.
+// Copyright, 2026, by Samuel Williams.
+
 //! Experimental CPU-readback video output. The GStreamer child provides the
 //! PipeWire node; neither the render loop nor the GPU waits for a consumer.
 use anyhow::{Context, Result, bail};

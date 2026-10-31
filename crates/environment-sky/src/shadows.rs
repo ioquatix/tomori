@@ -1,3 +1,6 @@
+// Released under the MIT License.
+// Copyright, 2026, by Samuel Williams.
+
 //! A single scene-space moon shadow map, rendered once for immutable scenery.
 use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Vec3};

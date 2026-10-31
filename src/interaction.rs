@@ -1,3 +1,6 @@
+// Released under the MIT License.
+// Copyright, 2026, by Samuel Williams.
+
 //! Observable conversational activity, independent of the XR/audio backends.
 use serde::{Deserialize, Serialize};
 

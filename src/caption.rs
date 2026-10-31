@@ -1,3 +1,6 @@
+// Released under the MIT License.
+// Copyright, 2026, by Samuel Williams.
+
 //! A small, head-relative text panel. Bitmap glyphs need no font files/atlas.
 use bytemuck::{Pod, Zeroable};
 use font8x8::{BASIC_FONTS, UnicodeFonts};

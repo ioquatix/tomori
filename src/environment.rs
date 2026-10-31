@@ -1,3 +1,6 @@
+// Released under the MIT License.
+// Copyright, 2026, by Samuel Williams.
+
 //! Application-owned selection; the concrete Sky renderer lives in a sub-crate.
 use serde::{Deserialize, Serialize};
 

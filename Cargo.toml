@@ -5,13 +5,13 @@ edition = "2024"
 rust-version = "1.93"
 description = "A conversational spatial workspace for people and agents, built with OpenXR and wgpu"
 repository = "https://github.com/ioquatix/tomori"
-license = "MIT OR Apache-2.0"
+license = "MIT"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
 
 [workspace]
-members = ["crates/environment-sky"]
+members = ["crates/environment-sky", "bake"]
 resolver = "3"
 
 [dependencies]

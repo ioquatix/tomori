@@ -1,3 +1,6 @@
+// Released under the MIT License.
+// Copyright, 2026, by Samuel Williams.
+
 //! Half-resolution bounded volumetric clouds, with no temporal history or motion.
 use wgpu::util::DeviceExt;
 

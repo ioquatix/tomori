@@ -1,3 +1,6 @@
+// Released under the MIT License.
+// Copyright, 2026, by Samuel Williams.
+
 //! Android push-to-talk capture; recognition happens on the PC bridge.
 use crate::speech::{SAMPLE_RATE, audio_frame_count};
 use android_activity::AndroidApp;
