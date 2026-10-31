@@ -207,6 +207,97 @@ fn streams_text() {
 }
 
 #[test]
+fn reports_a_reply_that_did_not_stream() {
+    run(|| async {
+        let fixture = Fixture::new("fallback");
+        let session = fixture.create().await;
+        session.send(prompt("one", "Read a.")).await.unwrap();
+
+        let events = events_until(&session, |event| *event == Event::Idle).await;
+        let first = "msg_fallback".to_string();
+        let second = "msg_fallback_2".to_string();
+        assert_eq!(
+            events,
+            vec![
+                Event::Delivered { key: "one".into() },
+                Event::Busy,
+                Event::MessageStarted {
+                    message: first.clone(),
+                    role: Role::Assistant
+                },
+                Event::TextDelta {
+                    message: first.clone(),
+                    text: "I will read the file.".into()
+                },
+                Event::ToolStarted {
+                    message: first.clone(),
+                    tool: "Read".into(),
+                    id: "toolu_fallback".into(),
+                    input: serde_json::json!({"file_path": "/tmp/work/a.txt"}),
+                },
+                Event::ToolFinished {
+                    id: "toolu_fallback".into(),
+                    error: None
+                },
+                Event::MessageCompleted {
+                    message: first.clone()
+                },
+                Event::MessageStarted {
+                    message: second.clone(),
+                    role: Role::Assistant
+                },
+                Event::TextDelta {
+                    message: second.clone(),
+                    text: "It says a.".into()
+                },
+                Event::TextDelta {
+                    message: second.clone(),
+                    text: " Done.".into()
+                },
+                Event::MessageCompleted {
+                    message: second.clone()
+                },
+                Event::Idle,
+            ]
+        );
+
+        let snapshot = session.snapshot().await.unwrap();
+        assert_eq!(snapshot.messages.len(), 3);
+        assert_eq!(
+            snapshot.messages[1].parts,
+            vec![
+                Part::Reasoning {
+                    text: "Read it first.".into()
+                },
+                Part::Text {
+                    text: "I will read the file.".into()
+                },
+                Part::Tool {
+                    id: "toolu_fallback".into(),
+                    tool: "Read".into(),
+                    input: serde_json::json!({"file_path": "/tmp/work/a.txt"}),
+                    finished: true,
+                },
+            ]
+        );
+        assert!(snapshot.messages[1].completed);
+        assert_eq!(
+            snapshot.messages[2].parts,
+            vec![
+                Part::Text {
+                    text: "It says a.".into()
+                },
+                Part::Text {
+                    text: " Done.".into()
+                },
+            ]
+        );
+
+        close(&session).await;
+    });
+}
+
+#[test]
 fn denies_a_permission() {
     run(|| async {
         let fixture = Fixture::new("permission");
