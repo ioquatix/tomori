@@ -11,9 +11,13 @@
 //!
 //! Without an address, or with `-`, it browses for servers advertised with Bonjour, lists them and asks which one to join.
 //!
-//! Type commands on standard input: `list`, `join <space>`, `leave`, `gate off|live|agent`, `allow <request>`,
-//! `deny <request>`, `grant <request> <option>`, `quit`. A pending approval is printed with its request id and the ids
-//! of the options it offers.
+//! Type commands on standard input: `list`, `create <backend> <directory> [title]`, `join <space>`, `leave`,
+//! `gate off|live|agent`, `allow <request>`, `deny <request>`, `grant <request> <option>`, `quit`. A pending approval is
+//! printed with its request id and the ids of the options it offers.
+//!
+//! `create` starts a new agent session, such as `create claude-code /home/sam/project`, which the server accepts only
+//! beneath one of its workspace roots; the directory cannot contain spaces. The title defaults to the directory's last
+//! component.
 
 use std::collections::BTreeMap;
 use std::io::BufRead;
@@ -24,7 +28,7 @@ use client::discovery::{self, Servers};
 use client::{Client, Event, Options, Sender};
 use protocol::{ClientMessage, Decision, Gate, ServerMessage};
 
-const COMMANDS: &str = "commands: list, join <space>, leave, gate off|live|agent, allow <request>, deny <request>, grant <request> <option>, quit";
+const COMMANDS: &str = "commands: list, create <backend> <directory> [title], join <space>, leave, gate off|live|agent, allow <request>, deny <request>, grant <request> <option>, quit";
 
 fn decide(request: &str, decision: Decision, option: Option<&str>) -> ClientMessage {
     ClientMessage::Decide {
@@ -39,6 +43,32 @@ fn command(sender: &Sender, line: &str) -> bool {
     let message = match (words.next(), words.next()) {
         (Some("quit"), _) => return false,
         (Some("list"), _) => ClientMessage::ListSpaces,
+        (Some("create"), Some(backend)) => match words.next() {
+            Some(directory) => {
+                let title = words.collect::<Vec<_>>().join(" ");
+                let title = if title.is_empty() {
+                    directory
+                        .trim_end_matches('/')
+                        .rsplit('/')
+                        .next()
+                        .filter(|name| !name.is_empty())
+                        .unwrap_or(directory)
+                        .to_owned()
+                } else {
+                    title
+                };
+                ClientMessage::CreateSpace {
+                    title,
+                    backend: backend.into(),
+                    directory: directory.into(),
+                    session: None,
+                }
+            }
+            None => {
+                eprintln!("{COMMANDS}");
+                return true;
+            }
+        },
         (Some("join"), Some(space)) => ClientMessage::Join {
             space: space.into(),
         },
