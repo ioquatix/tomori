@@ -871,3 +871,37 @@ fn a_crashed_synthesizer_is_reported_once_as_unavailable() {
     // The crashed synthesizer is not asked again.
     assert_eq!(*synthesizer.spoken.lock().unwrap(), ["This will crash."]);
 }
+
+#[test]
+fn a_synthesizer_crash_in_one_space_disables_speech_in_every_space() {
+    let synthesizer = FakeSynthesizer::default();
+    let server = speaking_server(FakeBackend::manual(), synthesizer.clone());
+    let mut ada = server.connect("ada", "Ada");
+    let mut bob = server.connect("bob", "Bob");
+    ada.create_space("Crashing");
+    bob.create_space("Other");
+
+    ada.say("u1", "speak up");
+    ada.space(|state| state.activity == protocol::Activity::Running);
+    server.backend.started()[0].stream(&["This will crash.\n"]);
+    while ada.next_message(Duration::from_millis(500)).is_some() {}
+
+    // Bob's space shares the crashed synthesizer, so it reports speech as unavailable instead of using it again.
+    bob.say("u2", "and you?");
+    bob.space(|state| state.activity == protocol::Activity::Running);
+    server.backend.started()[1].stream(&["Then this is not spoken.\n"]);
+    let mut errors = Vec::new();
+    while let Some(message) = bob.next_message(Duration::from_millis(500)) {
+        if let ServerMessage::Error { error, .. } = message {
+            errors.push(error);
+        }
+    }
+    assert_eq!(
+        errors,
+        ["Speech synthesis is unavailable until the server restarts, so replies are not spoken."]
+    );
+    while let Some(frame) = bob.next_audio(Duration::from_millis(100)) {
+        assert_ne!(frame.source, AGENT_SOURCE);
+    }
+    assert_eq!(*synthesizer.spoken.lock().unwrap(), ["This will crash."]);
+}

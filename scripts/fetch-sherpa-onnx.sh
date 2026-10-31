@@ -59,10 +59,12 @@ if [[ "$variant" == cuda ]]; then
 fi
 
 # sherpa-onnx-sys links whatever it already unpacked into the target directory without checking it, so remove a copy
-# that does not match; the next build unpacks the verified archive instead.
-cache="${CARGO_TARGET_DIR:-$PWD/target}/sherpa-onnx-prebuilt"
-if [[ -f "$cache/$archive" ]] && ! verify "$cache/$archive"; then
+# unless the verified archive it came from is beside it; the next build unpacks the verified archive instead.
+target=$(cargo metadata --format-version 1 --no-deps | python3 -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])')
+cache="$target/sherpa-onnx-prebuilt"
+stem="${archive%.tar.bz2}"
+if [[ -e "$cache/$stem" || -e "$cache/$archive" ]] && ! { [[ -f "$cache/$archive" ]] && verify "$cache/$archive"; }; then
     echo "Removing an unverified sherpa-onnx copy from $cache"
-    rm -rf "${cache:?}/$archive" "${cache:?}/${archive%.tar.bz2}"
+    rm -rf "${cache:?}/$archive" "${cache:?}/$stem"
 fi
 echo "sherpa-onnx $version libraries ready in $root"

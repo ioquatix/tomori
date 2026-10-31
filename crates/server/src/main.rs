@@ -435,6 +435,9 @@ fn main() -> ExitCode {
                 message
             })
     });
+    // Closing the scheduler unregisters its signal handlers, which would then swallow a repeated signal. Restore the default action first, so that a signal during the rest of shutdown still ends the process at once, without running destructors.
+    #[cfg(unix)]
+    restore_default_signals();
     block_on(scheduler.shutdown());
     let code = match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -459,6 +462,15 @@ fn main() -> ExitCode {
 fn exit_now(code: libc::c_int) -> ! {
     // SAFETY: `_exit` only ends the process; it is async-signal-safe and touches no Rust state.
     unsafe { libc::_exit(code) }
+}
+
+/// Give SIGINT and SIGTERM their default action, which ends the process without running destructors.
+#[cfg(unix)]
+fn restore_default_signals() {
+    for signal in [libc::SIGINT, libc::SIGTERM] {
+        // SAFETY: `SIG_DFL` installs no handler, so nothing runs in signal context.
+        unsafe { libc::signal(signal, libc::SIG_DFL) };
+    }
 }
 
 /// Shut down in order on the first signal, and exit immediately on a repeated one in case shutdown hangs.

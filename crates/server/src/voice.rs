@@ -43,6 +43,7 @@ mod disabled {
 #[cfg(feature = "speech")]
 mod enabled {
     use std::collections::{HashMap, VecDeque};
+    use std::panic::{self, AssertUnwindSafe};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
     use std::sync::{Arc, Mutex, PoisonError, Weak};
@@ -62,8 +63,15 @@ mod enabled {
     const LEAD: Duration = Duration::from_millis(100);
 
     /// The synthesizer shared by every space. Spaces take turns segment by segment; each space's own segments stay in order.
+    ///
+    /// A panic in the synthesizer disables it for every space, since it may be left inconsistent; the space whose segment panicked reports the panic, and the others fail with [`Error::Stopped`].
     #[derive(Clone)]
-    struct Shared(Arc<Mutex<Box<dyn Synthesizer>>>);
+    struct Shared(Arc<Engine>);
+
+    struct Engine {
+        synthesizer: Mutex<Box<dyn Synthesizer>>,
+        disabled: AtomicBool,
+    }
 
     impl Synthesizer for Shared {
         fn synthesize(
@@ -71,10 +79,21 @@ mod enabled {
             text: &str,
             output: &mut dyn FnMut(AudioChunk),
         ) -> Result<(), Error> {
-            self.0
+            let engine = &*self.0;
+            let mut synthesizer = engine
+                .synthesizer
                 .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .synthesize(text, output)
+                .unwrap_or_else(PoisonError::into_inner);
+            if engine.disabled.load(Ordering::Acquire) {
+                return Err(Error::Stopped(
+                    "speech synthesis stopped after an internal error".into(),
+                ));
+            }
+            panic::catch_unwind(AssertUnwindSafe(|| synthesizer.synthesize(text, output)))
+                .unwrap_or_else(|panic| {
+                    engine.disabled.store(true, Ordering::Release);
+                    panic::resume_unwind(panic)
+                })
         }
     }
 
@@ -87,7 +106,10 @@ mod enabled {
     impl Voices {
         pub fn new(synthesizer: impl Synthesizer + 'static) -> Self {
             Self {
-                synthesizer: Some(Shared(Arc::new(Mutex::new(Box::new(synthesizer))))),
+                synthesizer: Some(Shared(Arc::new(Engine {
+                    synthesizer: Mutex::new(Box::new(synthesizer)),
+                    disabled: AtomicBool::new(false),
+                }))),
             }
         }
 
