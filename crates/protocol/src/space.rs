@@ -80,6 +80,10 @@ pub enum QueueState {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct QueueEntry {
     pub id: String,
+    /// The speaker's participant identity, so a client can recognize its own entries. Absent from older servers.
+    #[serde(default)]
+    pub participant: String,
+    /// The speaker's display name.
     pub speaker: String,
     pub text: String,
     pub state: QueueState,
@@ -197,6 +201,19 @@ mod tests {
         let json = serde_json::to_value(&approval).unwrap();
         assert_eq!(json["options"][0]["id"], "suggestions");
         assert_eq!(serde_json::from_value::<Approval>(json).unwrap(), approval);
+    }
+
+    #[test]
+    fn queue_entries_from_older_servers_have_no_participant() {
+        let entry: QueueEntry = serde_json::from_value(serde_json::json!({
+            "id": "e1",
+            "speaker": "Ada",
+            "text": "run the tests",
+            "state": "queued",
+        }))
+        .unwrap();
+        assert_eq!(entry.participant, "");
+        assert_eq!(entry.speaker, "Ada");
     }
 
     #[test]

@@ -97,6 +97,8 @@ fn queued_input_is_visible_to_everyone_and_anyone_can_cancel_it() {
         .clone();
     assert_eq!(entry.state, QueueState::Queued);
     assert_eq!(entry.text, "second");
+    // Entries carry the speaker's participant identity, so Bob's client can recognize its own.
+    assert_eq!(entry.participant, "bob");
 
     // Ada cancels Bob's queued entry; both see it go.
     ada.send(&ClientMessage::CancelQueued {

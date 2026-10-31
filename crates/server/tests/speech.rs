@@ -242,6 +242,7 @@ fn push_to_talk_shows_partials_then_queues_the_final_transcript() {
     });
     assert_eq!(state.queue[0].text, "run the tests");
     assert_eq!(state.queue[0].speaker, "Ada");
+    assert_eq!(state.queue[0].participant, "ada");
     let session = server.backend.started()[0].clone();
     assert_eq!(session.log().prompts[0].text, "Ada: run the tests");
 

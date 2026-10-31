@@ -866,6 +866,7 @@ mod tests {
     fn entry(id: &str, speaker: &str, state: QueueState) -> QueueEntry {
         QueueEntry {
             id: id.into(),
+            participant: String::new(),
             speaker: speaker.into(),
             text: format!("text of {id}"),
             state,

@@ -1176,7 +1176,10 @@ impl Hub {
         }
         let speaker = state.participants[&record.participant].name.clone();
         if let Some(space) = state.space_mut(&record.space) {
-            let queued = space.model.enqueue(key, speaker, text.to_owned());
+            let queued =
+                space
+                    .model
+                    .enqueue(key, record.participant.clone(), speaker, text.to_owned());
             debug_assert!(queued, "repeats are acknowledged above");
         }
         state.send(
