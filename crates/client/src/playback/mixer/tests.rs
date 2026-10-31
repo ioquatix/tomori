@@ -34,6 +34,17 @@ fn mix(mixer: &mut Mixer, length: usize) -> Vec<i16> {
 }
 
 #[test]
+fn defaults_suit_a_headset() {
+    let options = MixerOptions::default();
+    assert_eq!(options.sample_rate, 48_000);
+    assert!(options.jitter.target_latency < options.jitter.latency_limit);
+    let mut mixer = Mixer::new(options);
+    assert_eq!(mixer.agent_volume(), 1.0);
+    assert!(!mixer.is_agent_muted());
+    assert_eq!(mix(&mut mixer, 480), vec![0; 480]);
+}
+
+#[test]
 fn sums_participants_and_agent_speech() {
     let mut mixer = mixer();
     mixer.push(frame(1, 0, 100));

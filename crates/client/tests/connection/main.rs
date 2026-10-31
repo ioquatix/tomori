@@ -1,6 +1,7 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
+mod raw;
 mod server;
 
 use std::net::{SocketAddr, TcpListener};
@@ -173,6 +174,14 @@ fn reconnects_and_restores_the_joined_space_and_gate() {
         ] if space == "alpha"
     ));
 
+    assert_eq!(
+        client.sender().membership(),
+        client::Membership {
+            space: Some("alpha".into()),
+            gate: Gate::Agent
+        }
+    );
+
     // Leaving clears what is restored next time.
     client.send(ClientMessage::Leave).unwrap();
     client.send(kick()).unwrap();
@@ -260,8 +269,91 @@ fn reports_incompatible_servers() {
     ));
 
     let server = MiniServer::start(localhost(), Mode::Unavailable);
-    let client = Client::connect(options(server.address)).unwrap();
+    let mut client = Client::connect(options(server.address)).unwrap();
+    let audio = client.take_audio().unwrap();
+    assert!(client.take_audio().is_none());
+    assert!(client.try_audio().is_none());
     assert_eq!(wait_disconnected(&client), Disconnect::Status(503));
+    drop(client);
+    assert!(audio.recv().is_err());
+}
+
+fn raw_disconnect(body: Option<Vec<u8>>, connect_timeout: Duration) -> (Disconnect, bool) {
+    let mut options = options(raw::start(body));
+    options.connect_timeout = connect_timeout;
+    let client = Client::connect(options).unwrap();
+    let mut connected = false;
+    match wait_for(&client, |event| {
+        if matches!(event, Event::State(ConnectionState::Connected { .. })) {
+            connected = true;
+        }
+        matches!(event, Event::State(ConnectionState::Disconnected { .. }))
+    }) {
+        Event::State(ConnectionState::Disconnected { reason, .. }) => (reason, connected),
+        _ => unreachable!(),
+    }
+}
+
+#[test]
+fn times_out_when_the_server_does_not_respond() {
+    let (reason, connected) = raw_disconnect(None, Duration::from_millis(200));
+    assert_eq!(reason, Disconnect::Timeout);
+    assert!(!connected);
+
+    // A response without a Welcome also times out.
+    let (reason, connected) = raw_disconnect(Some(Vec::new()), Duration::from_millis(200));
+    assert_eq!(reason, Disconnect::Timeout);
+    assert!(!connected);
+}
+
+#[test]
+fn requires_welcome_first_and_only_once() {
+    let refusal = raw::message(&ServerMessage::Error {
+        error: "full".into(),
+    });
+    let (reason, _) = raw_disconnect(Some(refusal), TIMEOUT);
+    assert_eq!(
+        reason,
+        Disconnect::Protocol("server refused the connection: full".into())
+    );
+
+    let (reason, _) = raw_disconnect(Some(raw::message(&ServerMessage::Left)), TIMEOUT);
+    assert!(matches!(reason, Disconnect::Protocol(error) if error.starts_with("expected welcome")));
+
+    let (reason, _) = raw_disconnect(Some(raw::chunk(b"not a frame")), TIMEOUT);
+    assert!(matches!(reason, Disconnect::Protocol(_)));
+
+    let mut twice = raw::welcome();
+    twice.extend(raw::welcome());
+    let (reason, connected) = raw_disconnect(Some(twice), TIMEOUT);
+    assert_eq!(
+        reason,
+        Disconnect::Protocol("unexpected second welcome".into())
+    );
+    assert!(connected);
+}
+
+#[test]
+fn reports_how_the_response_ended() {
+    // Trailers end the response cleanly.
+    let mut body = raw::welcome();
+    body.extend(b"0\r\nx-done: 1\r\n\r\n");
+    let (reason, connected) = raw_disconnect(Some(body), TIMEOUT);
+    assert_eq!(reason, Disconnect::Closed);
+    assert!(connected);
+
+    // Ending part way through a frame is a protocol error.
+    let mut body = raw::welcome();
+    body.extend(raw::chunk(&[0, 9, 0, 0, 0, b'{']));
+    body.extend(b"0\r\n\r\n");
+    let (reason, _) = raw_disconnect(Some(body), TIMEOUT);
+    assert!(matches!(reason, Disconnect::Protocol(error) if error.contains("inside a frame")));
+
+    // So is a malformed audio frame.
+    let mut body = raw::welcome();
+    body.extend(raw::chunk(&[1, 1, 0, 0, 0, 0]));
+    let (reason, _) = raw_disconnect(Some(body), TIMEOUT);
+    assert!(matches!(reason, Disconnect::Protocol(error) if error.contains("audio")));
 }
 
 #[test]

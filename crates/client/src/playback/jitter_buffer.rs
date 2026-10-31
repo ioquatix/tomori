@@ -143,9 +143,10 @@ impl JitterBuffer {
             self.position = 0.0;
         }
         while self.buffered_samples() > target {
-            let Some((sequence, _)) = self.frames.pop_first() else {
-                break;
-            };
+            let (sequence, _) = self
+                .frames
+                .pop_first()
+                .expect("with pending audio cleared, buffered audio is in frames");
             statistics.discarded_frames += 1;
             self.next = Some(sequence + 1);
         }

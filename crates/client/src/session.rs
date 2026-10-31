@@ -100,14 +100,12 @@ async fn session(context: &Context<'_>, welcomed: &Cell<bool>) -> Disconnect {
         Ok(address) => address,
         Err(reason) => return reason,
     };
-    let (client, driver) = match HttpClient::new(
+    let (client, driver) = HttpClient::new(
         context.scheduler,
         Endpoint::new(address),
         Default::default(),
-    ) {
-        Ok(parts) => parts,
-        Err(error) => return transport(error),
-    };
+    )
+    .expect("the default HTTP client options are valid");
     let lifetime = Cancellation::new();
     let exchange = async {
         let reason = or(exchange(context, &client, &lifetime, welcomed), async {
@@ -177,15 +175,11 @@ async fn exchange(
             output.finish(lifetime).await.map_err(transport)
         }
         .await;
-        if let Err(reason) = result {
-            return reason;
+        match result {
+            Err(reason) => reason,
+            // Closing, with queued control sent: wait for the server to end its response, which `session` bounds by the close timeout.
+            Ok(()) => std::future::pending().await,
         }
-        // Closing: queued control has been sent. Give the server a moment to finish its response.
-        let _ = context
-            .scheduler
-            .sleep(options.close_timeout, &Cancellation::never())
-            .await;
-        Disconnect::Closed
     };
 
     let download = async {
@@ -297,5 +291,26 @@ impl FrameReader<'_, '_> {
                 BodyFrame::End => true,
             };
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolves_addresses_with_the_default_port() {
+        assert_eq!(
+            resolve("127.0.0.1").unwrap(),
+            SocketAddr::from(([127, 0, 0, 1], DEFAULT_PORT))
+        );
+        assert_eq!(
+            resolve("127.0.0.1:9").unwrap(),
+            SocketAddr::from(([127, 0, 0, 1], 9))
+        );
+        assert!(matches!(
+            resolve("invalid host name"),
+            Err(Disconnect::Address(_))
+        ));
     }
 }
