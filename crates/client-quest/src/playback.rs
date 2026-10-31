@@ -3,10 +3,14 @@
 
 //! The platform speaker, which plays other participants and the agent's speech through the client's [`client::playback::Player`]. See `design/live-audio.md`.
 //!
-//! The output stream stays open while connected. Its callback renders the player at the device rate; [`crate::connection::Connection`] controls the player and silences it while push-to-talk records.
+//! The output stream stays open while connected. It opens and closes on its own thread, so that the frame does not wait for the device. Its callback renders the player at the device rate; [`crate::connection::Connection`] controls the player and silences it while push-to-talk records.
 
 use client::playback::Player;
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
+    mpsc,
+};
 
 /// Told, from any thread, why the output stopped.
 pub type Failed = Box<dyn Fn(String) + Send + Sync>;
@@ -14,7 +18,7 @@ pub type Failed = Box<dyn Fn(String) + Send + Sync>;
 /// The player, shared with the output callback. Only the callback of one open stream uses it at a time; the application keeps it so that a new stream can take over after a failure.
 pub type Shared = Arc<Mutex<Player>>;
 
-/// Output in progress, stopped when dropped.
+/// An open output stream, stopped when dropped. Created and dropped on the speaker thread.
 pub struct Output {
     _stream: Box<dyn std::any::Any>,
 }
@@ -28,9 +32,53 @@ impl Output {
 }
 
 /// A destination for played audio.
-pub trait Playback {
-    /// Start playing `player` until the returned output is dropped.
-    fn open(&mut self, player: Shared, failed: Failed) -> Result<Output, String>;
+pub trait Playback: Send + Sync {
+    /// Start playing `player` until the returned output is dropped. Called on the speaker thread.
+    fn open(&self, player: Shared, failed: Failed) -> Result<Output, String>;
+}
+
+/// The speaker thread, which opens an output and keeps it until this is dropped, then closes it. Dropping does not wait for the device to close.
+pub struct Speaking {
+    _stop: mpsc::Sender<()>,
+    opened: Arc<AtomicBool>,
+}
+
+impl Speaking {
+    /// Whether the output has opened. It may have failed since.
+    pub fn is_open(&self) -> bool {
+        self.opened.load(Ordering::Relaxed)
+    }
+}
+
+/// Open `playback` on its own thread. Failing to open, and failures once open, are reported through `failed`.
+pub fn start(
+    playback: Arc<dyn Playback>,
+    player: Shared,
+    failed: Failed,
+) -> Result<Speaking, String> {
+    let (stop, stopped) = mpsc::channel::<()>();
+    let failed: Arc<dyn Fn(String) + Send + Sync> = Arc::from(failed);
+    let opened = Arc::new(AtomicBool::new(false));
+    let thread_opened = opened.clone();
+    std::thread::Builder::new()
+        .name("tomori-speaker".into())
+        .spawn(move || {
+            let report = failed.clone();
+            match playback.open(player, Box::new(move |error| report(error))) {
+                // Kept until the speaker is dropped, which disconnects the channel.
+                Ok(output) => {
+                    thread_opened.store(true, Ordering::Relaxed);
+                    let _ = stopped.recv();
+                    drop(output);
+                }
+                Err(error) => failed(error),
+            }
+        })
+        .map_err(|error| format!("Cannot start the speaker thread: {error}"))?;
+    Ok(Speaking {
+        _stop: stop,
+        opened,
+    })
 }
 
 /// Render the player as mono at `sample_rate` into `mono`, or silence if another stream holds it.
@@ -57,7 +105,7 @@ mod desktop {
     pub struct Desktop;
 
     impl Playback for Desktop {
-        fn open(&mut self, player: Shared, failed: Failed) -> Result<Output, String> {
+        fn open(&self, player: Shared, failed: Failed) -> Result<Output, String> {
             let device = cpal::default_host()
                 .default_output_device()
                 .ok_or("No speaker is available.")?;
@@ -136,7 +184,7 @@ mod android {
     pub struct Android;
 
     impl Playback for Android {
-        fn open(&mut self, player: Shared, failed: Failed) -> Result<Output, String> {
+        fn open(&self, player: Shared, failed: Failed) -> Result<Output, String> {
             // Mono 16-bit at the device's rate, rendered straight into AAudio's buffer when it accepts mono.
             let mut spread = Vec::new();
             let stream = AudioStreamBuilder::new()

@@ -62,16 +62,34 @@ fn never_plays_the_local_participant() {
     sender.send(frame(AGENT_SOURCE, 0, 7)).unwrap();
     assert_eq!(render(&mut player, FRAME), [7; FRAME]);
 
-    // The local source survives a change of device rate.
-    sender
-        .send(AudioFrame {
-            sample_rate: 2 * RATE,
-            ..frame(5, 1, 1000)
-        })
-        .unwrap();
-    let mut output = [1; FRAME];
+    // The local source survives a change of device rate: with enough buffered to play, only the agent is heard.
+    for sequence in 1..5 {
+        for (source, value) in [(5, 1000), (AGENT_SOURCE, 7)] {
+            sender
+                .send(AudioFrame {
+                    sample_rate: 2 * RATE,
+                    ..frame(source, sequence, value)
+                })
+                .unwrap();
+        }
+    }
+    let mut output = [1; 2 * FRAME];
     player.render(2 * RATE, &mut output);
-    assert_eq!(output, [0; FRAME]);
+    assert_eq!(output, [7; 2 * FRAME]);
+}
+
+#[test]
+fn clearing_discards_audio_received_but_not_yet_rendered() {
+    let (sender, mut player, control) = player();
+    for sequence in 0..4 {
+        sender.send(frame(1, sequence, 50)).unwrap();
+    }
+    control.clear();
+    assert_eq!(render(&mut player, FRAME), [0; FRAME]);
+    for sequence in 10..14 {
+        sender.send(frame(1, sequence, 60)).unwrap();
+    }
+    assert_eq!(render(&mut player, FRAME), [60; FRAME]);
 }
 
 #[test]

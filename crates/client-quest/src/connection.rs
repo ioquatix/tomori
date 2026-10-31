@@ -6,14 +6,14 @@ use crate::{
     capture::{Capture, Recording},
     conversation::{Action, Conversation},
     identity::{Identity, Store},
-    playback::{Output, Playback},
+    playback::{Playback, Speaking},
     server_choice::{self, Choice, Source},
 };
 use client::{
     Client, ConnectionState, Event, Microphone, Options, discovery,
     playback::{MixerOptions, Player, PlayerControl},
 };
-use protocol::{ClientMessage, ServerMessage};
+use protocol::ServerMessage;
 use std::{
     sync::{Arc, Mutex, PoisonError},
     time::{Duration, Instant},
@@ -147,11 +147,12 @@ const SPEAKER_RETRY: Duration = Duration::from_secs(5);
 
 /// Other participants and the agent's speech, played through the platform speaker by the client's [`Player`]. The speaker opens once the server welcomes the client and stays open until the client goes away.
 struct Speaker {
-    playback: Box<dyn Playback>,
+    playback: Arc<dyn Playback>,
     /// The player of the current client, shared with the output callback, and its control.
     player: Option<(crate::playback::Shared, PlayerControl)>,
-    output: Option<Output>,
-    /// Why the open output stopped, set from the output's own thread.
+    /// The speaker thread, while it is opening or playing.
+    output: Option<Speaking>,
+    /// Why the output failed to open or stopped, set from the speaker thread.
     failure: Arc<Mutex<Option<String>>>,
     /// When to try opening the speaker again.
     retry_at: Option<Instant>,
@@ -162,7 +163,7 @@ struct Speaker {
 impl Speaker {
     fn new(playback: Box<dyn Playback>) -> Self {
         Self {
-            playback,
+            playback: Arc::from(playback),
             player: None,
             output: None,
             failure: Arc::default(),
@@ -197,12 +198,22 @@ impl Speaker {
         self.player.as_ref().map(|(_, control)| control)
     }
 
-    /// Open the speaker if it is not open and is due. Returns a failure to show, once until the speaker opens again.
+    /// The server welcomed the client: a speaker that failed is tried again now, and shows its failure again if it fails, because the welcome clears what the conversation shows.
+    fn connected(&mut self) {
+        if self.output.is_none() {
+            self.retry_at = None;
+            self.reported = false;
+        }
+    }
+
+    /// Start opening the speaker on its own thread if it is not open and is due. Failing to open is reported later by [`Self::poll`]. Returns a failure to show, once until the speaker opens again.
     fn open(&mut self) -> Option<String> {
-        let (player, _) = self.player.as_ref()?;
+        let (player, control) = self.player.as_ref()?;
         if self.output.is_some() || self.retry_at.is_some_and(|at| Instant::now() < at) {
             return None;
         }
+        // Audio queued while nothing played is stale.
+        control.clear();
         *self.failure.lock().unwrap_or_else(PoisonError::into_inner) = None;
         let failure = self.failure.clone();
         let failed = Box::new(move |error: String| {
@@ -211,20 +222,23 @@ impl Speaker {
                 .unwrap_or_else(PoisonError::into_inner)
                 .get_or_insert(error);
         });
-        match self.playback.open(player.clone(), failed) {
+        match crate::playback::start(self.playback.clone(), player.clone(), failed) {
             Ok(output) => {
                 self.output = Some(output);
                 self.retry_at = None;
-                self.reported = false;
                 None
             }
             Err(error) => self.failed(error),
         }
     }
 
-    /// Close an output that failed, so that it is opened again after a while. Returns a failure to show.
+    /// Close an output that failed to open or stopped, so that it is opened again after a while. Returns a failure to show.
     fn poll(&mut self) -> Option<String> {
-        self.output.as_ref()?;
+        let output = self.output.as_ref()?;
+        // Opened since it last failed: a later failure is worth showing again.
+        if output.is_open() {
+            self.reported = false;
+        }
         let error = self
             .failure
             .lock()
@@ -297,7 +311,7 @@ impl Connection {
             }
             if let Some(control) = self.speaker.control() {
                 match &event {
-                    // Audio from before reconnecting, or from a space that was left, is stale.
+                    // Audio from before reconnecting, or from a space that was left, is stale. Moving to another space leaves the current one first.
                     Event::State(ConnectionState::Connected { source, .. }) => {
                         control.set_local_source(Some(*source));
                         control.clear();
@@ -307,9 +321,12 @@ impl Connection {
                 }
             }
             conversation.apply(event);
-            // Opened after the conversation applies the welcome, which clears earlier errors, so that a failure stays visible.
-            if connected && let Some(error) = self.speaker.open() {
-                conversation.fail(error);
+            // After the conversation applies the welcome, which clears earlier errors, so that a failure is shown again.
+            if connected {
+                self.speaker.connected();
+                if let Some(error) = self.speaker.open() {
+                    conversation.fail(error);
+                }
             }
         }
         if let Some(error) = self.voice.failure() {
@@ -359,12 +376,6 @@ impl Connection {
                 }
                 Action::Send(message) => match &self.client {
                     Some(client) => {
-                        // Audio still buffered from the space being left is not part of the next.
-                        if let (ClientMessage::Join { .. }, Some(control)) =
-                            (&message, self.speaker.control())
-                        {
-                            control.clear();
-                        }
                         if let Err(error) = client.send(message) {
                             conversation.fail(format!("Cannot send: {error}"));
                         }
@@ -634,46 +645,82 @@ mod tests {
     #[derive(Clone, Default)]
     struct FakeSpeaker {
         opened: Arc<AtomicU32>,
+        closed: Arc<AtomicU32>,
         refuse: Arc<AtomicBool>,
         failed: Arc<Mutex<Option<crate::playback::Failed>>>,
     }
 
+    /// Closes by counting, so that a test can see the speaker thread close its output.
+    struct FakeOutput(Arc<AtomicU32>);
+
+    impl Drop for FakeOutput {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
     impl Playback for FakeSpeaker {
         fn open(
-            &mut self,
+            &self,
             player: crate::playback::Shared,
             failed: crate::playback::Failed,
-        ) -> Result<Output, String> {
+        ) -> Result<crate::playback::Output, String> {
             if self.refuse.load(Ordering::Relaxed) {
                 return Err("No speaker is available.".into());
             }
             let mut output = [1; 48];
             player.lock().unwrap().render(48_000, &mut output);
             assert_eq!(output, [0; 48]);
-            self.opened.fetch_add(1, Ordering::Relaxed);
             *self.failed.lock().unwrap() = Some(failed);
-            Ok(Output::new(()))
+            self.opened.fetch_add(1, Ordering::Relaxed);
+            Ok(crate::playback::Output::new(FakeOutput(
+                self.closed.clone(),
+            )))
+        }
+    }
+
+    /// Wait for the speaker thread.
+    fn until(condition: impl Fn() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !condition() {
+            assert!(Instant::now() < deadline, "timed out");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    /// Poll the speaker until it reports a failure.
+    fn failure(speaker: &mut Speaker) -> String {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(error) = speaker.poll() {
+                return error;
+            }
+            assert!(Instant::now() < deadline, "no failure reported");
+            std::thread::sleep(Duration::from_millis(1));
         }
     }
 
     #[test]
-    fn the_speaker_plays_the_client_until_it_goes_away() {
+    fn the_speaker_opens_on_its_own_thread_and_closes_when_the_client_goes_away() {
         let mut client = client();
         let fake = FakeSpeaker::default();
         let mut speaker = Speaker::new(Box::new(fake.clone()));
         // Nothing to play before a client is attached.
         assert_eq!(speaker.open(), None);
-        assert_eq!(fake.opened.load(Ordering::Relaxed), 0);
+        assert!(speaker.output.is_none());
 
         speaker.attach(&mut client);
         assert!(client.take_audio().is_none(), "the speaker took the audio");
         assert_eq!(speaker.open(), None);
         assert_eq!(speaker.open(), None);
-        assert_eq!(fake.opened.load(Ordering::Relaxed), 1);
-        assert!(speaker.output.is_some());
+        until(|| fake.opened.load(Ordering::Relaxed) == 1);
+        assert!(speaker.output.as_ref().unwrap().is_open());
+        assert_eq!(speaker.poll(), None);
 
         speaker.detach();
         assert!(speaker.output.is_none() && speaker.control().is_none());
+        until(|| fake.closed.load(Ordering::Relaxed) == 1);
+        assert_eq!(fake.opened.load(Ordering::Relaxed), 1);
         client.close();
     }
 
@@ -685,21 +732,32 @@ mod tests {
         speaker.attach(&mut client);
 
         fake.refuse.store(true, Ordering::Relaxed);
-        let error = speaker.open().expect("the failure is shown");
+        assert_eq!(speaker.open(), None);
+        let error = failure(&mut speaker);
         assert!(error.contains("No speaker"), "{error}");
+        assert!(speaker.output.is_none());
         // Not tried again until the retry is due, and not shown again when it fails again.
         assert_eq!(speaker.open(), None);
+        assert!(speaker.output.is_none());
         speaker.retry_at = Some(Instant::now());
         assert_eq!(speaker.open(), None);
-        assert_eq!(fake.opened.load(Ordering::Relaxed), 0);
+        until(|| speaker.failure.lock().unwrap().is_some());
+        assert_eq!(speaker.poll(), None);
+        assert!(speaker.output.is_none());
+
+        // A new welcome tries again at once, and shows the failure again.
+        speaker.connected();
+        assert_eq!(speaker.open(), None);
+        let error = failure(&mut speaker);
+        assert!(error.contains("No speaker"), "{error}");
 
         fake.refuse.store(false, Ordering::Relaxed);
         speaker.retry_at = Some(Instant::now());
         assert_eq!(speaker.open(), None);
-        assert_eq!(fake.opened.load(Ordering::Relaxed), 1);
+        until(|| fake.opened.load(Ordering::Relaxed) == 1);
         assert_eq!(speaker.poll(), None);
 
-        // The open output fails from its own thread: it is closed, shown, and reopened once due.
+        // The open output fails from another thread: it is closed, shown, and reopened once due.
         let failed = fake.failed.lock().unwrap().take().unwrap();
         std::thread::spawn(move || failed("The speaker failed: unplugged".into()))
             .join()
@@ -707,10 +765,35 @@ mod tests {
         let error = speaker.poll().expect("the failure is shown");
         assert!(error.contains("unplugged"), "{error}");
         assert!(speaker.output.is_none());
+        until(|| fake.closed.load(Ordering::Relaxed) == 1);
         assert_eq!(speaker.open(), None);
         speaker.retry_at = Some(Instant::now());
         assert_eq!(speaker.open(), None);
-        assert_eq!(fake.opened.load(Ordering::Relaxed), 2);
+        until(|| fake.opened.load(Ordering::Relaxed) == 2);
         client.close();
+    }
+
+    #[test]
+    fn opening_the_speaker_discards_audio_queued_while_nothing_played() {
+        let fake = FakeSpeaker::default();
+        let mut speaker = Speaker::new(Box::new(fake.clone()));
+        let (sender, audio) = std::sync::mpsc::sync_channel(8);
+        let (player, control) = Player::new(audio, MixerOptions::default());
+        speaker.player = Some((Arc::new(Mutex::new(player)), control));
+        for sequence in 0..8 {
+            sender
+                .send(protocol::AudioFrame {
+                    gate: protocol::Gate::Live,
+                    source: 1,
+                    sequence,
+                    timestamp: 0,
+                    sample_rate: 48_000,
+                    samples: vec![1000; 960],
+                })
+                .unwrap();
+        }
+        // The fake renders as it opens, and asserts that it hears nothing.
+        assert_eq!(speaker.open(), None);
+        until(|| fake.opened.load(Ordering::Relaxed) == 1);
     }
 }

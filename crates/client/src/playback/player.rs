@@ -29,6 +29,8 @@ struct Shared {
 /// The player belongs to the audio device's callback, and [`PlayerControl`] to the application. Control changes travel through a channel that [`Self::render`] drains without blocking, so the application never holds anything the callback waits for. Rendering never blocks: missing audio is silence.
 ///
 /// The mixer is created at the device rate the first time [`Self::render`] is called, and created again if the device rate changes, keeping the local source.
+///
+/// Unlike a [`Mixer`] shared with the application, the player also calls [`Mixer::push`] from the callback, so the callback allocates and frees: a buffer for each new source, and each frame's samples once played. Received frames are 20 ms each, so this is a few small allocations per callback; nothing waits on a lock.
 pub struct Player {
     audio: Receiver<AudioFrame>,
     commands: Receiver<Command>,
@@ -85,7 +87,11 @@ impl Player {
                     self.local_source = source;
                     mixer.set_local_source(source);
                 }
-                Command::Clear => mixer.clear(),
+                Command::Clear => {
+                    mixer.clear();
+                    // Including what arrived before the clear but was not yet rendered, such as a backlog from while no output played.
+                    while self.audio.try_recv().is_ok() {}
+                }
             }
         }
         while let Ok(frame) = self.audio.try_recv() {
@@ -123,7 +129,7 @@ impl PlayerControl {
         let _ = self.commands.send(Command::LocalSource(source));
     }
 
-    /// Discard buffered audio when what the participant hears changes context: on leaving a space, before joining another, and after reconnecting. Frames already received but not yet rendered may still play.
+    /// Discard buffered audio when what the participant hears changes context: on leaving a space, after reconnecting, and when an output starts after nothing played. Every frame received before the next render is discarded too, including any that arrived just after this call.
     pub fn clear(&self) {
         let _ = self.commands.send(Command::Clear);
     }
