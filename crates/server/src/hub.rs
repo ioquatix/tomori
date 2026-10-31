@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use backend::{AnswerValue, Backend, ErrorKind, Event, Prompt, Snapshot};
 use base_scheduler::Cancellation;
@@ -89,6 +89,9 @@ struct Liveness {
     received: Arc<AtomicBool>,
     /// When the sweep last saw data arrive, or first saw the connection.
     last: Option<Instant>,
+    /// When the sweep first saw the connection, until it says Hello.
+    opened: Option<Instant>,
+    greeted: bool,
     pinged: Option<Instant>,
     /// Ends this connection's HTTP exchange, including a write blocked on a peer that is gone.
     cancellation: Cancellation,
@@ -320,6 +323,8 @@ impl Hub {
                 liveness: Liveness {
                     received: received.clone(),
                     last: None,
+                    opened: None,
+                    greeted: false,
                     pinged: None,
                     cancellation,
                 },
@@ -328,8 +333,8 @@ impl Hub {
         (id, outbox, received)
     }
 
-    /// Ping connections that have been quiet for the keepalive interval, and release those that have received nothing for the keepalive timeout as if they had disconnected. Called periodically with the current time; a connection's quiet time is measured from the first sweep that sees it or the last that saw data arrive.
-    pub fn sweep(&self, now: Instant, keepalive: &Keepalive) {
+    /// Ping connections that have been quiet for the keepalive interval, and release those that have received nothing for the keepalive timeout as if they had disconnected. Also release connections that have not said Hello within `hello_timeout`, so that a peer cannot hold a connection slot by keeping a connection alive without joining. Called periodically with the current time; a connection's quiet time is measured from the first sweep that sees it or the last that saw data arrive.
+    pub fn sweep(&self, now: Instant, keepalive: &Keepalive, hello_timeout: Duration) {
         let mut expired = Vec::new();
         {
             let mut state = self.lock();
@@ -344,7 +349,12 @@ impl Hub {
                     liveness.last = Some(now);
                 }
                 let quiet = now.saturating_duration_since(liveness.last.unwrap_or(now));
-                if quiet >= keepalive.timeout {
+                let opened = *liveness.opened.get_or_insert(now);
+                if !liveness.greeted && now.saturating_duration_since(opened) >= hello_timeout {
+                    log::info!("Connection {id} did not say Hello in time.");
+                    expired.push((id, liveness.cancellation.clone()));
+                } else if quiet >= keepalive.timeout {
+                    log::info!("Connection {id} received nothing within the keepalive timeout.");
                     expired.push((id, liveness.cancellation.clone()));
                 } else if quiet >= keepalive.interval
                     && liveness.pinged.is_none_or(|pinged| {
@@ -360,7 +370,6 @@ impl Hub {
             }
         }
         for (id, cancellation) in expired {
-            log::info!("Connection {id} received nothing within the keepalive timeout.");
             // Release the participant now; cancelling also ends the exchange, even one blocked writing to a peer that is gone.
             self.disconnect(id);
             cancellation.cancel();
@@ -528,11 +537,12 @@ impl Hub {
                 old.outbox.close();
             }
         }
-        state
+        let record = state
             .connections
             .get_mut(&connection)
-            .expect("checked above")
-            .participant = Some(participant.clone());
+            .expect("checked above");
+        record.participant = Some(participant.clone());
+        record.liveness.greeted = true;
         outbox.message(ServerMessage::Welcome {
             protocol: PROTOCOL_VERSION,
             server: crate::SERVER_NAME.to_owned(),

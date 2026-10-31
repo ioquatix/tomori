@@ -218,3 +218,78 @@ fn a_client_that_stops_reading_is_released_even_while_writes_are_blocked() {
         }
     }
 }
+
+/// A server whose connections must complete a request head, or say Hello, within `timeout`.
+fn with_request_timeout(timeout: Duration) -> TestServer {
+    TestServer::with_server(FakeBackend::new(), move |backends| {
+        Server::new(backends, Arc::new(TextTranscriber::default())).with_request_timeout(timeout)
+    })
+}
+
+/// Make one plain `GET /health` on `stream` and return the status line.
+fn health(mut stream: TcpStream) -> String {
+    stream.set_read_timeout(Some(TIMEOUT)).unwrap();
+    write!(
+        stream,
+        "GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+    )
+    .unwrap();
+    let mut response = String::new();
+    stream.read_to_string(&mut response).unwrap();
+    response.lines().next().unwrap_or_default().to_owned()
+}
+
+/// Whether the server has closed `stream` within `timeout`.
+fn closed_within(stream: &mut TcpStream, timeout: Duration) -> bool {
+    stream.set_read_timeout(Some(timeout)).unwrap();
+    let mut buffer = vec![0; 64 * 1024];
+    loop {
+        match stream.read(&mut buffer) {
+            Ok(0) => return true,
+            Ok(_) => continue,
+            Err(error) if error.kind() == ErrorKind::ConnectionReset => return true,
+            Err(_) => return false,
+        }
+    }
+}
+
+#[test]
+fn silent_sockets_do_not_hold_connection_slots() {
+    let server = with_request_timeout(Duration::from_millis(300));
+    // More silent sockets than the server serves at once; the rest wait in the listen backlog.
+    let silent: Vec<TcpStream> = (0..300)
+        .map(|_| TcpStream::connect(server.address).unwrap())
+        .collect();
+    std::thread::sleep(Duration::from_millis(100));
+    let fresh = TcpStream::connect(server.address).unwrap();
+    assert_eq!(health(fresh), "HTTP/1.1 200 OK");
+    drop(silent);
+}
+
+#[test]
+fn idle_and_unintroduced_connections_are_closed() {
+    let server = with_request_timeout(Duration::from_millis(300));
+
+    // A keep-alive connection that goes idle after its first response.
+    let mut keep_alive = TcpStream::connect(server.address).unwrap();
+    write!(
+        keep_alive,
+        "GET /health HTTP/1.1\r\nHost: localhost\r\n\r\n"
+    )
+    .unwrap();
+    assert!(closed_within(&mut keep_alive, TIMEOUT));
+
+    // A request head that never completes.
+    let mut trickle = TcpStream::connect(server.address).unwrap();
+    write!(trickle, "GET /health HTTP/1.1\r\n").unwrap();
+    assert!(closed_within(&mut trickle, TIMEOUT));
+
+    // A connection that only answers keepalive and never says Hello.
+    let mut client = server::test_support::TestClient::open(server.address);
+    client.send(&ClientMessage::Ping { nonce: 1 });
+    assert!(client.is_closed(TIMEOUT));
+
+    // A participant who said Hello stays connected.
+    let ada = server.connect("ada", "Ada");
+    assert!(!ada.is_closed(Duration::from_millis(600)));
+}
