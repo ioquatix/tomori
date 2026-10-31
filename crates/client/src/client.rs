@@ -42,6 +42,24 @@ pub struct Sender {
 }
 
 impl Sender {
+    /// A sender over `outbox` with no connection thread, for tests that read what is queued.
+    #[cfg(test)]
+    pub(crate) fn detached(outbox: Outbox) -> Self {
+        Self {
+            shared: Arc::new(Shared {
+                outbox,
+                state: Mutex::new(ConnectionState::Connecting { attempt: 1 }),
+                events: Events::new(),
+                closing: Cancellation::new(),
+            }),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn outbox(&self) -> &Outbox {
+        &self.shared.outbox
+    }
+
     /// Queue a control message. Those sent while disconnected are delivered after the next connection's Hello and restored membership. `Join`, `Leave` and `Gate` also update the membership restored on reconnection; while disconnected they, and `Presence`, only update local state.
     ///
     /// Utterance messages stay in order with the audio sent by [`Self::send_audio`]. An utterance that cannot reach recognition intact, because it began while disconnected, the connection ended before it was sent, or the link was too congested, is reported as [`Event::UtteranceFailed`], and its later end is not sent.
