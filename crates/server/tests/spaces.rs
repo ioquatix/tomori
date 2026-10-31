@@ -141,6 +141,36 @@ fn only_the_most_recent_empty_closed_spaces_are_kept() {
 }
 
 #[test]
+fn the_most_recently_closed_space_is_kept_whenever_it_was_created() {
+    let server = TestServer::with_server(FakeBackend::new(), |backends| {
+        Server::new(backends, Arc::new(TextTranscriber::default())).with_max_spaces(64)
+    });
+    let mut ada = server.connect("ada", "Ada");
+    let first = ada.create_space("Space 0").id;
+    ada.send(&ClientMessage::Leave);
+    for index in 1..=server::CLOSED_SPACES {
+        ada.create_space(&format!("Space {index}"));
+        server.backend.started()[index].emit(Event::Closed { reason: None });
+        ada.space(|state| state.activity == Activity::Closed);
+        ada.send(&ClientMessage::Leave);
+    }
+    // The first space, created before all the others, closes last, so another is forgotten instead.
+    server.backend.started()[0].emit(Event::Closed { reason: None });
+    let listed: Vec<String> = ada.wait_for(|message| match message {
+        ServerMessage::Spaces { spaces }
+            if spaces
+                .iter()
+                .all(|space| space.activity == Activity::Closed) =>
+        {
+            Some(spaces.iter().map(|space| space.id.clone()).collect())
+        }
+        _ => None,
+    });
+    assert_eq!(listed.len(), server::CLOSED_SPACES);
+    assert!(listed.contains(&first), "{listed:?}");
+}
+
+#[test]
 fn input_to_a_closed_space_fails_visibly() {
     let server = TestServer::with_backend(FakeBackend::manual());
     let (mut ada, _bob, space) = pair(&server);

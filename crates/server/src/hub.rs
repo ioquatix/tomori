@@ -83,6 +83,8 @@ struct HubState {
     next_space: u64,
     next_utterance: u64,
     next_ping: u64,
+    /// Orders closed spaces by when they closed; see [`SpaceRecord::closed`].
+    next_closed: u64,
     connections: HashMap<ConnectionId, ConnectionRecord>,
     participants: HashMap<String, ParticipantRecord>,
     /// In creation order.
@@ -172,6 +174,8 @@ struct SpaceRecord {
     touched: Cell<Option<Instant>>,
     /// A change caused by agent events that participants have not been told about yet; see [`SNAPSHOT_INTERVAL`].
     deferred: Cell<bool>,
+    /// Once the space has closed, when relative to other spaces, so that the least recently closed are forgotten first.
+    closed: Option<u64>,
 }
 
 /// An utterance whose transcript has not been reported yet.
@@ -254,27 +258,37 @@ impl HubState {
         false
     }
 
-    /// Forget the oldest closed spaces that nobody is in, beyond [`CLOSED_SPACES`]. Returns whether any were forgotten.
+    /// Record when spaces closed since this was last called.
+    fn stamp_closed(&mut self) {
+        for space in &mut self.spaces {
+            if space.closed.is_none() && space.model.is_closed() {
+                space.closed = Some(self.next_closed);
+                self.next_closed += 1;
+            }
+        }
+    }
+
+    /// Forget the least recently closed spaces that nobody is in, beyond [`CLOSED_SPACES`]. Returns whether any were forgotten.
     fn forget_closed(&mut self) -> bool {
+        self.stamp_closed();
         let occupied: HashSet<&str> = self
             .participants
             .values()
             .filter_map(|record| record.space.as_deref())
             .collect();
-        let forgettable: Vec<String> = self
+        let mut forgettable: Vec<(u64, String)> = self
             .spaces
             .iter()
             .filter(|space| {
-                space.model.is_closed()
-                    && space.model.participants.is_empty()
-                    && !occupied.contains(space.model.id.as_str())
+                space.model.participants.is_empty() && !occupied.contains(space.model.id.as_str())
             })
-            .map(|space| space.model.id.clone())
+            .filter_map(|space| Some((space.closed?, space.model.id.clone())))
             .collect();
+        forgettable.sort_unstable();
         let Some(excess) = forgettable.len().checked_sub(CLOSED_SPACES) else {
             return false;
         };
-        let forgotten: HashSet<&String> = forgettable[..excess].iter().collect();
+        let forgotten: HashSet<&String> = forgettable[..excess].iter().map(|(_, id)| id).collect();
         self.spaces
             .retain(|space| !forgotten.contains(&space.model.id));
         excess > 0
@@ -1223,6 +1237,7 @@ impl Hub {
             commands,
             touched: Cell::new(None),
             deferred: Cell::new(false),
+            closed: None,
         });
         let creator_waiting = state
             .participants
@@ -1250,6 +1265,7 @@ impl Hub {
             return;
         };
         record.model.apply(event);
+        state.stamp_closed();
         state.pump(space);
         if state.touch_space_paced(space, Instant::now()) {
             self.deferred_snapshot.notify(usize::MAX);
