@@ -6,10 +6,15 @@
 //! Each pipe is serviced by one std thread and output is delivered through a sink, so the session can wait with a plain
 //! async receive. This is the only module that touches threads and pipes; replacing it with scheduler-owned pipes and
 //! `ProcessWait` does not change the session.
+//!
+//! On Unix, `claude` leads its own process group, so that the tools it runs can be stopped with it. A process group's id
+//! is the leader's process id, which stays reserved while the leader is unreaped; the group is signalled only then, under
+//! the status lock, so a signal can never reach a recycled id.
 
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::thread;
 use std::time::Duration;
@@ -39,10 +44,16 @@ struct Shared {
 }
 
 impl Shared {
-    fn record(&self, status: &mut Status) -> Option<ExitStatus> {
+    /// Reap the child if it has exited. `exited` says the exit was already observed without reaping.
+    fn record(&self, status: &mut Status, exited: bool) -> Option<ExitStatus> {
         if status.exited.is_none() {
-            // The child has exited, so this reaps it without blocking. Reaping under the lock means `kill` can never
-            // signal a recycled process id.
+            if exited {
+                // The agent has gone, so nothing it started is still in use: stop whatever remains of its group before
+                // reaping releases the group's id.
+                signal_group(&mut status.child, Signal::Kill);
+            }
+            // The child has exited, so this reaps it without blocking. Reaping under the lock means a signal can never
+            // reach a recycled process id.
             if let Ok(Some(exit)) = status.child.try_wait() {
                 status.exited = Some(exit);
                 self.changed.notify_all();
@@ -55,20 +66,27 @@ impl Shared {
 pub(crate) struct Process {
     stdin: Mutex<Option<mpsc::Sender<String>>>,
     shared: Arc<Shared>,
+    /// How long the process may take to exit once asked to stop.
+    grace: Duration,
+    terminating: AtomicBool,
     stderr: Arc<Mutex<VecDeque<String>>>,
     exited: async_channel::Receiver<()>,
 }
 
 impl Process {
-    /// Spawn `command` with piped standard streams and deliver its output to `sink`.
+    /// Spawn `command` with piped standard streams and deliver its output to `sink`. Once asked to stop, the process
+    /// has `grace` to exit before its process group is terminated and then killed.
     pub(crate) fn spawn(
         mut command: Command,
+        grace: Duration,
         sink: impl Fn(Output) + Send + Sync + 'static,
     ) -> std::io::Result<Self> {
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        #[cfg(unix)]
+        std::os::unix::process::CommandExt::process_group(&mut command, 0);
 
         let mut child = command.spawn()?;
         let stdin = child.stdin.take().expect("stdin is piped");
@@ -115,6 +133,8 @@ impl Process {
         Ok(Self {
             stdin: Mutex::new(Some(writer)),
             shared,
+            grace,
+            terminating: AtomicBool::new(false),
             stderr: tail,
             exited,
         })
@@ -132,19 +152,32 @@ impl Process {
         self.stdin.lock().unwrap().take();
     }
 
-    /// Kill the process if it is still running after `grace`.
-    pub(crate) fn kill_after(&self, grace: Duration) {
+    /// Ask the process to stop without waiting for it: close standard input, then terminate its process group if it is
+    /// still running after half the grace period, and kill the group once the grace period has passed.
+    pub(crate) fn terminate(&self) {
+        self.close_stdin();
+        if self.terminating.swap(true, Ordering::SeqCst) {
+            return;
+        }
         let shared = self.shared.clone();
+        let grace = self.grace;
         let _ = thread::Builder::new()
-            .name("claude-kill".into())
+            .name("claude-terminate".into())
             .spawn(move || {
-                let status = shared.status.lock().unwrap();
-                let (mut status, _) = shared
-                    .changed
-                    .wait_timeout_while(status, grace, |status| status.exited.is_none())
-                    .unwrap();
-                if status.exited.is_none() {
-                    let _ = status.child.kill();
+                let mut status = shared.status.lock().unwrap();
+                for (signal, wait) in [
+                    (Signal::Terminate, grace / 2),
+                    (Signal::Kill, grace - grace / 2),
+                ] {
+                    status = shared
+                        .changed
+                        .wait_timeout_while(status, wait, |status| status.exited.is_none())
+                        .unwrap()
+                        .0;
+                    if status.exited.is_some() {
+                        return;
+                    }
+                    signal_group(&mut status.child, signal);
                 }
             });
     }
@@ -166,10 +199,37 @@ impl Process {
 
 impl Drop for Process {
     fn drop(&mut self) {
+        // The termination thread owns what it needs, so stopping continues after the process is dropped.
         if self.exit_status().is_none() {
-            self.close_stdin();
-            self.kill_after(Duration::from_secs(2));
+            self.terminate();
         }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Signal {
+    Terminate,
+    Kill,
+}
+
+/// Signal the child's process group. The caller holds the status lock and the child is unreaped, so the group's id
+/// cannot have been recycled.
+#[cfg(unix)]
+fn signal_group(child: &mut Child, signal: Signal) {
+    let signal = match signal {
+        Signal::Terminate => libc::SIGTERM,
+        Signal::Kill => libc::SIGKILL,
+    };
+    // The child leads its own group, so the group id is its process id.
+    unsafe {
+        libc::killpg(child.id() as libc::pid_t, signal);
+    }
+}
+
+#[cfg(not(unix))]
+fn signal_group(child: &mut Child, signal: Signal) {
+    if matches!(signal, Signal::Kill) {
+        let _ = child.kill();
     }
 }
 
@@ -218,9 +278,9 @@ fn keep_tail(stderr: impl Read, tail: &Mutex<VecDeque<String>>) {
 
 /// Wait until the process has exited, then reap it under the status lock.
 fn reap(pid: u32, shared: &Shared) -> ExitStatus {
-    wait_for_exit(pid);
+    let exited = wait_for_exit(pid);
     loop {
-        if let Some(exit) = shared.record(&mut shared.status.lock().unwrap()) {
+        if let Some(exit) = shared.record(&mut shared.status.lock().unwrap(), exited) {
             return exit;
         }
         // Without `waitid`, or if it failed, observe the exit by polling on this dedicated thread.
@@ -228,9 +288,10 @@ fn reap(pid: u32, shared: &Shared) -> ExitStatus {
     }
 }
 
-/// Block until the process exits, leaving it unreaped so that its process id stays reserved.
+/// Block until the process exits, leaving it unreaped so that its process id stays reserved. Returns whether the exit
+/// was observed.
 #[cfg(unix)]
-fn wait_for_exit(pid: u32) {
+fn wait_for_exit(pid: u32) -> bool {
     loop {
         let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
         let result = unsafe {
@@ -241,12 +302,16 @@ fn wait_for_exit(pid: u32) {
                 libc::WEXITED | libc::WNOWAIT,
             )
         };
-        if result == 0 || std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted
-        {
-            return;
+        if result == 0 {
+            return true;
+        }
+        if std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted {
+            return false;
         }
     }
 }
 
 #[cfg(not(unix))]
-fn wait_for_exit(_pid: u32) {}
+fn wait_for_exit(_pid: u32) -> bool {
+    false
+}

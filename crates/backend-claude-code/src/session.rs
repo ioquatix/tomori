@@ -37,14 +37,13 @@ pub struct ClaudeCodeSession {
     events: Mutex<VecDeque<Event>>,
     lifecycle: Mutex<Lifecycle>,
     closing: AtomicBool,
-    grace: Duration,
 }
 
 impl ClaudeCodeSession {
     pub(crate) fn spawn(command: Command, session: String, grace: Duration) -> Result<Self> {
         let (sender, input) = async_channel::unbounded();
         let local = sender.clone();
-        let process = Process::spawn(command, move |output| {
+        let process = Process::spawn(command, grace, move |output| {
             let _ = sender.try_send(Input::Process(output));
         })
         .map_err(|error| {
@@ -65,7 +64,6 @@ impl ClaudeCodeSession {
             events: Mutex::new(VecDeque::new()),
             lifecycle: Mutex::new(Lifecycle::default()),
             closing: AtomicBool::new(false),
-            grace,
         })
     }
 
@@ -189,8 +187,7 @@ impl backend::Session for ClaudeCodeSession {
 
     async fn close(&self) -> Result<()> {
         self.closing.store(true, Ordering::SeqCst);
-        self.process.close_stdin();
-        self.process.kill_after(self.grace);
+        self.process.terminate();
         self.process.wait_exit().await;
         Ok(())
     }

@@ -63,6 +63,23 @@ impl Fixture {
             .unwrap()
     }
 
+    /// Process ids of the children the fake started, waiting until there are `count`.
+    async fn children(&self, count: usize) -> Vec<u32> {
+        loop {
+            let written = fs::read_to_string(self.directory.join("children")).unwrap_or_default();
+            // Only complete lines; the fake may be part way through writing one.
+            let children: Vec<u32> = written
+                .split_inclusive('\n')
+                .filter_map(|line| line.strip_suffix('\n'))
+                .map(|line| line.parse().unwrap())
+                .collect();
+            if children.len() >= count {
+                return children;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
     /// Lines Tomori wrote to the agent's standard input.
     fn written(&self) -> Vec<Value> {
         fs::read_to_string(&self.log)
@@ -589,6 +606,55 @@ fn kills_a_process_that_does_not_exit() {
         let fixture = Fixture::new("hang");
         let session = fixture.create().await;
         close(&session).await;
+    });
+}
+
+/// Wait for a process to disappear, returning whether it did within a few seconds.
+#[cfg(unix)]
+fn ends(pid: u32) -> bool {
+    for _ in 0..500 {
+        // A killed child stays a zombie until its parent is reaped, so this waits until the id is gone entirely.
+        if unsafe { libc::kill(pid as libc::pid_t, 0) } != 0 {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    false
+}
+
+#[cfg(unix)]
+#[test]
+fn closing_stops_the_agents_tools() {
+    run(|| async {
+        let fixture = Fixture::new("orphan");
+        let session = fixture.create().await;
+        let children = fixture.children(1).await;
+        close(&session).await;
+        assert!(ends(children[0]), "the tool process survived");
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn an_exiting_agent_leaves_no_tools_running() {
+    run(|| async {
+        let fixture = Fixture::new("leftover");
+        let session = fixture.create().await;
+        let children = fixture.children(1).await;
+        close(&session).await;
+        assert!(ends(children[0]), "the tool process survived");
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn dropping_a_session_stops_the_agents_tools() {
+    run(|| async {
+        let fixture = Fixture::new("orphan");
+        let session = fixture.create().await;
+        let children = fixture.children(1).await;
+        drop(session);
+        assert!(ends(children[0]), "the tool process survived");
     });
 }
 

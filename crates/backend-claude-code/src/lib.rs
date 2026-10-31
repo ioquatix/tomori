@@ -29,7 +29,7 @@ pub struct Config {
     pub executable: PathBuf,
     /// Extra arguments passed before the arguments the backend requires.
     pub arguments: Vec<String>,
-    /// How long a closing session may take to exit before it is killed.
+    /// How long a closing session may take to exit. Its process group is terminated after half of it and killed after all of it.
     pub grace: Duration,
     /// Where Claude Code keeps session transcripts, normally `~/.claude/projects`.
     pub projects: Option<PathBuf>,

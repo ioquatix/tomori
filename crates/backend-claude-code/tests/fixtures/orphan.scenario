@@ -1,0 +1,3 @@
+# An agent running a tool subprocess, where neither exits when standard input closes.
+spawn sleep 300
+hang
