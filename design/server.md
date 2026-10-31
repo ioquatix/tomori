@@ -1,6 +1,6 @@
 # Server
 
-This describes the target design for the Rust server that replaces `bridge/`. The current Node bridge and headset client differ where noted in `readme.md`; changes to them are not reviewed against this document until they move to the new server.
+This describes the target design for the Rust server that replaces `bridge/`, and for the headset client, which uses it. The current Node bridge differs; changes to it are not reviewed against this document.
 
 ## Requirement
 
