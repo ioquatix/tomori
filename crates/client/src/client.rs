@@ -11,20 +11,21 @@ use base_scheduler_direct::DirectScheduler;
 use protocol::{AudioFrame, ClientMessage};
 
 use crate::outbox::{Membership, Outbox};
-use crate::{ConnectionState, Event, Options, SendError, session};
+use crate::{ConnectionState, Event, Events, Options, SendError, session};
 
 /// State shared by the application handles and the connection thread.
 pub(crate) struct Shared {
     pub outbox: Outbox,
     pub state: Mutex<ConnectionState>,
+    pub events: Events,
     /// Cancelled when the client closes, to interrupt reconnection delays and bound the final connection.
     pub closing: Cancellation,
 }
 
 impl Shared {
-    pub fn set_state(&self, state: ConnectionState, events: &mpsc::Sender<Event>) {
+    pub fn set_state(&self, state: ConnectionState) {
         *self.state.lock().unwrap_or_else(PoisonError::into_inner) = state.clone();
-        let _ = events.send(Event::State(state));
+        self.events.push(Event::State(state));
     }
 }
 
@@ -75,7 +76,6 @@ impl Sender {
 /// The client keeps one duplex `POST /connect` exchange open, sends Hello on every connection, restores the joined space and microphone gate after reconnecting, and reconnects with backoff. Nothing here blocks: poll [`Self::try_event`] from the application loop and drain audio with [`Self::try_audio`] or move the receiver from [`Self::take_audio`] to the audio thread.
 pub struct Client {
     sender: Sender,
-    events: Receiver<Event>,
     audio: Option<Receiver<AudioFrame>>,
     thread: Option<JoinHandle<()>>,
 }
@@ -87,9 +87,9 @@ impl Client {
         let shared = Arc::new(Shared {
             outbox: Outbox::new(options.outgoing_audio_limit),
             state: Mutex::new(ConnectionState::Connecting { attempt: 1 }),
+            events: Events::new(),
             closing: Cancellation::new(),
         });
-        let (events_sender, events) = mpsc::channel();
         let (audio_sender, audio): (SyncSender<AudioFrame>, _) =
             mpsc::sync_channel(options.incoming_audio_limit.max(1));
         let thread_shared = shared.clone();
@@ -100,15 +100,14 @@ impl Client {
                     scheduler: &scheduler,
                     shared: &thread_shared,
                     options: &options,
-                    events: &events_sender,
                     audio: &audio_sender,
                 };
                 futures_lite::future::block_on(session::run(&context));
                 futures_lite::future::block_on(scheduler.shutdown());
+                thread_shared.events.finish();
             })?;
         Ok(Self {
             sender: Sender { shared },
-            events,
             audio: Some(audio),
             thread: Some(thread),
         })
@@ -134,14 +133,14 @@ impl Client {
         self.sender.state()
     }
 
-    /// Connection state changes and server messages, in order.
-    pub fn events(&self) -> &Receiver<Event> {
-        &self.events
+    /// Connection state changes and server messages, in order. See [`Events`] for how presence is coalesced when the application falls behind.
+    pub fn events(&self) -> &Events {
+        &self.sender.shared.events
     }
 
     /// The next event, if one is waiting.
     pub fn try_event(&self) -> Option<Event> {
-        self.events.try_recv().ok()
+        self.events().try_recv().ok()
     }
 
     /// Move received audio to another thread, typically the one feeding a [`crate::playback::Mixer`]. Returns `None` if already taken.

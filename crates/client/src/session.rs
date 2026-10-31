@@ -7,7 +7,7 @@ use std::cell::Cell;
 use std::convert::Infallible;
 use std::future::Future;
 use std::net::{SocketAddr, ToSocketAddrs};
-use std::sync::mpsc::{self, SyncSender};
+use std::sync::mpsc::SyncSender;
 use std::time::{Duration, Instant};
 
 use base_http::body::{BodyFrame, ReadableBody};
@@ -32,13 +32,12 @@ pub(crate) struct Context<'a> {
     pub scheduler: &'a DirectScheduler,
     pub shared: &'a Shared,
     pub options: &'a Options,
-    pub events: &'a mpsc::Sender<Event>,
     pub audio: &'a SyncSender<AudioFrame>,
 }
 
 impl Context<'_> {
     fn set_state(&self, state: ConnectionState) {
-        self.shared.set_state(state, self.events);
+        self.shared.set_state(state);
     }
 
     /// Fail with [`Disconnect::Timeout`] if `future` does not finish within `duration`.
@@ -309,7 +308,7 @@ fn deliver(context: &Context<'_>, frame: Frame) -> Result<(), Disconnect> {
                     ServerMessage::Left => context.shared.outbox.joined(None),
                     _ => {}
                 }
-                let _ = context.events.send(Event::Message(message));
+                context.shared.events.push(Event::Message(message));
             }
         },
         FrameKind::Audio => {
