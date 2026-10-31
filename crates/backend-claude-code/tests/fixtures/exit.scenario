@@ -1,0 +1,5 @@
+# The agent fails while a turn is running.
+expect user
+send {"type":"user","message":{"role":"user","content":"Hello."},"session_id":"{{session}}","parent_tool_use_id":null,"uuid":"{{uuid}}","isReplay":true}
+stderr Error: authentication failed
+exit 3

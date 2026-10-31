@@ -1,0 +1,624 @@
+// Released under the MIT License.
+// Copyright, 2026, by Samuel Williams.
+
+//! Translation between Claude Code's stream-json protocol and backend [`Event`]s.
+//!
+//! [`State`] is a pure state machine: it consumes output lines and produces events and lines to write back. It has no
+//! knowledge of the process, so it can be tested directly against recorded output.
+
+use std::collections::{HashMap, HashSet};
+
+use backend::{
+    AnswerValue, Decision, Error, ErrorKind, Event, Field, FieldKind, FieldOption, Part,
+    Permission, Prompt, Question, Result, Role, Snapshot, SnapshotMessage, Worker, WorkerState,
+};
+use serde_json::{Map, Value, json};
+
+/// Tools that delegate to a subagent. Claude Code 2.1 names it `Agent`; earlier versions name it `Task`.
+const WORKER_TOOLS: [&str; 2] = ["Agent", "Task"];
+
+/// The tool Claude Code uses to ask the user structured questions.
+const QUESTION_TOOL: &str = "AskUserQuestion";
+
+/// The agent-facing reason given when a participant denies a request.
+const DENIED: &str = "The user denied this request.";
+
+/// What handling one line produced.
+#[derive(Debug, Default)]
+pub(crate) struct Effects {
+    pub events: Vec<Event>,
+    /// Lines to write to the agent, in order.
+    pub writes: Vec<Value>,
+}
+
+#[derive(Debug)]
+enum Pending {
+    Permission(Permission),
+    Question { question: Question, input: Value },
+}
+
+#[derive(Debug)]
+pub(crate) struct State {
+    session: String,
+    busy: bool,
+    messages: Vec<SnapshotMessage>,
+    /// The index of the assistant message being streamed.
+    current: Option<usize>,
+    /// Content block indexes of the current message, mapped to part indexes.
+    blocks: HashMap<u64, usize>,
+    tools: HashSet<String>,
+    /// Unresolved `can_use_tool` requests by request id, oldest first.
+    pending: Vec<(String, Pending)>,
+    workers: Vec<Worker>,
+    /// Worker tool uses that run in the background, so their tool result does not mean completion.
+    background: HashSet<String>,
+    /// Prompt keys that were sent, so a key is delivered at most once.
+    sent: HashSet<String>,
+    /// Sent prompts awaiting acknowledgement, by message uuid.
+    prompts: HashMap<String, Prompt>,
+    /// Control requests sent to the agent and awaiting a response, by request id.
+    requests: HashMap<String, &'static str>,
+}
+
+impl State {
+    pub(crate) fn new(session: String) -> Self {
+        Self {
+            session,
+            busy: false,
+            messages: Vec::new(),
+            current: None,
+            blocks: HashMap::new(),
+            tools: HashSet::new(),
+            pending: Vec::new(),
+            workers: Vec::new(),
+            background: HashSet::new(),
+            sent: HashSet::new(),
+            prompts: HashMap::new(),
+            requests: HashMap::new(),
+        }
+    }
+
+    pub(crate) fn session(&self) -> &str {
+        &self.session
+    }
+
+    pub(crate) fn snapshot(&self) -> Snapshot {
+        Snapshot {
+            busy: Some(self.busy),
+            messages: self.messages.clone(),
+            permission: self.pending.iter().find_map(|(_, pending)| match pending {
+                Pending::Permission(permission) => Some(permission.clone()),
+                Pending::Question { .. } => None,
+            }),
+            question: self.pending.iter().find_map(|(_, pending)| match pending {
+                Pending::Question { question, .. } => Some(question.clone()),
+                Pending::Permission(_) => None,
+            }),
+            workers: self.workers.clone(),
+        }
+    }
+
+    /// The user message for `prompt`, or `None` if its key was already sent.
+    pub(crate) fn prompt(&mut self, prompt: Prompt) -> Option<Value> {
+        if !self.sent.insert(prompt.key.clone()) {
+            return None;
+        }
+        let uuid = uuid::Uuid::new_v4().to_string();
+        let line = json!({
+            "type": "user",
+            "message": {"role": "user", "content": prompt.text},
+            "parent_tool_use_id": null,
+            "session_id": self.session,
+            "uuid": uuid,
+        });
+        self.prompts.insert(uuid, prompt);
+        Some(line)
+    }
+
+    /// A control request to the agent, such as `initialize` or `interrupt`.
+    pub(crate) fn control_request(&mut self, subtype: &'static str) -> Value {
+        let id = uuid::Uuid::new_v4().to_string();
+        self.requests.insert(id.clone(), subtype);
+        json!({"type": "control_request", "request_id": id, "request": {"subtype": subtype}})
+    }
+
+    /// Resolve a pending permission, or decline a pending question.
+    pub(crate) fn decide(&mut self, id: &str, decision: Decision) -> Result<(Value, Event)> {
+        let index = self.pending_index(id)?;
+        let (response, event) = match (&self.pending[index].1, decision) {
+            (Pending::Permission(permission), Decision::AllowOnce) => (
+                json!({"behavior": "allow", "updatedInput": permission.input}),
+                Event::PermissionResolved { id: id.into() },
+            ),
+            (Pending::Permission(_), Decision::Deny) => (
+                json!({"behavior": "deny", "message": DENIED}),
+                Event::PermissionResolved { id: id.into() },
+            ),
+            (Pending::Question { .. }, Decision::Deny) => (
+                json!({"behavior": "deny", "message": DENIED}),
+                Event::QuestionResolved { id: id.into() },
+            ),
+            (Pending::Question { .. }, Decision::AllowOnce) => {
+                return Err(Error::new(
+                    ErrorKind::Invalid,
+                    "a question is answered, not allowed",
+                ));
+            }
+        };
+        self.pending.remove(index);
+        Ok((control_response(id, response), event))
+    }
+
+    /// Answer a pending question. Claude Code receives the answers as the question tool's updated input.
+    pub(crate) fn answer(
+        &mut self,
+        id: &str,
+        answers: Vec<(String, AnswerValue)>,
+    ) -> Result<(Value, Event)> {
+        let index = self.pending_index(id)?;
+        let Pending::Question { question, input } = &self.pending[index].1 else {
+            return Err(Error::new(
+                ErrorKind::Invalid,
+                "a permission is decided, not answered",
+            ));
+        };
+        if answers.is_empty() {
+            return Err(Error::new(ErrorKind::Invalid, "no answers were given"));
+        }
+
+        let mut values = Map::new();
+        for (key, value) in answers {
+            let Some(field) = question.fields.iter().find(|field| field.key == key) else {
+                return Err(Error::new(ErrorKind::Invalid, format!("no field {key:?}")));
+            };
+            let value = match (field.kind, value) {
+                (FieldKind::Unsupported, _) => {
+                    return Err(Error::new(
+                        ErrorKind::Invalid,
+                        format!("field {key:?} cannot be answered"),
+                    ));
+                }
+                (_, AnswerValue::Text(text)) => text,
+                // Claude Code joins the labels of a multiple selection with a comma.
+                (_, AnswerValue::Choices(choices)) => choices.join(", "),
+            };
+            values.insert(key, Value::String(value));
+        }
+
+        let mut input = input.clone();
+        if let Some(object) = input.as_object_mut() {
+            object.insert("answers".into(), Value::Object(values));
+        }
+        let response = json!({"behavior": "allow", "updatedInput": input});
+        self.pending.remove(index);
+        Ok((
+            control_response(id, response),
+            Event::QuestionResolved { id: id.into() },
+        ))
+    }
+
+    pub(crate) fn handle_line(&mut self, line: &str) -> Effects {
+        let mut effects = Effects::default();
+        // Claude Code writes only JSON to standard output in stream-json mode; anything else is not protocol.
+        if let Ok(value) = serde_json::from_str::<Value>(line) {
+            self.handle(&value, &mut effects);
+        }
+        effects
+    }
+
+    fn handle(&mut self, value: &Value, effects: &mut Effects) {
+        match str_field(value, "type") {
+            Some("system") => self.system(value, effects),
+            Some("stream_event") => {
+                if is_top_level(value) {
+                    self.stream_event(&value["event"], effects);
+                }
+            }
+            Some("assistant") => self.assistant(value, effects),
+            Some("user") => self.user(value, effects),
+            Some("command_lifecycle") => {
+                if str_field(value, "state") == Some("started")
+                    && let Some(uuid) = str_field(value, "command_uuid")
+                {
+                    self.delivered(uuid, effects);
+                }
+            }
+            Some("result") => {
+                self.close_message(effects);
+                if self.busy {
+                    self.busy = false;
+                    effects.events.push(Event::Idle);
+                }
+            }
+            Some("control_request") => self.control(value, effects),
+            Some("control_response") => {
+                let response = &value["response"];
+                if let Some(id) = str_field(response, "request_id")
+                    && self.requests.remove(id).is_some()
+                    && str_field(response, "subtype") == Some("error")
+                {
+                    let message = str_field(response, "error").unwrap_or("control request failed");
+                    effects.events.push(Event::Error {
+                        message: message.into(),
+                    });
+                }
+            }
+            Some("control_cancel_request") => {
+                if let Some(id) = str_field(value, "request_id")
+                    && let Ok(index) = self.pending_index(id)
+                {
+                    let event = match self.pending.remove(index).1 {
+                        Pending::Permission(_) => Event::PermissionResolved { id: id.into() },
+                        Pending::Question { .. } => Event::QuestionResolved { id: id.into() },
+                    };
+                    effects.events.push(event);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn system(&mut self, value: &Value, effects: &mut Effects) {
+        match str_field(value, "subtype") {
+            Some("init") => {
+                if let Some(session) = str_field(value, "session_id") {
+                    self.session = session.into();
+                }
+            }
+            Some("status") if str_field(value, "status") == Some("requesting") => {
+                self.begin_turn(effects);
+            }
+            Some("task_started") => {
+                if value["is_backgrounded"].as_bool() == Some(true)
+                    && let Some(id) = str_field(value, "tool_use_id")
+                {
+                    self.background.insert(id.into());
+                }
+            }
+            Some("task_notification") => {
+                if let Some(id) = str_field(value, "tool_use_id") {
+                    let state = match str_field(value, "status") {
+                        Some("completed") => WorkerState::Completed,
+                        _ => WorkerState::Error,
+                    };
+                    self.set_worker(id, state, effects);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn stream_event(&mut self, event: &Value, effects: &mut Effects) {
+        match str_field(event, "type") {
+            Some("message_start") => {
+                self.begin_turn(effects);
+                self.close_message(effects);
+                let Some(id) = str_field(&event["message"], "id") else {
+                    return;
+                };
+                self.messages.push(SnapshotMessage {
+                    id: id.into(),
+                    role: Role::Assistant,
+                    parts: Vec::new(),
+                    completed: false,
+                });
+                self.current = Some(self.messages.len() - 1);
+                effects.events.push(Event::MessageStarted {
+                    message: id.into(),
+                    role: Role::Assistant,
+                });
+            }
+            Some("content_block_start") => {
+                let Some(message) = self.current.map(|index| &mut self.messages[index]) else {
+                    return;
+                };
+                let part = match str_field(&event["content_block"], "type") {
+                    Some("text") => Part::Text {
+                        text: String::new(),
+                    },
+                    Some("thinking") => Part::Reasoning {
+                        text: String::new(),
+                    },
+                    // Tool use input streams as partial JSON; the tool is reported once the complete block arrives.
+                    _ => return,
+                };
+                if let Some(index) = event["index"].as_u64() {
+                    message.parts.push(part);
+                    self.blocks.insert(index, message.parts.len() - 1);
+                }
+            }
+            Some("content_block_delta") => {
+                let Some(current) = self.current else { return };
+                let Some(part) = event["index"]
+                    .as_u64()
+                    .and_then(|index| self.blocks.get(&index))
+                else {
+                    return;
+                };
+                let message = &mut self.messages[current];
+                let delta = &event["delta"];
+                match (&mut message.parts[*part], str_field(delta, "type")) {
+                    (Part::Text { text }, Some("text_delta")) => {
+                        let delta = str_field(delta, "text").unwrap_or_default();
+                        text.push_str(delta);
+                        effects.events.push(Event::TextDelta {
+                            message: message.id.clone(),
+                            text: delta.into(),
+                        });
+                    }
+                    (Part::Reasoning { text }, Some("thinking_delta")) => {
+                        text.push_str(str_field(delta, "thinking").unwrap_or_default());
+                    }
+                    _ => {}
+                }
+            }
+            Some("message_stop") => self.close_message(effects),
+            _ => {}
+        }
+    }
+
+    fn assistant(&mut self, value: &Value, effects: &mut Effects) {
+        let parent = str_field(value, "parent_tool_use_id");
+        let message = &value["message"];
+        let Some(message_id) = str_field(message, "id") else {
+            return;
+        };
+        let Some(content) = message["content"].as_array() else {
+            return;
+        };
+        for block in content {
+            if str_field(block, "type") != Some("tool_use") {
+                continue;
+            }
+            let (Some(id), Some(tool)) = (str_field(block, "id"), str_field(block, "name")) else {
+                continue;
+            };
+            let input = block.get("input").cloned().unwrap_or(Value::Null);
+
+            if WORKER_TOOLS.contains(&tool) && !self.workers.iter().any(|worker| worker.id == id) {
+                let title = str_field(&input, "description")
+                    .or_else(|| str_field(&input, "subagent_type"))
+                    .unwrap_or(tool);
+                self.workers.push(Worker {
+                    id: id.into(),
+                    parent: Some(parent.unwrap_or(&self.session).into()),
+                    title: title.into(),
+                    state: WorkerState::Running,
+                });
+                effects.events.push(Event::WorkersChanged {
+                    workers: self.workers.clone(),
+                });
+            }
+
+            // Only the session's own tool activity is reported; subagent activity is summarized by its worker.
+            if parent.is_none() && self.tools.insert(id.into()) {
+                if let Some(message) = self.messages.iter_mut().rev().find(|m| m.id == message_id) {
+                    message.parts.push(Part::Tool {
+                        id: id.into(),
+                        tool: tool.into(),
+                        input: input.clone(),
+                        finished: false,
+                    });
+                }
+                effects.events.push(Event::ToolStarted {
+                    message: message_id.into(),
+                    tool: tool.into(),
+                    id: id.into(),
+                    input,
+                });
+            }
+        }
+    }
+
+    fn user(&mut self, value: &Value, effects: &mut Effects) {
+        if value["isReplay"].as_bool() == Some(true) {
+            if let Some(uuid) = str_field(value, "uuid") {
+                self.delivered(uuid, effects);
+            }
+            return;
+        }
+
+        let top_level = is_top_level(value);
+        let Some(content) = value["message"]["content"].as_array() else {
+            return;
+        };
+        for block in content {
+            if str_field(block, "type") != Some("tool_result") {
+                continue;
+            }
+            let Some(id) = str_field(block, "tool_use_id") else {
+                continue;
+            };
+            let failed = block["is_error"].as_bool() == Some(true);
+
+            if self.workers.iter().any(|worker| worker.id == id) {
+                if failed {
+                    self.set_worker(id, WorkerState::Error, effects);
+                } else if !self.background.contains(id) {
+                    self.set_worker(id, WorkerState::Completed, effects);
+                }
+            }
+
+            if top_level && self.tools.contains(id) {
+                for message in self.messages.iter_mut().rev() {
+                    if let Some(Part::Tool { finished, .. }) = message
+                        .parts
+                        .iter_mut()
+                        .find(|part| matches!(part, Part::Tool { id: tool, .. } if tool == id))
+                    {
+                        *finished = true;
+                        break;
+                    }
+                }
+                effects.events.push(Event::ToolFinished {
+                    id: id.into(),
+                    error: failed.then(|| result_text(&block["content"])),
+                });
+            }
+        }
+    }
+
+    fn control(&mut self, value: &Value, effects: &mut Effects) {
+        let Some(id) = str_field(value, "request_id") else {
+            return;
+        };
+        let request = &value["request"];
+        if str_field(request, "subtype") != Some("can_use_tool") {
+            // Tomori registers no hooks or SDK tools, so no other request is expected; never leave the agent waiting.
+            effects.writes.push(json!({
+                "type": "control_response",
+                "response": {"subtype": "error", "request_id": id, "error": "unsupported control request"},
+            }));
+            return;
+        }
+
+        let tool = str_field(request, "tool_name").unwrap_or_default();
+        let input = request.get("input").cloned().unwrap_or(Value::Null);
+
+        if tool == QUESTION_TOOL
+            && let Some(question) = question(id, &input)
+        {
+            effects.events.push(Event::QuestionAsked(question.clone()));
+            self.pending
+                .push((id.into(), Pending::Question { question, input }));
+            return;
+        }
+
+        let permission = Permission {
+            id: id.into(),
+            tool: tool.into(),
+            description: str_field(request, "description")
+                .or_else(|| str_field(&input, "description"))
+                .map(Into::into),
+            input,
+        };
+        effects
+            .events
+            .push(Event::PermissionRequested(permission.clone()));
+        self.pending
+            .push((id.into(), Pending::Permission(permission)));
+    }
+
+    fn begin_turn(&mut self, effects: &mut Effects) {
+        if !self.busy {
+            self.busy = true;
+            effects.events.push(Event::Busy);
+        }
+    }
+
+    fn delivered(&mut self, uuid: &str, effects: &mut Effects) {
+        let Some(prompt) = self.prompts.remove(uuid) else {
+            return;
+        };
+        effects.events.push(Event::Delivered { key: prompt.key });
+        self.messages.push(SnapshotMessage {
+            id: uuid.into(),
+            role: Role::User,
+            parts: vec![Part::Text { text: prompt.text }],
+            completed: true,
+        });
+        self.begin_turn(effects);
+    }
+
+    fn close_message(&mut self, effects: &mut Effects) {
+        if let Some(index) = self.current.take() {
+            self.blocks.clear();
+            let message = &mut self.messages[index];
+            message.completed = true;
+            effects.events.push(Event::MessageCompleted {
+                message: message.id.clone(),
+            });
+        }
+    }
+
+    fn set_worker(&mut self, id: &str, state: WorkerState, effects: &mut Effects) {
+        if let Some(worker) = self.workers.iter_mut().find(|worker| worker.id == id)
+            && worker.state != state
+        {
+            worker.state = state;
+            effects.events.push(Event::WorkersChanged {
+                workers: self.workers.clone(),
+            });
+        }
+    }
+
+    fn pending_index(&self, id: &str) -> Result<usize> {
+        self.pending
+            .iter()
+            .position(|(pending, _)| pending == id)
+            .ok_or_else(|| Error::new(ErrorKind::NotFound, format!("no pending request {id:?}")))
+    }
+}
+
+fn control_response(id: &str, response: Value) -> Value {
+    json!({
+        "type": "control_response",
+        "response": {"subtype": "success", "request_id": id, "response": response},
+    })
+}
+
+/// Map `AskUserQuestion` input to a question. Each field is keyed by its question text, as Claude Code keys answers.
+fn question(id: &str, input: &Value) -> Option<Question> {
+    let questions = input["questions"].as_array()?;
+    let mut fields = Vec::with_capacity(questions.len());
+    for question in questions {
+        let text = str_field(question, "question")?;
+        let options: Vec<FieldOption> = question["options"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|option| {
+                Some(FieldOption {
+                    label: str_field(option, "label")?.into(),
+                    description: str_field(option, "description").map(Into::into),
+                })
+            })
+            .collect();
+        let kind = match str_field(question, "kind") {
+            None | Some("choice") if question["multiSelect"].as_bool() == Some(true) => {
+                FieldKind::MultipleChoice
+            }
+            None | Some("choice") => FieldKind::Choice,
+            // Number answers are returned to Claude Code as text, like every other answer.
+            Some("text" | "number") => FieldKind::Text,
+            Some(_) => FieldKind::Unsupported,
+        };
+        fields.push(Field {
+            key: text.into(),
+            title: text.into(),
+            description: str_field(question, "description").map(Into::into),
+            kind,
+            options,
+            // Claude Code always lets the user type an answer other than the listed options.
+            custom: matches!(kind, FieldKind::Choice | FieldKind::MultipleChoice),
+        });
+    }
+    let title = str_field(input, "title")
+        .or_else(|| questions.first().and_then(|q| str_field(q, "header")))
+        .unwrap_or_default();
+    Some(Question {
+        id: id.into(),
+        title: title.into(),
+        fields,
+    })
+}
+
+fn result_text(content: &Value) -> String {
+    match content {
+        Value::String(text) => text.clone(),
+        Value::Array(blocks) => blocks
+            .iter()
+            .filter_map(|block| str_field(block, "text"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => String::new(),
+    }
+}
+
+fn is_top_level(value: &Value) -> bool {
+    value["parent_tool_use_id"].is_null()
+}
+
+fn str_field<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
+    value.get(key).and_then(Value::as_str)
+}

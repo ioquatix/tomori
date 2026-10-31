@@ -1,0 +1,13 @@
+# An interrupt while the agent is thinking, condensed from Claude Code 2.1.311 output.
+expect user
+send {"type":"user","message":{"role":"user","content":"Write the numbers from one to three hundred in words."},"session_id":"{{session}}","parent_tool_use_id":null,"uuid":"{{uuid}}","timestamp":"2026-10-31T02:54:45.073Z","isReplay":true}
+send {"type":"stream_event","event":{"type":"message_start","message":{"model":"claude-haiku-5-5","id":"msg_011CgZZUXqqJeN1ScECoQXve","type":"message","role":"assistant","content":[],"stop_reason":null}},"session_id":"{{session}}","parent_tool_use_id":null,"uuid":"4350f824-cfb3-4c56-a273-592e896c1f95"}
+send {"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}},"session_id":"{{session}}","parent_tool_use_id":null,"uuid":"0613438c-96a5-451e-baac-54a289f5499f","thinking_display":"updates","api_message_id":"msg_011CgZZUXqqJeN1ScECoQXve"}
+expect control_request:interrupt
+send {"type":"control_response","response":{"subtype":"success","request_id":"{{request}}","response":{"still_queued":[]}}}
+send {"type":"user","message":{"role":"user","content":[{"type":"text","text":"[Request interrupted by user]"}]},"parent_tool_use_id":null,"session_id":"{{session}}","uuid":"3538fa1a-60d7-4524-86b9-d934dcf55705","timestamp":"2026-10-31T02:54:46.174Z"}
+send {"type":"stream_event","event":{"type":"content_block_stop","index":0},"session_id":"{{session}}","parent_tool_use_id":null,"uuid":"d4028cf6-1f5a-491a-b91d-99d97a8d2da7","api_message_id":"msg_011CgZZUXqqJeN1ScECoQXve"}
+send {"type":"stream_event","event":{"type":"message_stop"},"session_id":"{{session}}","parent_tool_use_id":null,"uuid":"5a4d9483-807d-4b79-87c3-e99dc862caed","api_message_id":"msg_011CgZZUXqqJeN1ScECoQXve","abandoned_blocks":{"api_message_id":"msg_011CgZZUXqqJeN1ScECoQXve","from_block_index":0}}
+send {"type":"result","subtype":"error_during_execution","is_error":true,"num_turns":1,"stop_reason":null,"session_id":"{{session}}","permission_denials":[],"terminal_reason":"aborted_streaming","uuid":"7541ca1d-85c5-4893-af8b-7dd8a24b1412"}
+send {"type":"command_lifecycle","command_uuid":"{{uuid}}","state":"cancelled","uuid":"30c930d0-1fea-42fe-bb33-f7bf23dc4500","session_id":"{{session}}"}
+drain

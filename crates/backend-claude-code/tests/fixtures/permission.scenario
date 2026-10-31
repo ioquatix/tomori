@@ -1,0 +1,21 @@
+# A Write permission that is denied, condensed from Claude Code 2.1.311 output.
+expect user
+send {"type":"system","subtype":"status","status":"requesting","session_id":"{{session}}","uuid":"4f05efd3-0af5-4496-baf0-1cf911db2936","user_message_uuids":["{{uuid}}"]}
+send {"type":"user","message":{"role":"user","content":"Use the Write tool to create a file named b.txt containing the word x."},"session_id":"{{session}}","parent_tool_use_id":null,"uuid":"{{uuid}}","timestamp":"2026-10-31T02:54:11.249Z","isReplay":true}
+send {"type":"stream_event","event":{"type":"message_start","message":{"model":"claude-haiku-5-5","id":"msg_011CgZZRqjYgXk1dBcgqnXeh","type":"message","role":"assistant","content":[],"stop_reason":null}},"session_id":"{{session}}","parent_tool_use_id":null,"uuid":"8a9c80a0-92bf-403d-94a5-dd7820d01169"}
+send {"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_011Ui67Q2wPbtCsQNBUvsanY","name":"Write","input":{},"caller":{"type":"direct"}}},"session_id":"{{session}}","parent_tool_use_id":null,"uuid":"7319fba8-0514-4b31-9c6d-1d68846dc5d2","api_message_id":"msg_011CgZZRqjYgXk1dBcgqnXeh"}
+send {"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"file_path\": \"/tmp/work/b.txt\""}},"session_id":"{{session}}","parent_tool_use_id":null,"uuid":"20f2601f-ab72-456c-8c20-d95fb2e0f08e","api_message_id":"msg_011CgZZRqjYgXk1dBcgqnXeh"}
+send {"type":"assistant","message":{"model":"claude-haiku-5-5","id":"msg_011CgZZRqjYgXk1dBcgqnXeh","type":"message","role":"assistant","content":[{"type":"tool_use","id":"toolu_011Ui67Q2wPbtCsQNBUvsanY","name":"Write","input":{"file_path":"/tmp/work/b.txt","content":"x\n"},"caller":{"type":"direct"}}],"stop_reason":null},"parent_tool_use_id":null,"session_id":"{{session}}","uuid":"47c0ca7c-e938-40b6-a2a4-8aaad3e44d4e"}
+send {"type":"stream_event","event":{"type":"content_block_stop","index":0},"session_id":"{{session}}","parent_tool_use_id":null,"uuid":"b6f30ec6-d015-4db3-808e-abdb3f9680a4","api_message_id":"msg_011CgZZRqjYgXk1dBcgqnXeh"}
+send {"type":"control_request","request_id":"7802cc24-5d63-4554-9ff9-15db6eca3fc7","request":{"subtype":"can_use_tool","tool_name":"Write","display_name":"Write","input":{"file_path":"/tmp/work/b.txt","content":"x\n"},"description":"b.txt","permission_suggestions":[{"type":"setMode","mode":"acceptEdits","destination":"session"}],"tool_use_id":"toolu_011Ui67Q2wPbtCsQNBUvsanY"}}
+expect control_response
+# Claude Code echoes the host's control responses on standard output.
+send {"type":"control_response","response":{"subtype":"success","request_id":"7802cc24-5d63-4554-9ff9-15db6eca3fc7","response":{"behavior":"deny","message":"The user denied this request."}}}
+send {"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"The user denied this request.","is_error":true,"tool_use_id":"toolu_011Ui67Q2wPbtCsQNBUvsanY"}]},"parent_tool_use_id":null,"session_id":"{{session}}","uuid":"32852556-ac96-4cac-9d3f-131cc3804883","tool_use_result":"Error: The user denied this request."}
+send {"type":"stream_event","event":{"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"output_tokens":75}},"session_id":"{{session}}","parent_tool_use_id":null,"uuid":"bcd5012c-8d1f-4717-bfae-bca87c00282b","api_message_id":"msg_011CgZZRqjYgXk1dBcgqnXeh"}
+send {"type":"stream_event","event":{"type":"message_stop"},"session_id":"{{session}}","parent_tool_use_id":null,"uuid":"0da16274-5423-49a0-9bf5-d269084462ab","api_message_id":"msg_011CgZZRqjYgXk1dBcgqnXeh"}
+# A request type Tomori does not register for is answered with an error so the agent never waits on it.
+send {"type":"control_request","request_id":"hook-1","request":{"subtype":"hook_callback","callback_id":"hook_0","input":{}}}
+expect control_response
+send {"type":"result","subtype":"success","is_error":false,"num_turns":2,"result":"denied","stop_reason":"end_turn","session_id":"{{session}}","permission_denials":[{"tool_name":"Write","tool_use_id":"toolu_011Ui67Q2wPbtCsQNBUvsanY"}],"terminal_reason":"completed","uuid":"7541ca1d-85c5-4893-af8b-7dd8a24b1408"}
+drain
