@@ -225,6 +225,18 @@ impl State {
             }
             Some("result") => {
                 self.close_message(effects);
+                // An interrupted turn also ends in an error result, with an `aborted_*` terminal reason.
+                let aborted = str_field(value, "terminal_reason")
+                    .is_some_and(|reason| reason.starts_with("aborted"));
+                if value["is_error"].as_bool() == Some(true) && !aborted {
+                    let message = str_field(value, "result")
+                        .filter(|result| !result.is_empty())
+                        .or_else(|| str_field(value, "subtype"))
+                        .unwrap_or("the turn failed");
+                    effects.events.push(Event::Error {
+                        message: message.into(),
+                    });
+                }
                 if self.busy {
                     self.busy = false;
                     effects.events.push(Event::Idle);
@@ -621,4 +633,191 @@ fn is_top_level(value: &Value) -> bool {
 
 fn str_field<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
     value.get(key).and_then(Value::as_str)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn handle(state: &mut State, value: Value) -> Vec<Event> {
+        state.handle_line(&value.to_string()).events
+    }
+
+    fn can_use_tool(id: &str, tool: &str, input: Value) -> Value {
+        json!({
+            "type": "control_request",
+            "request_id": id,
+            "request": {"subtype": "can_use_tool", "tool_name": tool, "input": input, "tool_use_id": "toolu_1"},
+        })
+    }
+
+    #[test]
+    fn cancelled_requests_are_resolved() {
+        let mut state = State::new("session".into());
+        let input = json!({"command": "rm -rf build", "description": "Remove the build directory"});
+        let events = handle(&mut state, can_use_tool("perm-1", "Bash", input));
+        let Event::PermissionRequested(permission) = &events[0] else {
+            panic!("{events:?}")
+        };
+        assert_eq!(
+            permission.description.as_deref(),
+            Some("Remove the build directory")
+        );
+
+        let events = handle(
+            &mut state,
+            json!({"type": "control_cancel_request", "request_id": "perm-1"}),
+        );
+        assert_eq!(
+            events,
+            vec![Event::PermissionResolved {
+                id: "perm-1".into()
+            }]
+        );
+        assert_eq!(state.snapshot().permission, None);
+        assert_eq!(
+            state
+                .decide("perm-1", Decision::AllowOnce)
+                .unwrap_err()
+                .kind,
+            ErrorKind::NotFound
+        );
+    }
+
+    #[test]
+    fn allowing_returns_the_original_input() {
+        let mut state = State::new("session".into());
+        let input = json!({"command": "cargo test"});
+        handle(&mut state, can_use_tool("perm-1", "Bash", input.clone()));
+        let (response, event) = state.decide("perm-1", Decision::AllowOnce).unwrap();
+        assert_eq!(
+            response["response"]["response"],
+            json!({"behavior": "allow", "updatedInput": input})
+        );
+        assert_eq!(
+            event,
+            Event::PermissionResolved {
+                id: "perm-1".into()
+            }
+        );
+    }
+
+    #[test]
+    fn maps_extended_question_kinds() {
+        let mut state = State::new("session".into());
+        let input = json!({
+            "title": "Project setup",
+            "questions": [
+                {"question": "What should it be called?", "header": "Name", "kind": "text"},
+                {"question": "How many workers?", "header": "Workers", "kind": "number", "min": 1, "max": 8},
+                {"question": "Pick a colour.", "header": "Colour", "kind": "colour"},
+            ],
+        });
+        let events = handle(
+            &mut state,
+            can_use_tool("question-1", "AskUserQuestion", input),
+        );
+        let Event::QuestionAsked(question) = &events[0] else {
+            panic!("{events:?}")
+        };
+        assert_eq!(question.title, "Project setup");
+        let kinds: Vec<_> = question.fields.iter().map(|field| field.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![FieldKind::Text, FieldKind::Text, FieldKind::Unsupported]
+        );
+        assert!(question.fields.iter().all(|field| !field.custom));
+
+        let error = state
+            .answer(
+                "question-1",
+                vec![("Pick a colour.".into(), AnswerValue::Text("red".into()))],
+            )
+            .unwrap_err();
+        assert_eq!(error.kind, ErrorKind::Invalid);
+
+        let (response, _) = state
+            .answer(
+                "question-1",
+                vec![(
+                    "What should it be called?".into(),
+                    AnswerValue::Text("Tomori".into()),
+                )],
+            )
+            .unwrap();
+        assert_eq!(
+            response["response"]["response"]["updatedInput"]["answers"],
+            json!({"What should it be called?": "Tomori"})
+        );
+    }
+
+    #[test]
+    fn malformed_questions_are_permissions() {
+        let mut state = State::new("session".into());
+        let events = handle(
+            &mut state,
+            can_use_tool("question-1", "AskUserQuestion", json!({"questions": "?"})),
+        );
+        assert!(
+            matches!(&events[0], Event::PermissionRequested(permission) if permission.tool == "AskUserQuestion")
+        );
+    }
+
+    #[test]
+    fn failed_turns_report_an_error() {
+        let mut state = State::new("session".into());
+        handle(
+            &mut state,
+            json!({"type": "system", "subtype": "status", "status": "requesting"}),
+        );
+        let events = handle(
+            &mut state,
+            json!({"type": "result", "subtype": "success", "is_error": true, "result": "API Error: 529 Overloaded", "terminal_reason": "completed"}),
+        );
+        assert_eq!(
+            events,
+            vec![
+                Event::Error {
+                    message: "API Error: 529 Overloaded".into()
+                },
+                Event::Idle,
+            ]
+        );
+    }
+
+    #[test]
+    fn nested_workers_name_their_parent() {
+        let mut state = State::new("session".into());
+        let agent = |id: &str, parent: Value| {
+            json!({
+                "type": "assistant",
+                "parent_tool_use_id": parent,
+                "message": {"id": "msg_1", "content": [
+                    {"type": "tool_use", "id": id, "name": "Agent", "input": {"description": "Explore", "prompt": "..."}},
+                ]},
+            })
+        };
+        handle(&mut state, agent("toolu_outer", Value::Null));
+        let events = handle(&mut state, agent("toolu_inner", json!("toolu_outer")));
+        // The nested tool use is not the session's own activity.
+        assert_eq!(events.len(), 1);
+        let Event::WorkersChanged { workers } = &events[0] else {
+            panic!("{events:?}")
+        };
+        assert_eq!(workers[0].parent.as_deref(), Some("session"));
+        assert_eq!(workers[1].parent.as_deref(), Some("toolu_outer"));
+
+        let events = handle(
+            &mut state,
+            json!({
+                "type": "user",
+                "parent_tool_use_id": "toolu_outer",
+                "message": {"content": [{"type": "tool_result", "tool_use_id": "toolu_inner", "is_error": true, "content": "failed"}]},
+            }),
+        );
+        let Event::WorkersChanged { workers } = &events[0] else {
+            panic!("{events:?}")
+        };
+        assert_eq!(workers[1].state, WorkerState::Error);
+    }
 }
