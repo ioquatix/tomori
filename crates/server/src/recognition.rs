@@ -66,6 +66,7 @@ impl Transcriber for RecognitionTranscriber {
         }
     }
 
+    /// The hub cancels from inside a failure report, which can arrive while `begin` holds `recognition`, so this must not take that lock.
     fn cancel(&self, utterance: UtteranceId) {
         let handle = self.utterances().remove(&utterance);
         if let Some(handle) = handle {
