@@ -466,12 +466,14 @@ async fn resolve<S: Timers>(
     let timeout = scheduler.timer_wait_until(&mut timer, deadline, cancellation);
     match select(pin!(resolved.recv()), pin!(timeout)).await {
         Either::Left((result, _)) => result.ok()?.ok(),
-        Either::Right(_) => {
+        // The wait fails instead when the server is shutting down.
+        Either::Right((Ok(_), _)) => {
             log::warn!(
                 "Refused directory {directory:?}: checking it took longer than {RESOLVE_TIMEOUT:?}."
             );
             None
         }
+        Either::Right((Err(_), _)) => None,
     }
 }
 
