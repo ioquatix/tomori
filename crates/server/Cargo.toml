@@ -1,0 +1,64 @@
+[package]
+name = "server"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.93"
+description = "The Tomori server: spaces, agent sessions and live audio over one duplex connection per client"
+repository = "https://github.com/ioquatix/tomori"
+license = "MIT"
+publish = false
+
+[[bin]]
+name = "tomori-server"
+path = "src/main.rs"
+
+[[test]]
+name = "connection"
+required-features = ["fake"]
+
+[[test]]
+name = "limits"
+required-features = ["fake"]
+
+[[test]]
+name = "spaces"
+required-features = ["fake"]
+
+[[test]]
+name = "workspaces"
+required-features = ["fake"]
+
+[[test]]
+name = "speech"
+required-features = ["fake", "speech"]
+
+[features]
+default = ["fake", "claude-code", "speech"]
+# A scripted in-memory backend for tests and for manual testing without an agent.
+fake = []
+# Claude Code, driven as a persistent `claude` process per space.
+claude-code = ["dep:backend-claude-code"]
+# Speech recognition and synthesis with the speech crate's engines.
+speech = ["dep:speech"]
+
+[dependencies]
+async-channel = "2"
+backend = { path = "../backend" }
+backend-claude-code = { path = "../backend-claude-code", optional = true }
+base-http = "0.2.0"
+base-http-server = "0.2.0"
+base-scheduler = "0.3.0"
+base-scheduler-direct = "0.3.0"
+discovery = { path = "../discovery" }
+event-listener = "5"
+futures-lite = "2"
+futures-util = { version = "0.3", default-features = false, features = ["alloc", "async-await"] }
+gethostname = "1.1"
+log = "0.4"
+protocol = { path = "../protocol" }
+serde = "1"
+serde_json = "1"
+speech = { path = "../speech", optional = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

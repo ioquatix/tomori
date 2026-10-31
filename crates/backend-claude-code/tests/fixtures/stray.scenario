@@ -1,0 +1,4 @@
+# An agent that exits while a process outside its group still holds its standard output and error open.
+detach sleep 8
+send {"type":"system","subtype":"status","status":"requesting","session_id":"{{session}}"}
+exit 0

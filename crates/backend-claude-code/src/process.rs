@@ -1,0 +1,346 @@
+// Released under the MIT License.
+// Copyright, 2026, by Samuel Williams.
+
+//! The `claude` child process and its pipes.
+//!
+//! Each pipe is serviced by one std thread and output is delivered through a sink, so the session can wait with a plain
+//! async receive. This is the only module that touches threads and pipes; replacing it with scheduler-owned pipes and
+//! `ProcessWait` does not change the session.
+//!
+//! On Unix, `claude` leads its own process group, so that the tools it runs can be stopped with it. A process group's id
+//! is the leader's process id, which stays reserved while the leader is unreaped; the group is signalled only then, under
+//! the status lock, so a signal can never reach a recycled id.
+
+use std::collections::VecDeque;
+use std::io::{BufRead, BufReader, Read, Write};
+use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex, mpsc};
+use std::thread;
+use std::time::Duration;
+
+/// How many trailing lines of standard error are kept to explain an unexpected exit.
+const STDERR_LINES: usize = 8;
+
+/// How long output may keep arriving after the process exits. A process the agent started can inherit its standard
+/// output or error and hold them open long after the agent has gone.
+const OUTPUT_DRAIN_LIMIT: Duration = Duration::from_secs(1);
+
+/// Output from the child process, in order per pipe.
+#[derive(Debug)]
+pub(crate) enum Output {
+    /// One line of standard output, without the line terminator.
+    Line(String),
+    /// The process exited and has been reaped, and its output was read to the end or for [`OUTPUT_DRAIN_LIMIT`].
+    Exited(ExitStatus),
+}
+
+struct Status {
+    child: Child,
+    exited: Option<ExitStatus>,
+    /// Standard output and standard error have reached end of file.
+    stdout_closed: bool,
+    stderr_closed: bool,
+}
+
+struct Shared {
+    status: Mutex<Status>,
+    changed: Condvar,
+}
+
+impl Shared {
+    /// Reap the child if it has exited. `exited` says the exit was already observed without reaping.
+    fn record(&self, status: &mut Status, exited: bool) -> Option<ExitStatus> {
+        if status.exited.is_none() {
+            if exited {
+                // The agent has gone, so nothing it started is still in use: stop whatever remains of its group before
+                // reaping releases the group's id.
+                signal_group(&mut status.child, Signal::Kill);
+            }
+            // The child has exited, so this reaps it without blocking. Reaping under the lock means a signal can never
+            // reach a recycled process id.
+            if let Ok(Some(exit)) = status.child.try_wait() {
+                status.exited = Some(exit);
+                self.changed.notify_all();
+            }
+        }
+        status.exited
+    }
+}
+
+pub(crate) struct Process {
+    stdin: Mutex<Option<mpsc::Sender<String>>>,
+    shared: Arc<Shared>,
+    /// How long the process may take to exit once asked to stop.
+    grace: Duration,
+    terminating: AtomicBool,
+    stderr: Arc<Mutex<VecDeque<String>>>,
+    exited: async_channel::Receiver<()>,
+}
+
+impl Process {
+    /// Spawn `command` with piped standard streams and deliver its output to `sink`. Once asked to stop, the process
+    /// has `grace` to exit before its process group is terminated and then killed.
+    pub(crate) fn spawn(
+        mut command: Command,
+        grace: Duration,
+        sink: impl Fn(Output) + Send + Sync + 'static,
+    ) -> std::io::Result<Self> {
+        command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        #[cfg(unix)]
+        std::os::unix::process::CommandExt::process_group(&mut command, 0);
+
+        let mut child = command.spawn()?;
+        let stdin = child.stdin.take().expect("stdin is piped");
+        let stdout = child.stdout.take().expect("stdout is piped");
+        let stderr = child.stderr.take().expect("stderr is piped");
+        let pid = child.id();
+
+        let sink = Arc::new(sink);
+        let shared = Arc::new(Shared {
+            status: Mutex::new(Status {
+                child,
+                exited: None,
+                stdout_closed: false,
+                stderr_closed: false,
+            }),
+            changed: Condvar::new(),
+        });
+
+        let (writer, lines) = mpsc::channel();
+        thread::Builder::new()
+            .name("claude-stdin".into())
+            .spawn(move || write_lines(stdin, lines))?;
+
+        let output = sink.clone();
+        let closed = shared.clone();
+        thread::Builder::new()
+            .name("claude-stdout".into())
+            .spawn(move || {
+                read_lines(stdout, &*output);
+                closed.status.lock().unwrap().stdout_closed = true;
+                closed.changed.notify_all();
+            })?;
+
+        let tail = Arc::new(Mutex::new(VecDeque::new()));
+        let errors = tail.clone();
+        let closed = shared.clone();
+        thread::Builder::new()
+            .name("claude-stderr".into())
+            .spawn(move || {
+                keep_tail(stderr, &errors);
+                closed.status.lock().unwrap().stderr_closed = true;
+                closed.changed.notify_all();
+            })?;
+
+        let (notify, exited) = async_channel::bounded::<()>(1);
+        let reaped = shared.clone();
+        thread::Builder::new()
+            .name("claude-reaper".into())
+            .spawn(move || {
+                let status = reap(pid, &reaped);
+                drain(&reaped);
+                sink(Output::Exited(status));
+                // Closing the channel wakes every task waiting for the exit.
+                drop(notify);
+            })?;
+
+        Ok(Self {
+            stdin: Mutex::new(Some(writer)),
+            shared,
+            grace,
+            terminating: AtomicBool::new(false),
+            stderr: tail,
+            exited,
+        })
+    }
+
+    /// Queue one line for standard input. Lines written after standard input is closed are dropped.
+    pub(crate) fn write(&self, line: String) {
+        if let Some(writer) = self.stdin.lock().unwrap().as_ref() {
+            let _ = writer.send(line);
+        }
+    }
+
+    /// Close standard input once queued lines are written, which asks the agent to finish.
+    pub(crate) fn close_stdin(&self) {
+        self.stdin.lock().unwrap().take();
+    }
+
+    /// Ask the process to stop without waiting for it: close standard input, then terminate its process group if it is
+    /// still running after half the grace period, and kill the group once the grace period has passed.
+    pub(crate) fn terminate(&self) {
+        self.close_stdin();
+        if self.terminating.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let shared = self.shared.clone();
+        let grace = self.grace;
+        let _ = thread::Builder::new()
+            .name("claude-terminate".into())
+            .spawn(move || {
+                let mut status = shared.status.lock().unwrap();
+                for (signal, wait) in [
+                    (Signal::Terminate, grace / 2),
+                    (Signal::Kill, grace - grace / 2),
+                ] {
+                    status = shared
+                        .changed
+                        .wait_timeout_while(status, wait, |status| status.exited.is_none())
+                        .unwrap()
+                        .0;
+                    if status.exited.is_some() {
+                        return;
+                    }
+                    signal_group(&mut status.child, signal);
+                }
+            });
+    }
+
+    /// Wait until the process has exited and been reaped.
+    pub(crate) async fn wait_exit(&self) {
+        let _ = self.exited.recv().await;
+    }
+
+    pub(crate) fn exit_status(&self) -> Option<ExitStatus> {
+        self.shared.status.lock().unwrap().exited
+    }
+
+    /// The last lines the process wrote to standard error.
+    pub(crate) fn stderr_tail(&self) -> Vec<String> {
+        self.stderr.lock().unwrap().iter().cloned().collect()
+    }
+}
+
+impl Drop for Process {
+    fn drop(&mut self) {
+        // The termination thread owns what it needs, so stopping continues after the process is dropped.
+        if self.exit_status().is_none() {
+            self.terminate();
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Signal {
+    Terminate,
+    Kill,
+}
+
+/// Signal the child's process group. The caller holds the status lock and the child is unreaped, so the group's id
+/// cannot have been recycled.
+#[cfg(unix)]
+fn signal_group(child: &mut Child, signal: Signal) {
+    let signal = match signal {
+        Signal::Terminate => libc::SIGTERM,
+        Signal::Kill => libc::SIGKILL,
+    };
+    // The child leads its own group, so the group id is its process id.
+    unsafe {
+        libc::killpg(child.id() as libc::pid_t, signal);
+    }
+}
+
+#[cfg(not(unix))]
+fn signal_group(child: &mut Child, signal: Signal) {
+    if matches!(signal, Signal::Kill) {
+        let _ = child.kill();
+    }
+}
+
+fn write_lines(mut stdin: ChildStdin, lines: mpsc::Receiver<String>) {
+    for mut line in lines {
+        line.push('\n');
+        if stdin
+            .write_all(line.as_bytes())
+            .and_then(|_| stdin.flush())
+            .is_err()
+        {
+            break;
+        }
+    }
+}
+
+fn read_lines(stdout: impl Read, sink: &dyn Fn(Output)) {
+    let mut reader = BufReader::new(stdout);
+    let mut buffer = Vec::new();
+    loop {
+        buffer.clear();
+        match reader.read_until(b'\n', &mut buffer) {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {
+                let line = String::from_utf8_lossy(&buffer);
+                let line = line.trim_end_matches(['\r', '\n']);
+                if !line.is_empty() {
+                    sink(Output::Line(line.to_owned()));
+                }
+            }
+        }
+    }
+}
+
+fn keep_tail(stderr: impl Read, tail: &Mutex<VecDeque<String>>) {
+    for line in BufReader::new(stderr).lines() {
+        let Ok(line) = line else { break };
+        let mut tail = tail.lock().unwrap();
+        if tail.len() == STDERR_LINES {
+            tail.pop_front();
+        }
+        tail.push_back(line);
+    }
+}
+
+/// Wait a bounded time for standard output and error to reach end of file, so that every line is delivered and the
+/// standard error tail is complete before the exit is reported.
+fn drain(shared: &Shared) {
+    let status = shared.status.lock().unwrap();
+    let _ = shared
+        .changed
+        .wait_timeout_while(status, OUTPUT_DRAIN_LIMIT, |status| {
+            !(status.stdout_closed && status.stderr_closed)
+        })
+        .unwrap();
+}
+
+/// Wait until the process has exited, then reap it under the status lock.
+fn reap(pid: u32, shared: &Shared) -> ExitStatus {
+    let exited = wait_for_exit(pid);
+    loop {
+        if let Some(exit) = shared.record(&mut shared.status.lock().unwrap(), exited) {
+            return exit;
+        }
+        // Without `waitid`, or if it failed, observe the exit by polling on this dedicated thread.
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// Block until the process exits, leaving it unreaped so that its process id stays reserved. Returns whether the exit
+/// was observed.
+#[cfg(unix)]
+fn wait_for_exit(pid: u32) -> bool {
+    loop {
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        let result = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                pid as libc::id_t,
+                &mut info,
+                libc::WEXITED | libc::WNOWAIT,
+            )
+        };
+        if result == 0 {
+            return true;
+        }
+        if std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted {
+            return false;
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn wait_for_exit(_pid: u32) -> bool {
+    false
+}

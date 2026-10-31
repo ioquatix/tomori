@@ -1,0 +1,3 @@
+# An agent that exits when standard input closes, leaving a tool subprocess running.
+spawn sleep 300
+drain
