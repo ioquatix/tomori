@@ -314,3 +314,162 @@ impl Drop for Connection {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::capture::{Failed, Samples};
+    use std::{
+        sync::atomic::{AtomicBool, AtomicU32, Ordering},
+        thread::JoinHandle,
+        time::{Duration, Instant},
+    };
+
+    /// Captures from its own thread until stopped, joining it when the recording is dropped, as AAudio does.
+    struct Fake {
+        rate: Arc<AtomicU32>,
+        permitted: bool,
+        fail: Option<String>,
+    }
+
+    struct Worker {
+        stop: Arc<AtomicBool>,
+        thread: Option<JoinHandle<()>>,
+    }
+
+    impl Drop for Worker {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::Relaxed);
+            self.thread.take().unwrap().join().unwrap();
+        }
+    }
+
+    impl Capture for Fake {
+        fn permit(&mut self) -> Result<bool, String> {
+            Ok(self.permitted)
+        }
+
+        fn open(&mut self, mut samples: Samples, failed: Failed) -> Result<Recording, String> {
+            let stop = Arc::new(AtomicBool::new(false));
+            let fail = self.fail.clone();
+            let thread = {
+                let stop = stop.clone();
+                std::thread::spawn(move || {
+                    if let Some(error) = fail {
+                        failed(error);
+                    }
+                    while !stop.load(Ordering::Relaxed) {
+                        samples(&[0.1; 160]);
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                })
+            };
+            Ok(Recording::new(
+                self.rate.load(Ordering::Relaxed),
+                Worker {
+                    stop,
+                    thread: Some(thread),
+                },
+            ))
+        }
+    }
+
+    fn voice(rate: &Arc<AtomicU32>, permitted: bool, fail: Option<&str>) -> Voice {
+        Voice {
+            capture: Box::new(Fake {
+                rate: rate.clone(),
+                permitted,
+                fail: fail.map(str::to_owned),
+            }),
+            shared: Arc::default(),
+            recording: None,
+        }
+    }
+
+    /// A client that never connects, which is enough to queue messages.
+    fn client() -> Client {
+        Client::connect(Options::new("127.0.0.1:9", "ada", "Ada")).unwrap()
+    }
+
+    fn utterance(voice: &Voice) -> Option<String> {
+        voice
+            .lock()
+            .microphone
+            .as_ref()
+            .and_then(|microphone| microphone.utterance().map(str::to_owned))
+    }
+
+    #[test]
+    fn closing_a_recording_waits_for_its_thread_without_deadlock() {
+        let client = client();
+        let rate = Arc::new(AtomicU32::new(16_000));
+        let mut voice = voice(&rate, true, None);
+        voice.begin(&client, "u1".into()).unwrap();
+        std::thread::sleep(Duration::from_millis(20));
+        assert_eq!(utterance(&voice).as_deref(), Some("u1"));
+        voice.finish(true).unwrap();
+        assert!(voice.recording.is_none());
+        assert_eq!(utterance(&voice), None);
+
+        voice.begin(&client, "u2".into()).unwrap();
+        std::thread::sleep(Duration::from_millis(5));
+        voice.abandon().unwrap();
+        assert_eq!(utterance(&voice), None);
+
+        voice.begin(&client, "u3".into()).unwrap();
+        voice.reset();
+        assert!(voice.lock().microphone.is_none());
+        client.close();
+    }
+
+    #[test]
+    fn a_new_rate_gets_a_new_microphone() {
+        let client = client();
+        let rate = Arc::new(AtomicU32::new(16_000));
+        let mut voice = voice(&rate, true, None);
+        voice.begin(&client, "u1".into()).unwrap();
+        voice.finish(false).unwrap();
+        rate.store(48_000, Ordering::Relaxed);
+        voice.begin(&client, "u2".into()).unwrap();
+        let sample_rate = voice.lock().microphone.as_ref().unwrap().sample_rate();
+        assert_eq!(sample_rate, 48_000);
+        voice.finish(false).unwrap();
+        client.close();
+    }
+
+    #[test]
+    fn nothing_records_without_permission() {
+        let client = client();
+        let rate = Arc::new(AtomicU32::new(16_000));
+        let mut voice = voice(&rate, false, None);
+        let error = voice.begin(&client, "u1".into()).unwrap_err();
+        assert!(error.contains("Allow the microphone"), "{error}");
+        assert!(voice.recording.is_none());
+        assert_eq!(utterance(&voice), None);
+        client.close();
+    }
+
+    #[test]
+    fn a_capture_failure_is_reported_only_while_recording() {
+        let client = client();
+        let rate = Arc::new(AtomicU32::new(16_000));
+        let mut voice = voice(&rate, true, Some("The microphone failed."));
+        voice.begin(&client, "u1".into()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let failure = loop {
+            if let Some(failure) = voice.failure() {
+                break failure;
+            }
+            assert!(Instant::now() < deadline, "no failure reported");
+            std::thread::sleep(Duration::from_millis(1));
+        };
+        assert_eq!(failure, "The microphone failed.");
+        voice.finish(false).unwrap();
+
+        // Closed before it is noticed: nothing is reported once the recording has ended.
+        voice.begin(&client, "u2".into()).unwrap();
+        voice.finish(false).unwrap();
+        assert_eq!(voice.failure(), None);
+        client.close();
+    }
+}

@@ -354,6 +354,43 @@ fn a_recognizer_failure_fails_the_utterance() {
 }
 
 #[test]
+fn a_recognizer_failure_while_recording_closes_the_utterance() {
+    let server = recognizing_server(FakeBackend::manual());
+    let mut ada = server.connect("ada", "Ada");
+    ada.create_space("Failure");
+    ada.send(&ClientMessage::UtteranceBegin {
+        utterance: "u1".into(),
+    });
+    speak(&mut ada, &["please", "fail", "please", "please"]);
+    // Still recording: the failure arrives before any end.
+    ada.wait_for(|message| match message {
+        ServerMessage::TranscriptFailed { utterance, .. } if utterance == "u1" => Some(()),
+        _ => None,
+    });
+    // The client forgets it without cancelling, as the server has closed it; the next utterance neither fails it again nor is refused.
+    ada.send(&ClientMessage::UtteranceBegin {
+        utterance: "u2".into(),
+    });
+    speak(&mut ada, &["run", "the", "tests"]);
+    ada.send(&ClientMessage::UtteranceEnd {
+        utterance: "u2".into(),
+    });
+    let text = ada.wait_for(|message| match message {
+        ServerMessage::TranscriptFailed { utterance, error } => {
+            panic!("{utterance} failed: {error}")
+        }
+        ServerMessage::Error { error, .. } => panic!("{error}"),
+        ServerMessage::Transcript {
+            utterance,
+            text,
+            finished: true,
+        } if utterance == "u2" => Some(text.clone()),
+        _ => None,
+    });
+    assert!(text.contains("run the tests"), "{text}");
+}
+
+#[test]
 fn a_crashed_recognizer_fails_the_utterance_instead_of_dropping_it() {
     let server = recognizing_server(FakeBackend::manual());
     let mut ada = server.connect("ada", "Ada");

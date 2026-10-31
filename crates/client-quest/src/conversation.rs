@@ -356,8 +356,9 @@ impl Conversation {
                     .filter(|talk| talk.utterance() == utterance)
                 {
                     if finished {
-                        // The queue entry now shows the words.
+                        // The queue entry now shows the words, and an earlier failure no longer applies.
                         self.talk = None;
+                        self.error = None;
                     } else {
                         let (Talk::Recording { heard, .. } | Talk::Sending { heard, .. }) = talk;
                         *heard = text;
@@ -938,20 +939,21 @@ impl Conversation {
             ];
         };
         let choosing = space.approval.as_ref().zip(choice);
-        // The open microphone is always shown.
-        let recording = match &self.talk {
+        // The open microphone, and words on their way, are always shown.
+        let talking = match &self.talk {
             Some(Talk::Recording { heard, .. }) if heard.is_empty() => {
                 Some("MIC AGENT: listening...".to_owned())
             }
             Some(Talk::Recording { heard, .. }) => {
                 Some(format!("MIC AGENT: {}", tail(heard, COLUMNS - 11)))
             }
-            _ => None,
+            Some(Talk::Sending { heard, .. }) => {
+                Some(format!("Sending: {}...", tail(heard, COLUMNS - 12)))
+            }
+            None => None,
         };
-        let status = recording.or_else(|| self.status()).unwrap_or_else(|| {
-            if let Some(Talk::Sending { heard, .. }) = &self.talk {
-                format!("Sending: {}...", tail(heard, COLUMNS - 12))
-            } else if let Some(error) = &space.error {
+        let status = talking.or_else(|| self.status()).unwrap_or_else(|| {
+            if let Some(error) = &space.error {
                 format!("ERROR: {error}")
             } else if let Some(entry) = self.own_queued() {
                 format!("Queued: {}", entry.text)
@@ -1965,6 +1967,24 @@ mod tests {
         assert!(conversation.text().contains("the newest words"));
         conversation.talk(false);
         assert!(conversation.text().contains("the newest words..."));
+    }
+
+    #[test]
+    fn a_late_failure_of_an_earlier_utterance_does_not_hide_the_current_one() {
+        let mut conversation = joined(|_| {});
+        let first = press(&mut conversation);
+        conversation.talk(false);
+        conversation.take_actions();
+        let second = press(&mut conversation);
+        conversation.apply(Event::Message(ServerMessage::TranscriptFailed {
+            utterance: first,
+            error: "Nothing was heard, so nothing was sent.".into(),
+        }));
+        assert!(conversation.text().contains("MIC AGENT"));
+        conversation.talk(false);
+        assert!(conversation.text().contains("Sending: "));
+        conversation.apply(transcript(&second, "Run the tests.", true));
+        assert!(!conversation.text().contains("Nothing was heard"));
     }
 
     #[test]

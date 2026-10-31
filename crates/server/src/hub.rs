@@ -1229,6 +1229,10 @@ impl Hub {
     pub(crate) fn transcript_failed(&self, utterance: UtteranceId, error: &str) {
         let mut state = self.lock();
         if let Some(record) = state.utterances.remove(&utterance) {
+            // Recognition can fail while the utterance is still open: close it, so that the client may forget it without cancelling and its next utterance does not fail this one again.
+            for connection in state.connections.values_mut() {
+                connection.utterance.take_if(|open| open.id == utterance);
+            }
             state.send(
                 &record.participant,
                 ServerMessage::TranscriptFailed {
