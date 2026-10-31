@@ -144,4 +144,23 @@ fn releases_idle_sources_and_clears() {
     mixer.push(frame(1, 1, 1));
     mixer.clear();
     assert_eq!(mixer.sources().count(), 0);
+
+    mixer.push(frame(1, 1, 1));
+    mixer.push(frame(2, 1, 1));
+    mixer.clear_source(1);
+    assert_eq!(mixer.sources().collect::<Vec<_>>(), [2]);
+}
+
+#[test]
+fn plays_a_source_that_restarts_its_sequence() {
+    let mut mixer = mixer();
+    for sequence in 500..510 {
+        mixer.push(frame(1, sequence, 1));
+        mix(&mut mixer, 4);
+    }
+    for sequence in 0..3 {
+        mixer.push(frame(1, sequence, 2));
+    }
+    assert_eq!(mix(&mut mixer, 12), [2; 12]);
+    assert_eq!(mixer.statistics().late_frames, 0);
 }

@@ -98,9 +98,14 @@ impl Mixer {
         self.sources.keys().copied()
     }
 
-    /// Discard all buffered audio, for example after a reconnect.
+    /// Discard all buffered audio. The application owns the mixer, so it calls this when the audio it hears changes context: on [`protocol::ServerMessage::Left`], before joining a different space, and after reconnecting.
     pub fn clear(&mut self) {
         self.sources.clear();
+    }
+
+    /// Discard one source's buffered audio, for example when a participant leaves the space. Its next frame starts a new buffer.
+    pub fn clear_source(&mut self, source: u32) {
+        self.sources.remove(&source);
     }
 
     /// Queue a received frame for playback.
