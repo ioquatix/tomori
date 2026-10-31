@@ -217,14 +217,15 @@ fn levels_fall_gradually_when_a_source_goes_quiet() {
 }
 
 #[test]
-fn muted_agent_speech_plays_silently() {
+fn muted_agent_speech_plays_silently_but_keeps_its_level() {
     let mut mixer = mixer();
     mixer.set_agent_muted(true);
     mixer.push(frame(AGENT_SOURCE, 0, 1_000));
     mixer.push(frame(AGENT_SOURCE, 1, 1_000));
-    mix(&mut mixer, 4);
+    let output = mix(&mut mixer, 4);
+    assert!(output.iter().all(|&sample| sample == 0));
     assert!(mixer.is_source_playing(AGENT_SOURCE));
-    assert_eq!(mixer.source_level(AGENT_SOURCE), 0.0);
+    assert!(mixer.source_level(AGENT_SOURCE) > 0.0);
 }
 
 #[test]

@@ -125,7 +125,7 @@ impl Mixer {
             .is_some_and(JitterBuffer::is_playing)
     }
 
-    /// The recent loudness of what [`Self::mix`] played from `source`, after its gain, from 0 (silent or absent) to 1 (full scale), for visuals such as a speaking indicator. It follows a louder signal at once and falls over about [`LEVEL_RELEASE`] when the source goes quiet.
+    /// The recent loudness of what [`Self::mix`] played from `source`, before its gain, so that muted agent speech still has a level, from 0 (silent or absent) to 1 (full scale), for visuals such as a speaking indicator. It follows a louder signal at once and falls over about [`LEVEL_RELEASE`] when the source goes quiet.
     pub fn source_level(&self, source: u32) -> f32 {
         self.levels.get(&source).copied().unwrap_or(0.0)
     }
@@ -164,12 +164,13 @@ impl Mixer {
             } else {
                 1.0
             };
+            // Mixed at unity gain and measured before the gain is applied, so muted agent speech still shows as speaking.
             self.scratch.clear();
             self.scratch.resize(output.len(), 0.0);
-            buffer.mix_into(&mut self.scratch, rate, gain, &mut self.statistics);
+            buffer.mix_into(&mut self.scratch, rate, 1.0, &mut self.statistics);
             let mut energy = 0.0;
             for (total, &sample) in self.accumulator.iter_mut().zip(&self.scratch) {
-                *total += sample;
+                *total += sample * gain;
                 energy += sample * sample;
             }
             let rms = (energy / output.len().max(1) as f32).sqrt() / f32::from(i16::MAX);
