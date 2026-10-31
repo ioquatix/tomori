@@ -183,7 +183,7 @@ impl Client {
         self.events().try_recv().ok()
     }
 
-    /// Move received audio to another thread, typically the one feeding a [`crate::playback::Mixer`]. Returns `None` if already taken.
+    /// Move received audio to another thread, typically to a [`crate::playback::Player`]. Returns `None` if already taken. Audio attributed to this client's own participant number is never delivered.
     pub fn take_audio(&mut self) -> Option<Receiver<AudioFrame>> {
         self.audio.take()
     }
