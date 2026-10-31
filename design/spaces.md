@@ -13,8 +13,8 @@ Shared space state is held by the server and is the same for every participant: 
 When participants act concurrently:
 
 - The first decision on a pending approval or question resolves it. Later decisions on the same request are rejected without effect, and every participant observes the resolution.
-- Finalized utterances enter a per-space queue in finalization order. Each entry records its speaker and state (queued, sending, delivered). Every participant can see the queue, and any participant can cancel an entry until it is sent to the agent.
-- Messages delivered to the agent identify their speaker. Attribution is a per-space setting that defaults to on.
+- Finalized utterances enter a per-space queue in finalization order. Each entry records its speaker and state (queued, sending, then delivered or failed). Every participant can see the queue, and any participant can cancel an entry until it is sent to the agent.
+- Messages delivered to the agent identify their speaker. Attribution is a per-space setting that defaults to on. With attribution on, the delivered text is the speaker's display name, a colon and a space, then the transcript (`Ada: run the tests`); with it off, the transcript is delivered unchanged. The queue shows the transcript without the prefix.
 
 ## Rationale
 
