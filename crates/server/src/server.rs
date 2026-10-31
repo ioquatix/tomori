@@ -25,6 +25,7 @@ use crate::backends::{AnySession, Backends};
 use crate::hub::{CreateRequest, Hub, SpaceCommand};
 use crate::transcriber::Transcriber;
 use crate::voice::{Voice, Voices};
+use crate::workspace::{DEFAULT_MAX_SPACES, DIRECTORY_UNAVAILABLE, SpaceSlots, WorkspaceRoots};
 
 /// A Tomori server: the HTTP application plus the supervisor that owns every space's backend session.
 ///
@@ -38,6 +39,9 @@ pub struct Server {
     admission: Admission,
     request_timeout: Duration,
     retention: Duration,
+    /// Where spaces may run; `None` until configured, which means the home directory when the server runs.
+    roots: Option<WorkspaceRoots>,
+    slots: Arc<SpaceSlots>,
 }
 
 /// How long a disconnected participant keeps their identity, audio source and space, so that a headset that slept or walked out of range for a while comes back where it was. See `design/spaces.md`.
@@ -71,7 +75,8 @@ where
 impl Server {
     pub fn new(backends: Backends, transcriber: Arc<dyn Transcriber>) -> Self {
         let (sender, jobs) = async_channel::unbounded();
-        let hub = Hub::new(backends, transcriber, sender);
+        let slots = SpaceSlots::new(DEFAULT_MAX_SPACES);
+        let hub = Hub::new(backends, transcriber, sender, slots.clone());
         Self {
             application: Application::new(hub.clone()),
             hub,
@@ -81,7 +86,28 @@ impl Server {
             admission: Admission::default(),
             request_timeout: DEFAULT_REQUEST_TIMEOUT,
             retention: DEFAULT_PARTICIPANT_RETENTION,
+            roots: None,
+            slots,
         }
+    }
+
+    /// Run spaces only in these directories or beneath them. Without this, the only root is the home directory. See `design/workspaces.md`.
+    pub fn with_workspace_roots(mut self, roots: WorkspaceRoots) -> Self {
+        self.roots = Some(roots);
+        self
+    }
+
+    /// Use `roots` unless roots were already given.
+    #[cfg(feature = "fake")]
+    pub(crate) fn with_default_workspace_roots(mut self, roots: WorkspaceRoots) -> Self {
+        self.roots.get_or_insert(roots);
+        self
+    }
+
+    /// Change how many spaces may have a session starting or running at once; see [`DEFAULT_MAX_SPACES`].
+    pub fn with_max_spaces(self, limit: usize) -> Self {
+        self.slots.set_limit(limit);
+        self
     }
 
     /// Change how long a disconnected participant is remembered; see [`DEFAULT_PARTICIPANT_RETENTION`].
@@ -279,6 +305,13 @@ impl Server {
 
     /// Start requested spaces and drive their sessions until cancelled.
     async fn supervise(&self, cancellation: &Cancellation) {
+        let roots = match &self.roots {
+            Some(roots) => roots.clone(),
+            None => WorkspaceRoots::home().unwrap_or_else(|error| {
+                log::error!("No workspace roots, so every directory is refused: {error}.");
+                WorkspaceRoots::none()
+            }),
+        };
         let mut spaces = FuturesUnordered::new();
         let mut cancelled = pin!(cancellation.cancelled());
         loop {
@@ -297,9 +330,12 @@ impl Server {
                 }
             };
             match job {
-                Ok(request) => {
-                    spaces.push(run_space(self.hub.clone(), request, self.voices.clone()))
-                }
+                Ok(request) => spaces.push(run_space(
+                    self.hub.clone(),
+                    request,
+                    self.voices.clone(),
+                    &roots,
+                )),
                 Err(_) => break,
             }
         }
@@ -321,10 +357,23 @@ fn record(statistics: &mut Statistics, outcome: Result<u64, Error>) {
 }
 
 /// Start one space's session, then drive it until it closes or the server shuts down.
-async fn run_space(hub: Arc<Hub>, request: CreateRequest, voices: Voices) {
+async fn run_space(
+    hub: Arc<Hub>,
+    mut request: CreateRequest,
+    voices: Voices,
+    roots: &WorkspaceRoots,
+) {
     let Some(backend) = hub.backends.get(&request.backend) else {
         return;
     };
+    // Creating and attaching both run the agent in the directory, so both are confined to the workspace roots. The space shows the canonical directory.
+    match roots.resolve_str(&request.directory) {
+        Ok(directory) => request.directory = directory,
+        Err(_) => {
+            hub.create_failed(&request.creator, DIRECTORY_UNAVAILABLE.to_owned());
+            return;
+        }
+    }
     let session = match &request.session {
         Some(id) => backend.attach(id, &request.directory).await,
         None => {
