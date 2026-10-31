@@ -8,6 +8,8 @@ The PC server is a Rust program built on `base-http-server`. It replaces the Nod
 
 Each client keeps one long-lived, bidirectional streaming connection to the server. Control messages, events, microphone audio, speech audio and presence are framed over that connection; the server does not require per-action request routes for interactive traffic. Audio frames are self-contained (source, sequence and timing) so that their transport can change without affecting the layers above.
 
+Initially, audio travels over the same HTTP streaming connection. Later, audio moves to UDP datagrams so that a lost packet is dropped instead of stalling the audio behind it. Transcribed audio must still meet `speech.md` over UDP. Whether it uses retransmission, forward error correction, or fails the utterance on loss is not yet decided.
+
 Whose view the spectator feed shows when a space has several participants is not yet decided.
 
 Wire types are defined once in a shared protocol crate used by both the server and native clients.
