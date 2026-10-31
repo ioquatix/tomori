@@ -5,6 +5,7 @@
 //!
 //! Every client action and backend event is applied synchronously under the lock. Work that may call out of the server — transcriber calls and backend operations — is deferred until the lock is released, or sent to the space's driver task.
 
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
@@ -12,6 +13,7 @@ use std::time::{Duration, Instant};
 
 use backend::{AnswerValue, Backend, ErrorKind, Event, Prompt, Snapshot};
 use base_scheduler::Cancellation;
+use event_listener::{Event as Notify, EventListener};
 use protocol::{
     AudioFrame, ClientMessage, Frame, FrameKind, Gate, Keepalive, PROTOCOL_VERSION, Participant,
     ServerMessage,
@@ -24,6 +26,9 @@ use crate::space::{AnswerOutcome, SpaceModel};
 use crate::transcriber::{Transcriber, TranscriptSink, UtteranceId};
 
 pub type ConnectionId = u64;
+
+/// The shortest time between snapshots of one space caused by agent events, so that a streaming reply sends about ten full snapshots a second however fast its text arrives. See `design/server.md`.
+pub const SNAPSHOT_INTERVAL: Duration = Duration::from_millis(100);
 
 /// Work for a space's driver, which owns the backend session.
 #[derive(Debug)]
@@ -60,6 +65,8 @@ pub struct Hub {
     pub(crate) backends: Backends,
     transcriber: Arc<dyn Transcriber>,
     jobs: async_channel::Sender<CreateRequest>,
+    /// Notified when a space defers a snapshot, so that the server's snapshot timer can wake for it.
+    deferred_snapshot: Notify,
     this: Weak<Hub>,
 }
 
@@ -147,6 +154,10 @@ struct ParticipantRecord {
 struct SpaceRecord {
     model: SpaceModel,
     commands: async_channel::Sender<SpaceCommand>,
+    /// When participants were last told that the space changed. Cells, because telling them only needs shared access to the state.
+    touched: Cell<Option<Instant>>,
+    /// A change caused by agent events that participants have not been told about yet; see [`SNAPSHOT_INTERVAL`].
+    deferred: Cell<bool>,
 }
 
 /// An utterance whose transcript has not been reported yet.
@@ -198,6 +209,8 @@ impl HubState {
     /// Tell everyone in the space, and the lobby, that the space changed.
     fn touch_space(&self, id: &str) {
         if let Some(space) = self.space(id) {
+            space.touched.set(Some(Instant::now()));
+            space.deferred.set(false);
             for participant in &space.model.participants {
                 if let Some(outbox) = self.outbox(participant) {
                     outbox.space();
@@ -205,6 +218,26 @@ impl HubState {
             }
         }
         self.touch_lobby();
+    }
+
+    /// Tell the space's participants that it changed because of an agent event, at most once per [`SNAPSHOT_INTERVAL`]. A change within the interval is deferred to its end, when the snapshot rendered then carries the latest state; returns true if so.
+    fn touch_space_paced(&self, id: &str, now: Instant) -> bool {
+        let Some(space) = self.space(id) else {
+            return false;
+        };
+        if space.deferred.get() {
+            return false;
+        }
+        if space
+            .touched
+            .get()
+            .is_some_and(|touched| now < touched + SNAPSHOT_INTERVAL)
+        {
+            space.deferred.set(true);
+            return true;
+        }
+        self.touch_space(id);
+        false
     }
 
     /// Tell every greeted participant outside a space that the listing changed.
@@ -310,6 +343,7 @@ impl Hub {
             backends,
             transcriber,
             jobs,
+            deferred_snapshot: Notify::new(),
             this: this.clone(),
         })
     }
@@ -1023,7 +1057,12 @@ impl Hub {
             model.backend,
             model.session
         );
-        state.spaces.push(SpaceRecord { model, commands });
+        state.spaces.push(SpaceRecord {
+            model,
+            commands,
+            touched: Cell::new(None),
+            deferred: Cell::new(false),
+        });
         let creator_waiting = state
             .participants
             .get(&request.creator)
@@ -1050,7 +1089,45 @@ impl Hub {
         };
         record.model.apply(event);
         state.pump(space);
-        state.touch_space(space);
+        if state.touch_space_paced(space, Instant::now()) {
+            self.deferred_snapshot.notify(usize::MAX);
+        }
+    }
+
+    /// When the earliest deferred snapshot is due, if any.
+    pub fn snapshot_deadline(&self) -> Option<Instant> {
+        let state = self.lock();
+        state
+            .spaces
+            .iter()
+            .filter(|space| space.deferred.get())
+            .filter_map(|space| Some(space.touched.get()? + SNAPSHOT_INTERVAL))
+            .min()
+    }
+
+    /// Wait for a space to defer a snapshot. Check [`snapshot_deadline`](Self::snapshot_deadline) after creating the listener to avoid a lost wakeup.
+    pub fn listen_snapshots(&self) -> EventListener {
+        self.deferred_snapshot.listen()
+    }
+
+    /// Send the deferred snapshots that are due at `now`.
+    pub fn flush_snapshots(&self, now: Instant) {
+        let state = self.lock();
+        let due: Vec<String> = state
+            .spaces
+            .iter()
+            .filter(|space| {
+                space.deferred.get()
+                    && space
+                        .touched
+                        .get()
+                        .is_none_or(|touched| touched + SNAPSHOT_INTERVAL <= now)
+            })
+            .map(|space| space.model.id.clone())
+            .collect();
+        for space in due {
+            state.touch_space(&space);
+        }
     }
 
     pub(crate) fn space_sent(&self, space: &str, key: &str, result: backend::Result<()>) {

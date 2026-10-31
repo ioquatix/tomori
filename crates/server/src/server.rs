@@ -109,15 +109,47 @@ impl Server {
         S: SocketAccept + SocketStreamReading + SocketStreamWriting + SocketClose + Timers,
         S::Socket: 'static,
     {
-        let ((served, ()), ()) = zip(
+        let ((served, ()), ((), ())) = zip(
             zip(
                 self.serve(scheduler, listener, cancellation),
                 self.supervise(cancellation),
             ),
-            self.sweep(scheduler, cancellation),
+            zip(
+                self.sweep(scheduler, cancellation),
+                self.pace(scheduler, cancellation),
+            ),
         )
         .await;
         served
+    }
+
+    /// Send space snapshots that were deferred to keep a streaming reply within [`crate::hub::SNAPSHOT_INTERVAL`], when they are due. Sleeps until a space defers one.
+    async fn pace<S: Timers>(&self, scheduler: &S, cancellation: &Cancellation) {
+        let mut timer = scheduler.timer();
+        loop {
+            let listener = self.hub.listen_snapshots();
+            match self.hub.snapshot_deadline() {
+                Some(deadline) => {
+                    if let Err(error) = scheduler
+                        .timer_wait_until(&mut timer, deadline, cancellation)
+                        .await
+                    {
+                        if !cancellation.is_cancelled() {
+                            log::error!("The snapshot timer failed: {error}");
+                        }
+                        return;
+                    }
+                    self.hub.flush_snapshots(scheduler.now());
+                }
+                None => {
+                    if let Either::Right(_) =
+                        select(pin!(listener), pin!(cancellation.cancelled())).await
+                    {
+                        return;
+                    }
+                }
+            }
+        }
     }
 
     /// Accept and serve HTTP connections until cancelled.

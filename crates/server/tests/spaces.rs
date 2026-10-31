@@ -586,3 +586,43 @@ fn participants_move_between_spaces_and_the_lobby() {
     });
     assert_eq!(ada.error(), "Join a space first.");
 }
+
+#[test]
+fn a_streaming_reply_sends_paced_snapshots_ending_with_the_latest_state() {
+    let server = TestServer::with_backend(FakeBackend::manual());
+    let (ada, _bob, _) = pair(&server);
+    let session = server.backend.started()[0].clone();
+    // Drain the snapshots of joining.
+    while ada.next_message(Duration::from_millis(200)).is_some() {}
+
+    // About 250 deltas over half a second: unpaced, nearly every one would produce a full snapshot.
+    let message = session.start_message();
+    let started = std::time::Instant::now();
+    for _ in 0..250 {
+        session.delta(&message, "x");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    let elapsed = started.elapsed();
+
+    let mut snapshots = 0;
+    let state = ada.wait_for(|message| match message {
+        ServerMessage::Space { state } => {
+            snapshots += 1;
+            state
+                .messages
+                .last()
+                .is_some_and(|last| last.text.len() == 250)
+                .then(|| (**state).clone())
+        }
+        _ => None,
+    });
+    // The latest state arrives without a further event to carry it.
+    assert_eq!(state.messages.last().unwrap().text, "x".repeat(250));
+    // At most one snapshot per interval, plus the first and the deferred last one.
+    let limit = (elapsed.as_millis() / 100) as usize + 3;
+    assert!(
+        snapshots <= limit,
+        "{snapshots} snapshots in {elapsed:?}, expected at most {limit}"
+    );
+    assert!(snapshots >= 2, "snapshots were not sent while streaming");
+}
