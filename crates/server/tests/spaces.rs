@@ -1,12 +1,14 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use backend::{AnswerValue, Event, Field, FieldKind, FieldOption, Permission, Question};
 use protocol::{Activity, ClientMessage, Decision, Gate, QueueState, ServerMessage, SpaceState};
+use server::Server;
 use server::fake::FakeBackend;
-use server::test_support::{TIMEOUT, TestClient, TestServer, speech};
+use server::test_support::{TIMEOUT, TestClient, TestServer, TextTranscriber, speech};
 
 /// Errors received within `window`, skipping other messages.
 fn errors_within(client: &TestClient, window: Duration) -> Vec<String> {
@@ -104,6 +106,38 @@ fn queued_input_is_visible_to_everyone_and_anyone_can_cancel_it() {
         .map(|prompt| prompt.text)
         .collect();
     assert_eq!(prompts, ["Ada: first", "Bob: third"]);
+}
+
+#[test]
+fn only_the_most_recent_empty_closed_spaces_are_kept() {
+    let server = TestServer::with_server(FakeBackend::new(), |backends| {
+        Server::new(backends, Arc::new(TextTranscriber::default())).with_max_spaces(64)
+    });
+    let mut ada = server.connect("ada", "Ada");
+    let mut bob = server.connect("bob", "Bob");
+    // Bob stays in the first space, so it is kept although it closes first.
+    let first = ada.create_space("Space 0").id;
+    join(&mut bob, &first, 2);
+    let count = server::CLOSED_SPACES + 8;
+    let mut ids = vec![first];
+    for index in 0..count {
+        if index > 0 {
+            ids.push(ada.create_space(&format!("Space {index}")).id);
+        }
+        server.backend.started()[index].emit(Event::Closed { reason: None });
+        ada.space(|state| state.activity == Activity::Closed);
+        ada.send(&ClientMessage::Leave);
+    }
+    ada.send(&ClientMessage::ListSpaces);
+    let listed: Vec<String> = ada.wait_for(|message| match message {
+        ServerMessage::Spaces { spaces } if spaces.len() <= server::CLOSED_SPACES + 1 => {
+            Some(spaces.iter().map(|space| space.id.clone()).collect())
+        }
+        _ => None,
+    });
+    let mut expected = vec![ids[0].clone()];
+    expected.extend(ids[count - server::CLOSED_SPACES..].iter().cloned());
+    assert_eq!(listed, expected);
 }
 
 #[test]

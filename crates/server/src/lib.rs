@@ -31,6 +31,7 @@ pub mod test_support;
 
 pub use application::Application;
 pub use backends::{AnyBackend, AnySession, Backends};
+pub use hub::CLOSED_SPACES;
 #[cfg(feature = "speech")]
 pub use recognition::RecognitionTranscriber;
 pub use server::{DEFAULT_PARTICIPANT_RETENTION, Server, bind};

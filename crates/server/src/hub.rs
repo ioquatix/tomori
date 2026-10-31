@@ -6,7 +6,7 @@
 //! Every client action and backend event is applied synchronously under the lock. Work that may call out of the server — transcriber calls and backend operations — is deferred until the lock is released, or sent to the space's driver task.
 
 use std::cell::Cell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::{Duration, Instant};
@@ -30,6 +30,9 @@ pub type ConnectionId = u64;
 
 /// The shortest time between snapshots of one space caused by agent events, so that a streaming reply sends about ten full snapshots a second however fast its text arrives. See `design/server.md`.
 pub const SNAPSHOT_INTERVAL: Duration = Duration::from_millis(100);
+
+/// The most closed spaces kept that nobody is in. Beyond this, the oldest are forgotten, so that sessions ending repeatedly cannot grow the server's memory without bound. See `design/spaces.md`.
+pub const CLOSED_SPACES: usize = 32;
 
 /// Work for a space's driver, which owns the backend session.
 #[derive(Debug)]
@@ -251,6 +254,32 @@ impl HubState {
         false
     }
 
+    /// Forget the oldest closed spaces that nobody is in, beyond [`CLOSED_SPACES`]. Returns whether any were forgotten.
+    fn forget_closed(&mut self) -> bool {
+        let occupied: HashSet<&str> = self
+            .participants
+            .values()
+            .filter_map(|record| record.space.as_deref())
+            .collect();
+        let forgettable: Vec<String> = self
+            .spaces
+            .iter()
+            .filter(|space| {
+                space.model.is_closed()
+                    && space.model.participants.is_empty()
+                    && !occupied.contains(space.model.id.as_str())
+            })
+            .map(|space| space.model.id.clone())
+            .collect();
+        let Some(excess) = forgettable.len().checked_sub(CLOSED_SPACES) else {
+            return false;
+        };
+        let forgotten: HashSet<&String> = forgettable[..excess].iter().collect();
+        self.spaces
+            .retain(|space| !forgotten.contains(&space.model.id));
+        excess > 0
+    }
+
     /// Tell every greeted participant outside a space that the listing changed.
     fn touch_lobby(&self) {
         for record in self.participants.values() {
@@ -292,7 +321,13 @@ impl HubState {
             .collect()
     }
 
+    /// Take a participant out of their space. A closed space left empty may be forgotten; see [`CLOSED_SPACES`].
     fn leave(&mut self, participant: &str) {
+        self.depart(participant);
+        self.forget_closed();
+    }
+
+    fn depart(&mut self, participant: &str) {
         let Some(record) = self.participants.get_mut(participant) else {
             return;
         };
@@ -306,7 +341,8 @@ impl HubState {
     }
 
     fn join(&mut self, participant: &str, space: &str) {
-        self.leave(participant);
+        // Not forgotten until the participant is in the space they join, which might be a closed one.
+        self.depart(participant);
         let Some(record) = self.space_mut(space) else {
             return;
         };
@@ -320,6 +356,7 @@ impl HubState {
         if let Some(outbox) = self.outbox(participant) {
             outbox.clear_audio();
         }
+        self.forget_closed();
         self.touch_space(space);
     }
 
@@ -1198,6 +1235,7 @@ impl Hub {
             state.join(&request.creator, &id);
         }
         state.pump(&id);
+        state.forget_closed();
         state.touch_lobby();
         Some(id)
     }
@@ -1339,6 +1377,8 @@ impl Hub {
         if !record.model.is_closed() {
             record.model.apply(Event::Closed { reason: error });
         }
+        // Forgotten before the lobby listing that touching the space produces.
+        state.forget_closed();
         state.touch_space(space);
     }
 
