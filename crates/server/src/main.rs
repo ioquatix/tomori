@@ -1,9 +1,9 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-//! `tomori-server [--bind ADDRESS] [--backend NAME]... [--speech-root PATH]`
+//! `tomori-server [--bind ADDRESS] [--backend NAME]... [--speech-root PATH] [--name NAME] [--no-advertise]`
 //!
-//! Serves Tomori clients on the local network. There is no authentication yet: anyone who can reach the port can join a space. See `design/server.md`.
+//! Serves Tomori clients on the local network, advertised with Bonjour as `_tomori._tcp`. There is no authentication yet: anyone who can reach the port can join a space. See `design/server.md`.
 
 // Built without any backend, the backend enums are empty and every match on them is vacuous.
 #![cfg_attr(
@@ -22,6 +22,7 @@ use futures_lite::future::block_on;
 use server::{Backends, NullTranscriber, Server, Transcriber};
 
 const USAGE: &str = "Usage: tomori-server [--bind ADDRESS] [--backend NAME]... [--speech-root PATH]
+                     [--name NAME] [--no-advertise]
 
 Options:
   --bind ADDRESS       Listen address (default 0.0.0.0:8765).
@@ -29,12 +30,17 @@ Options:
   --speech-root PATH   The directory holding .tools/ with the speech environments and models; see
                        crates/speech/worker/readme.md. Without it, there is no speech recognition or
                        synthesis.
+  --name NAME          The name clients list for this server (default: the host name).
+  --no-advertise       Do not advertise the server with Bonjour (_tomori._tcp); clients must enter
+                       its address.
   --help               Show this help.";
 
 struct Arguments {
     bind: SocketAddr,
     backends: Vec<String>,
     speech_root: Option<PathBuf>,
+    name: Option<String>,
+    advertise: bool,
 }
 
 fn parse(mut arguments: impl Iterator<Item = String>) -> Result<Arguments, String> {
@@ -42,6 +48,8 @@ fn parse(mut arguments: impl Iterator<Item = String>) -> Result<Arguments, Strin
         bind: SocketAddr::from(([0, 0, 0, 0], protocol::DEFAULT_PORT)),
         backends: Vec::new(),
         speech_root: None,
+        name: None,
+        advertise: true,
     };
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
@@ -62,6 +70,8 @@ fn parse(mut arguments: impl Iterator<Item = String>) -> Result<Arguments, Strin
                         .into(),
                 )
             }
+            "--name" => parsed.name = Some(arguments.next().ok_or("--name needs a name")?),
+            "--no-advertise" => parsed.advertise = false,
             "--help" | "-h" => return Err(USAGE.to_owned()),
             other => return Err(format!("unknown argument {other:?}\n\n{USAGE}")),
         }
@@ -70,6 +80,39 @@ fn parse(mut arguments: impl Iterator<Item = String>) -> Result<Arguments, Strin
         parsed.backends.push("fake".to_owned());
     }
     Ok(parsed)
+}
+
+/// The default display name: the host name without its domain, such as `studio` for `studio.local`.
+fn host_name() -> String {
+    let host = gethostname::gethostname();
+    let host = host.to_string_lossy();
+    match host.split('.').next() {
+        Some(label) if !label.is_empty() => label.to_owned(),
+        _ => "Tomori".to_owned(),
+    }
+}
+
+/// Advertise the bound `address` unless turned off. A failure is reported but does not stop the server, which remains reachable by address.
+fn advertise(arguments: &Arguments, address: SocketAddr) -> Option<discovery::Advertisement> {
+    if !arguments.advertise {
+        eprintln!("Bonjour: not advertising (--no-advertise).");
+        return None;
+    }
+    let name = arguments.name.clone().unwrap_or_else(host_name);
+    match discovery::advertise(&name, address.port(), address.ip()) {
+        Ok(advertisement) => {
+            eprintln!(
+                "Bonjour: advertising {:?} as _tomori._tcp on port {}.",
+                advertisement.instance(),
+                address.port()
+            );
+            Some(advertisement)
+        }
+        Err(error) => {
+            eprintln!("Bonjour: could not advertise ({error}); clients must enter the address.");
+            None
+        }
+    }
 }
 
 fn backend(name: &str) -> Result<server::AnyBackend, String> {
@@ -200,6 +243,15 @@ fn main() -> ExitCode {
     };
     let server = synthesis(Server::new(backends, transcriber), root);
     let cancellation = Cancellation::new();
+    // Stop on Ctrl-C or SIGTERM by shutting down in order, so that the Bonjour advertisement is withdrawn rather than left to expire.
+    #[cfg(unix)]
+    let _signals = {
+        use base_scheduler::Signals;
+        scheduler
+            .signal_subscribe(&[libc::SIGINT, libc::SIGTERM], cancellation.clone())
+            .inspect_err(|error| eprintln!("Could not handle signals: {error}"))
+            .ok()
+    };
     let result = block_on(async {
         let listener = server::bind(&scheduler, arguments.bind, &cancellation)
             .await
@@ -211,6 +263,7 @@ fn main() -> ExitCode {
             "Tomori server listening on http://{address} (backends: {}). There is no authentication: anyone on this network can join.",
             arguments.backends.join(", ")
         );
+        let _advertisement = advertise(&arguments, address);
         server
             .run(&scheduler, listener, &cancellation)
             .await
