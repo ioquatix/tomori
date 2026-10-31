@@ -29,12 +29,28 @@ impl Default for MixerOptions {
     }
 }
 
+/// One buffered source and the level the mixer last measured for it, kept together so that [`Mixer::mix`] never inserts into a map on the audio thread.
+struct Source {
+    buffer: JitterBuffer,
+    /// See [`Mixer::source_level`].
+    level: f32,
+}
+
+impl Source {
+    fn new(sample_rate: u32, options: JitterOptions) -> Self {
+        Self {
+            buffer: JitterBuffer::new(sample_rate, options),
+            level: 0.0,
+        }
+    }
+}
+
 /// Mixes every remote participant and the agent speech stream into one mono `i16` stream at the device rate.
 ///
 /// Feed it every received [`AudioFrame`] with [`Self::push`] and pull output from the audio callback with [`Self::mix`]. Each source has its own [`JitterBuffer`], so one late or bursty participant does not delay the others. Agent volume and mute are local to this mixer; muting still consumes agent audio in real time, so unmuting resumes live speech rather than replaying what was missed.
 pub struct Mixer {
     options: MixerOptions,
-    sources: HashMap<u32, JitterBuffer>,
+    sources: HashMap<u32, Source>,
     /// This client's own participant number, whose audio is never played back.
     local_source: Option<u32>,
     agent_volume: f32,
@@ -43,8 +59,6 @@ pub struct Mixer {
     accumulator: Vec<f32>,
     /// One source's contribution to the current [`Self::mix`] call, so its level can be measured.
     scratch: Vec<f32>,
-    /// The level of each buffered source; see [`Self::source_level`].
-    levels: HashMap<u32, f32>,
     statistics: PlaybackStatistics,
 }
 
@@ -63,7 +77,6 @@ impl Mixer {
             limiter: Limiter::new(options.sample_rate),
             accumulator: Vec::new(),
             scratch: Vec::new(),
-            levels: HashMap::new(),
             statistics: PlaybackStatistics::default(),
         }
     }
@@ -109,25 +122,23 @@ impl Mixer {
     /// Discard all buffered audio. The application owns the mixer, so it calls this when the audio it hears changes context: on [`protocol::ServerMessage::Left`], before joining a different space, and after reconnecting.
     pub fn clear(&mut self) {
         self.sources.clear();
-        self.levels.clear();
     }
 
     /// Discard one source's buffered audio, for example when a participant leaves the space. Its next frame starts a new buffer.
     pub fn clear_source(&mut self, source: u32) {
         self.sources.remove(&source);
-        self.levels.remove(&source);
     }
 
     /// Whether `source` is contributing audio now, rather than buffering, stalled or absent. Agent speech that is muted still counts as playing, because it is consumed in real time.
     pub fn is_source_playing(&self, source: u32) -> bool {
         self.sources
             .get(&source)
-            .is_some_and(JitterBuffer::is_playing)
+            .is_some_and(|source| source.buffer.is_playing())
     }
 
     /// The recent loudness of what [`Self::mix`] played from `source`, before its gain, so that muted agent speech still has a level, from 0 (silent or absent) to 1 (full scale), for visuals such as a speaking indicator. It follows a louder signal at once and falls over about [`LEVEL_RELEASE`] when the source goes quiet.
     pub fn source_level(&self, source: u32) -> f32 {
-        self.levels.get(&source).copied().unwrap_or(0.0)
+        self.sources.get(&source).map_or(0.0, |source| source.level)
     }
 
     /// Queue a received frame for playback.
@@ -138,12 +149,12 @@ impl Mixer {
         let source = self
             .sources
             .entry(frame.source)
-            .or_insert_with(|| JitterBuffer::new(frame.sample_rate, self.options.jitter));
-        if source.sample_rate() != frame.sample_rate {
+            .or_insert_with(|| Source::new(frame.sample_rate, self.options.jitter));
+        if source.buffer.sample_rate() != frame.sample_rate {
             // A new speech segment can change rate; restart the source rather than play mismatched audio.
-            *source = JitterBuffer::new(frame.sample_rate, self.options.jitter);
+            *source = Source::new(frame.sample_rate, self.options.jitter);
         }
-        source.push(frame, &mut self.statistics);
+        source.buffer.push(frame, &mut self.statistics);
     }
 
     /// Fill `output` with the next mixed samples. Never blocks: missing audio is silence.
@@ -158,33 +169,28 @@ impl Mixer {
         };
         let release =
             (-(output.len() as f64) / (LEVEL_RELEASE.as_secs_f64() * f64::from(rate))).exp() as f32;
-        for (&source, buffer) in self.sources.iter_mut() {
-            let gain = if source == AGENT_SOURCE {
-                agent_gain
-            } else {
-                1.0
-            };
+        for (&id, source) in self.sources.iter_mut() {
+            let gain = if id == AGENT_SOURCE { agent_gain } else { 1.0 };
             // Mixed at unity gain and measured before the gain is applied, so muted agent speech still shows as speaking.
             self.scratch.clear();
             self.scratch.resize(output.len(), 0.0);
-            buffer.mix_into(&mut self.scratch, rate, 1.0, &mut self.statistics);
+            source
+                .buffer
+                .mix_into(&mut self.scratch, rate, 1.0, &mut self.statistics);
             let mut energy = 0.0;
             for (total, &sample) in self.accumulator.iter_mut().zip(&self.scratch) {
                 *total += sample * gain;
                 energy += sample * sample;
             }
             let rms = (energy / output.len().max(1) as f32).sqrt() / f32::from(i16::MAX);
-            let level = self.levels.entry(source).or_insert(0.0);
-            *level = rms.min(1.0).max(*level * release);
+            source.level = rms.min(1.0).max(source.level * release);
         }
         let idle_limit = (IDLE_LIMIT.as_secs_f64() * f64::from(rate)) as u64;
-        self.sources.retain(|_, buffer| {
-            buffer.is_playing()
-                || buffer.buffered_samples() > 0
-                || buffer.idle_samples() < idle_limit
+        self.sources.retain(|_, source| {
+            source.buffer.is_playing()
+                || source.buffer.buffered_samples() > 0
+                || source.buffer.idle_samples() < idle_limit
         });
-        let sources = &self.sources;
-        self.levels.retain(|source, _| sources.contains_key(source));
         self.limiter.process(&self.accumulator, output);
     }
 }
