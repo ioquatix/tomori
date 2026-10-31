@@ -3,12 +3,15 @@
 
 //! Streaming speech recognition for push-to-talk utterances.
 //!
-//! [`Recognition`] owns one [`Recognizer`] on a dedicated thread. Each utterance is driven through an [`Utterance`] handle: audio is pushed while the participant is still speaking, decoded incrementally, and reported through the utterance's event sink as [`TranscriptEvent::Partial`] results, followed by exactly one [`TranscriptEvent::Final`] or [`TranscriptEvent::Failed`]. See `design/speech.md`.
+//! [`Recognition`] owns one recognizer on a dedicated thread. Each utterance is driven through an [`Utterance`] handle: audio is pushed while the participant is still speaking, decoded incrementally, and reported through the utterance's event sink as [`TranscriptEvent::Partial`] results, followed by exactly one [`TranscriptEvent::Final`] or [`TranscriptEvent::Failed`]. See `design/speech.md`.
+//!
+//! The recognizer is either a [`StreamingRecognizer`], which keeps per-utterance state and decodes each piece of audio once as it arrives, or a window [`Recognizer`], which is decoded repeatedly over the uncommitted audio with local-agreement commit. The server uses the streaming [`TransducerRecognizer`].
 //!
 //! Utterances from several participants may be active at once; they share the recognizer and are decoded in turn. Finishing utterances take priority over partial decodes.
 
 mod policy;
 mod resample;
+mod transducer;
 mod whisper;
 
 use std::{
@@ -22,7 +25,8 @@ use protocol::AudioFrame;
 
 pub use policy::Transcript;
 pub use resample::Resampler;
-pub use whisper::{WhisperConfig, WhisperWorker};
+pub use transducer::{TransducerConfig, TransducerRecognizer};
+pub use whisper::{WhisperConfig, WhisperRecognizer};
 
 use crate::Error;
 use policy::Policy;
@@ -39,7 +43,7 @@ pub struct Word {
     pub end: f32,
 }
 
-/// A speech recognition engine.
+/// A window speech recognition engine, which decodes a whole window of audio at once and reports word times. [`Recognition::spawn`] decodes it incrementally with local-agreement commit.
 pub trait Recognizer: Send {
     /// Decode `audio` (16 kHz mono) into words. `prompt` is the preceding committed text of the same utterance, for context.
     fn decode(&mut self, audio: &[i16], prompt: Option<&str>) -> Result<Vec<Word>, Error>;
@@ -51,7 +55,33 @@ impl<R: Recognizer + ?Sized> Recognizer for Box<R> {
     }
 }
 
-/// Tuning for incremental decoding.
+/// A streaming speech recognition engine, which decodes audio as it arrives and keeps each utterance's state between pieces of audio, so nothing is decoded twice.
+pub trait StreamingRecognizer: Send {
+    /// Open the recognition stream of a new utterance.
+    fn open(&mut self) -> Result<Box<dyn RecognitionStream>, Error>;
+}
+
+impl<R: StreamingRecognizer + ?Sized> StreamingRecognizer for Box<R> {
+    fn open(&mut self) -> Result<Box<dyn RecognitionStream>, Error> {
+        (**self).open()
+    }
+}
+
+/// The recognition state of one utterance of a [`StreamingRecognizer`].
+pub trait RecognitionStream: Send {
+    /// Append 16 kHz mono audio. It is decoded by [`RecognitionStream::decode`].
+    fn accept(&mut self, samples: &[i16]);
+    /// Whether accepted audio is ready to be decoded.
+    fn due(&self) -> bool;
+    /// Decode all accepted audio that is ready.
+    fn decode(&mut self) -> Result<(), Error>;
+    /// The transcript so far.
+    fn transcript(&self) -> Transcript;
+    /// The participant finished speaking: decode the rest of the accepted audio and return the complete transcript.
+    fn finish(&mut self) -> Result<String, Error>;
+}
+
+/// Tuning for incremental decoding of a window [`Recognizer`].
 #[derive(Clone, Debug)]
 pub struct RecognizerConfig {
     /// Decode again after this much new audio.
@@ -110,11 +140,24 @@ pub struct Recognition {
 }
 
 impl Recognition {
+    /// Recognize with a window `recognizer`, decoded incrementally with local-agreement commit as `config` describes.
     pub fn spawn(recognizer: impl Recognizer + 'static, config: RecognizerConfig) -> Self {
+        Self::with_decoder(Decoder::Window {
+            recognizer: Box::new(recognizer),
+            config,
+        })
+    }
+
+    /// Recognize with a streaming `recognizer`, which decodes each piece of audio once as it arrives.
+    pub fn spawn_streaming(recognizer: impl StreamingRecognizer + 'static) -> Self {
+        Self::with_decoder(Decoder::Streaming(Box::new(recognizer)))
+    }
+
+    fn with_decoder(decoder: Decoder) -> Self {
         let (commands, receiver) = mpsc::channel();
         let thread = thread::Builder::new()
             .name("speech-recognition".into())
-            .spawn(move || Engine::new(Box::new(recognizer), config, receiver).run())
+            .spawn(move || Engine::new(decoder, receiver).run())
             .expect("spawn the recognition thread");
         Self {
             commands,
@@ -208,18 +251,81 @@ impl Drop for Utterance {
     }
 }
 
+/// The recognizer and how utterances are decoded with it.
+enum Decoder {
+    Window {
+        recognizer: Box<dyn Recognizer>,
+        config: RecognizerConfig,
+    },
+    Streaming(Box<dyn StreamingRecognizer>),
+}
+
+/// The decoding state of one utterance.
+enum State {
+    Window(Policy),
+    Streaming(Box<dyn RecognitionStream>),
+}
+
+impl State {
+    fn push(&mut self, samples: &[i16]) {
+        match self {
+            Self::Window(policy) => policy.push(samples),
+            Self::Streaming(stream) => stream.accept(samples),
+        }
+    }
+
+    fn due(&self) -> bool {
+        match self {
+            Self::Window(policy) => policy.due(),
+            Self::Streaming(stream) => stream.due(),
+        }
+    }
+
+    fn transcript(&self) -> Transcript {
+        match self {
+            Self::Window(policy) => policy.transcript(),
+            Self::Streaming(stream) => stream.transcript(),
+        }
+    }
+
+    /// Decode what is due.
+    fn decode(&mut self, decoder: &mut Decoder) -> Result<(), Error> {
+        match (self, decoder) {
+            (Self::Window(policy), Decoder::Window { recognizer, .. }) => {
+                policy.decode(&mut **recognizer)
+            }
+            (Self::Streaming(stream), _) => stream.decode(),
+            (Self::Window(_), Decoder::Streaming(_)) => {
+                unreachable!("window state is only created for a window decoder")
+            }
+        }
+    }
+
+    /// Decode the rest and return the complete transcript.
+    fn finish(&mut self, decoder: &mut Decoder) -> Result<String, Error> {
+        match (self, decoder) {
+            (Self::Window(policy), Decoder::Window { recognizer, .. }) => {
+                policy.finish(&mut **recognizer)
+            }
+            (Self::Streaming(stream), _) => stream.finish(),
+            (Self::Window(_), Decoder::Streaming(_)) => {
+                unreachable!("window state is only created for a window decoder")
+            }
+        }
+    }
+}
+
 struct Active {
     key: u64,
     id: u64,
     sink: Sink,
-    policy: Policy,
+    state: State,
     ending: bool,
     reported: Transcript,
 }
 
 struct Engine {
-    recognizer: Box<dyn Recognizer>,
-    config: RecognizerConfig,
+    decoder: Decoder,
     commands: Receiver<Command>,
     /// Active utterances, in the order they will next be served.
     active: VecDeque<Active>,
@@ -227,14 +333,9 @@ struct Engine {
 }
 
 impl Engine {
-    fn new(
-        recognizer: Box<dyn Recognizer>,
-        config: RecognizerConfig,
-        commands: Receiver<Command>,
-    ) -> Self {
+    fn new(decoder: Decoder, commands: Receiver<Command>) -> Self {
         Self {
-            recognizer,
-            config,
+            decoder,
             commands,
             active: VecDeque::new(),
             connected: true,
@@ -247,7 +348,7 @@ impl Engine {
             let work = self
                 .active
                 .iter()
-                .any(|active| active.ending || active.policy.due());
+                .any(|active| active.ending || active.state.due());
             if !work {
                 if !self.connected && self.active.is_empty() {
                     return;
@@ -284,19 +385,32 @@ impl Engine {
 
     fn apply(&mut self, command: Command) {
         match command {
-            Command::Begin { key, id, sink } => self.active.push_back(Active {
-                key,
-                id,
-                sink,
-                policy: Policy::new(self.config.clone()),
-                ending: false,
-                reported: Transcript::default(),
-            }),
+            Command::Begin { key, id, mut sink } => {
+                let state = match &mut self.decoder {
+                    Decoder::Window { config, .. } => State::Window(Policy::new(config.clone())),
+                    Decoder::Streaming(recognizer) => match recognizer.open() {
+                        Ok(stream) => State::Streaming(stream),
+                        Err(error) => {
+                            log::warn!("Transcription of utterance {id} could not start: {error}");
+                            sink(TranscriptEvent::Failed(error));
+                            return;
+                        }
+                    },
+                };
+                self.active.push_back(Active {
+                    key,
+                    id,
+                    sink,
+                    state,
+                    ending: false,
+                    reported: Transcript::default(),
+                });
+            }
             Command::Audio { key, samples } => {
                 if let Some(active) = self.find(key)
                     && !active.ending
                 {
-                    active.policy.push(&samples);
+                    active.state.push(&samples);
                 }
             }
             Command::End { key } => {
@@ -319,13 +433,13 @@ impl Engine {
             .active
             .iter()
             .position(|active| active.ending)
-            .or_else(|| self.active.iter().position(|active| active.policy.due()));
+            .or_else(|| self.active.iter().position(|active| active.state.due()));
         let Some(index) = index else {
             return;
         };
         let mut active = self.active.remove(index).expect("index is in range");
         if active.ending {
-            match active.policy.finish(&mut *self.recognizer) {
+            match active.state.finish(&mut self.decoder) {
                 Ok(text) => (active.sink)(TranscriptEvent::Final(text)),
                 Err(error) => {
                     log::warn!("Transcription of utterance {} failed: {error}", active.id);
@@ -334,9 +448,9 @@ impl Engine {
             }
             return;
         }
-        match active.policy.decode(&mut *self.recognizer) {
+        match active.state.decode(&mut self.decoder) {
             Ok(()) => {
-                let transcript = active.policy.transcript();
+                let transcript = active.state.transcript();
                 if transcript != active.reported {
                     active.reported = transcript.clone();
                     (active.sink)(TranscriptEvent::Partial(transcript));

@@ -8,7 +8,9 @@ use std::sync::{Mutex, PoisonError};
 
 use protocol::AudioFrame;
 use speech::stt::{RATE, Transcript};
-use speech::{Recognition, Recognizer, RecognizerConfig, TranscriptEvent, Utterance};
+use speech::{
+    Recognition, Recognizer, RecognizerConfig, StreamingRecognizer, TranscriptEvent, Utterance,
+};
 
 use crate::transcriber::{Transcriber, TranscriptSink, UtteranceId};
 
@@ -17,16 +19,26 @@ const STOPPED: &str = "Speech recognition stopped before the transcript was read
 
 /// Streaming speech recognition for push-to-talk utterances.
 ///
-/// One recognizer thread serves every utterance on the server. Partial transcripts are reported while the participant is speaking; a recognizer error, including a missing or crashed worker process, fails the utterance with a visible message.
+/// One recognizer thread serves every utterance on the server. Partial transcripts are reported while the participant is speaking; a recognizer error, including a missing model or a recognizer thread that stopped, fails the utterance with a visible message.
 pub struct RecognitionTranscriber {
     recognition: Mutex<Recognition>,
     utterances: Mutex<HashMap<UtteranceId, Utterance>>,
 }
 
 impl RecognitionTranscriber {
+    /// Transcribe with a window `recognizer`, decoded incrementally with local-agreement commit.
     pub fn new(recognizer: impl Recognizer + 'static, config: RecognizerConfig) -> Self {
+        Self::with_recognition(Recognition::spawn(recognizer, config))
+    }
+
+    /// Transcribe with a streaming `recognizer`, which decodes the audio once, as it arrives.
+    pub fn streaming(recognizer: impl StreamingRecognizer + 'static) -> Self {
+        Self::with_recognition(Recognition::spawn_streaming(recognizer))
+    }
+
+    fn with_recognition(recognition: Recognition) -> Self {
         Self {
-            recognition: Mutex::new(Recognition::spawn(recognizer, config)),
+            recognition: Mutex::new(recognition),
             utterances: Mutex::default(),
         }
     }

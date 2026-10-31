@@ -25,7 +25,7 @@ const SYNTHESIS_RATE: u32 = 24_000;
 const SYNTHESIS_FRAME: usize = SYNTHESIS_RATE as usize / 50;
 const FRAMES_PER_WORD: usize = 2;
 
-/// Recognizes [`VOCABULARY`] words from their sample values. "fail" makes the decode fail, as a crashed worker process would; "crash" panics the recognizer thread.
+/// Recognizes [`VOCABULARY`] words from their sample values. "fail" makes the decode fail, as an engine error would; "crash" panics the recognizer thread.
 struct FakeRecognizer;
 
 impl Recognizer for FakeRecognizer {
@@ -46,7 +46,7 @@ impl Recognizer for FakeRecognizer {
             if let Some(&word) = word {
                 for index in 0..count {
                     match word {
-                        "fail" => return Err(Error::Worker("the worker exited".into())),
+                        "fail" => return Err(Error::Engine("the engine failed".into())),
                         "crash" => panic!("the recognizer crashed"),
                         _ => {}
                     }
@@ -342,7 +342,7 @@ fn a_recognizer_failure_fails_the_utterance() {
         ServerMessage::Transcript { finished: true, .. } => panic!("a transcript was queued"),
         _ => None,
     });
-    assert!(error.contains("the worker exited"), "{error}");
+    assert!(error.contains("the engine failed"), "{error}");
     assert!(error.contains("nothing was sent"), "{error}");
     // Nothing was queued: no snapshot with a queue entry follows.
     // Nor is the end refused, if the failure came first.

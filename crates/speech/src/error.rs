@@ -8,8 +8,8 @@ use std::fmt;
 pub enum Error {
     /// The engine is not installed or configured; the message says how to set it up.
     Unavailable(String),
-    /// The worker process failed, exited or stopped responding. It is restarted for the next request.
-    Worker(String),
+    /// The engine's thread stopped, such as after a panic, so it cannot serve further requests.
+    Stopped(String),
     /// The engine rejected the request.
     Engine(String),
     /// Recognition could not keep the audio without discarding speech.
@@ -20,7 +20,7 @@ impl fmt::Display for Error {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Unavailable(message) => write!(formatter, "speech engine unavailable: {message}"),
-            Self::Worker(message) => write!(formatter, "speech worker failed: {message}"),
+            Self::Stopped(message) => write!(formatter, "speech engine stopped: {message}"),
             Self::Engine(message) => write!(formatter, "speech engine error: {message}"),
             Self::Overflow => write!(
                 formatter,

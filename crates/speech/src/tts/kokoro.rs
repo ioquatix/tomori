@@ -1,41 +1,55 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-//! Kokoro synthesis through a supervised sherpa-onnx worker process (`worker/tts_worker.py`), ported from the bridge's `bridge/tts.mjs`.
+//! Kokoro synthesis in-process through sherpa-onnx, on a thread owned by the synthesizer.
 
-use std::path::{Path, PathBuf};
+use std::{
+    cell::Cell,
+    path::{Path, PathBuf},
+    rc::Rc,
+    sync::mpsc::{self, Receiver, Sender},
+    thread::{self, JoinHandle},
+};
 
-use base64::{Engine as _, engine::general_purpose::STANDARD};
-use serde_json::{Value, json};
+use sherpa_onnx::{
+    GenerationConfig, OfflineTts, OfflineTtsConfig, OfflineTtsKokoroModelConfig,
+    OfflineTtsModelConfig,
+};
 
 use super::{AudioChunk, Synthesizer};
-use crate::{
-    Error,
-    worker::{Flow, Worker, WorkerCommand},
-};
+use crate::Error;
 
 /// The number of voices in the Kokoro multi-language v1.0 model.
 const VOICES: u32 = 54;
 
-/// Where to find the Python environment, worker script and model.
+/// The longest segment accepted, in characters. Segments come from [`crate::Speakable`], which yields sentences far shorter than this.
+const TEXT_LIMIT: usize = 2000;
+
+/// The files of the `kokoro-multi-lang-v1_0` model that synthesis uses.
+const FILES: [&str; 5] = [
+    "model.onnx",
+    "voices.bin",
+    "tokens.txt",
+    "lexicon-us-en.txt",
+    "espeak-ng-data",
+];
+
+/// Where to find the model and how to speak.
 #[derive(Clone, Debug)]
 pub struct KokoroConfig {
-    pub python: PathBuf,
-    pub script: PathBuf,
     /// The `kokoro-multi-lang-v1_0` directory: `model.onnx`, `voices.bin`, `tokens.txt`, `lexicon-us-en.txt` and `espeak-ng-data`.
     pub model: PathBuf,
     /// The speaker id, 0 to 53.
     pub voice: u32,
     pub speed: f32,
+    /// The ONNX Runtime threads used for synthesis.
     pub threads: u32,
 }
 
 impl KokoroConfig {
-    /// The layout under the repository `root`: the Python environment `.tools/asr-venv` (with `sherpa-onnx` installed) and the model fetched by `scripts/fetch-tts-model.sh`.
+    /// The model fetched by `scripts/fetch-tts-model.sh` under the repository `root`: `.tools/tts/kokoro-multi-lang-v1_0`.
     pub fn from_root(root: &Path) -> Self {
         Self {
-            python: root.join(".tools/asr-venv/bin/python"),
-            script: Path::new(env!("CARGO_MANIFEST_DIR")).join("worker/tts_worker.py"),
             model: root.join(".tools/tts/kokoro-multi-lang-v1_0"),
             // `af_heart`.
             voice: 3,
@@ -44,7 +58,7 @@ impl KokoroConfig {
         }
     }
 
-    fn command(&self) -> Result<WorkerCommand, Error> {
+    fn check(&self) -> Result<(), Error> {
         if self.voice >= VOICES {
             return Err(Error::Unavailable(format!(
                 "Kokoro voice {} is out of range 0 to {}",
@@ -52,124 +66,230 @@ impl KokoroConfig {
                 VOICES - 1
             )));
         }
-        let files = [
-            "model.onnx",
-            "voices.bin",
-            "tokens.txt",
-            "lexicon-us-en.txt",
-            "espeak-ng-data",
-        ];
-        if !files.iter().all(|file| self.model.join(file).exists()) {
-            return Err(Error::Unavailable(
-                "the Kokoro model is not installed; run bash scripts/fetch-tts-model.sh".into(),
-            ));
-        }
-        if !self.python.exists() {
+        if !FILES.iter().all(|file| self.model.join(file).exists()) {
             return Err(Error::Unavailable(format!(
-                "missing Python environment {}; see crates/speech/worker/readme.md",
-                self.python.display()
-            )));
-        }
-        if !self.script.exists() {
-            return Err(Error::Unavailable(format!(
-                "missing worker script {}",
-                self.script.display()
-            )));
-        }
-        Ok(WorkerCommand::new("kokoro", &self.python)
-            .argument(&self.script)
-            .env("TOMORI_TTS_MODEL", &self.model)
-            .env("TOMORI_TTS_THREADS", self.threads.to_string()))
-    }
-}
-
-/// A [`Synthesizer`] backed by the Kokoro worker. The worker is started on first use (or by [`KokoroWorker::start`]) and restarted after a failure.
-pub struct KokoroWorker {
-    worker: Worker,
-    voice: u32,
-    speed: f32,
-}
-
-impl KokoroWorker {
-    /// Check that the model and environment are installed. The worker is not started yet.
-    pub fn new(config: &KokoroConfig) -> Result<Self, Error> {
-        Ok(Self {
-            worker: Worker::new(config.command()?),
-            voice: config.voice,
-            speed: config.speed,
-        })
-    }
-
-    /// Start the worker and wait for its model to load, so that the first segment does not wait for it.
-    pub fn start(&mut self) -> Result<(), Error> {
-        self.worker.start()?;
-        let speakers = self
-            .description()
-            .and_then(|ready| ready.get("num_speakers"))
-            .and_then(Value::as_u64);
-        if let Some(speakers) = speakers
-            && u64::from(self.voice) >= speakers
-        {
-            return Err(Error::Unavailable(format!(
-                "Kokoro voice {} is out of range; the model has {speakers} voices",
-                self.voice
+                "the Kokoro model is not installed in {}; run bash scripts/fetch-tts-model.sh",
+                self.model.display()
             )));
         }
         Ok(())
     }
 
-    /// The worker's ready message, describing the model, sample rate and voice count.
-    pub fn description(&self) -> Option<&Value> {
-        self.worker.ready()
+    fn sherpa(&self) -> OfflineTtsConfig {
+        let file = |name: &str| Some(self.model.join(name).to_string_lossy().into_owned());
+        OfflineTtsConfig {
+            model: OfflineTtsModelConfig {
+                kokoro: OfflineTtsKokoroModelConfig {
+                    model: file("model.onnx"),
+                    voices: file("voices.bin"),
+                    tokens: file("tokens.txt"),
+                    lexicon: file("lexicon-us-en.txt"),
+                    // espeak-ng pronounces words that the lexicon lacks.
+                    data_dir: file("espeak-ng-data"),
+                    ..Default::default()
+                },
+                num_threads: i32::try_from(self.threads).unwrap_or(1).max(1),
+                provider: Some("cpu".into()),
+                debug: false,
+                ..Default::default()
+            },
+            // Generate and deliver one sentence at a time, so the first sentence of a segment is heard before the rest is synthesized.
+            max_num_sentences: 1,
+            ..Default::default()
+        }
     }
 }
 
-fn decode(message: &Value) -> Result<AudioChunk, Error> {
-    let sample_rate = message
-        .get("sample_rate")
-        .and_then(Value::as_u64)
-        .and_then(|rate| u32::try_from(rate).ok())
-        .filter(|&rate| rate > 0)
-        .ok_or_else(|| {
-            Error::Worker(format!(
-                "kokoro worker chunk without a sample rate: {message}"
-            ))
-        })?;
-    let audio = message
-        .get("audio")
-        .and_then(Value::as_str)
-        .ok_or_else(|| Error::Worker(format!("kokoro worker wrote {message}")))?;
-    let bytes = STANDARD
-        .decode(audio)
-        .map_err(|error| Error::Worker(format!("kokoro worker audio: {error}")))?;
-    if bytes.len() % 2 != 0 {
-        return Err(Error::Worker(
-            "kokoro worker audio has an odd length".into(),
-        ));
-    }
-    let samples = bytes
-        .as_chunks::<2>()
-        .0
-        .iter()
-        .map(|pair| i16::from_le_bytes(*pair))
-        .collect();
-    Ok(AudioChunk {
-        sample_rate,
-        samples,
-    })
+/// What the synthesis thread reports for a request.
+enum Message {
+    Audio(Vec<f32>),
+    Done,
+    Failed(Error),
 }
 
-impl Synthesizer for KokoroWorker {
-    fn synthesize(&mut self, text: &str, output: &mut dyn FnMut(AudioChunk)) -> Result<(), Error> {
-        self.start()?;
-        let request = json!({ "text": text, "voice": self.voice, "speed": self.speed });
-        self.worker.request(request, |message| {
-            if message.get("done").and_then(Value::as_bool) == Some(true) {
-                return Ok(Flow::Done);
+struct Request {
+    text: String,
+    voice: i32,
+    speed: f32,
+    replies: Sender<Message>,
+}
+
+/// A [`Synthesizer`] that runs Kokoro in this process.
+///
+/// The model is loaded and run on a thread owned by the synthesizer, so synthesis never runs on the caller's scheduler. Each sentence's audio is passed to the caller as soon as it is generated. A segment that fails is reported to its caller and not retried.
+pub struct KokoroSynthesizer {
+    requests: Option<Sender<Request>>,
+    thread: Option<JoinHandle<()>>,
+    voice: u32,
+    speed: f32,
+    sample_rate: u32,
+    speakers: u32,
+}
+
+impl KokoroSynthesizer {
+    /// Load the model on a new synthesis thread, waiting until it is ready so that the first segment does not wait for it.
+    pub fn new(config: &KokoroConfig) -> Result<Self, Error> {
+        config.check()?;
+        let sherpa = config.sherpa();
+        let (ready_sender, ready) = mpsc::channel();
+        let (requests, receiver) = mpsc::channel::<Request>();
+        let thread = thread::Builder::new()
+            .name("speech-kokoro".into())
+            .spawn(move || {
+                let Some(tts) = OfflineTts::create(&sherpa) else {
+                    let _ = ready_sender.send(Err(Error::Unavailable(
+                        "sherpa-onnx could not load the Kokoro model".into(),
+                    )));
+                    return;
+                };
+                let _ = ready_sender.send(Ok((tts.sample_rate(), tts.num_speakers())));
+                serve(&tts, receiver);
+            })
+            .map_err(|error| Error::Unavailable(format!("could not start Kokoro: {error}")))?;
+        let (sample_rate, speakers) = match ready.recv() {
+            Ok(Ok(description)) => description,
+            Ok(Err(error)) => {
+                let _ = thread.join();
+                return Err(error);
             }
-            output(decode(message)?);
-            Ok(Flow::Continue)
-        })
+            Err(_) => {
+                let _ = thread.join();
+                return Err(Error::Unavailable(
+                    "the Kokoro thread stopped while loading the model".into(),
+                ));
+            }
+        };
+        let synthesizer = Self {
+            requests: Some(requests),
+            thread: Some(thread),
+            voice: config.voice,
+            speed: config.speed,
+            sample_rate: u32::try_from(sample_rate).unwrap_or(0),
+            speakers: u32::try_from(speakers).unwrap_or(0),
+        };
+        if synthesizer.sample_rate == 0 {
+            return Err(Error::Unavailable(
+                "the Kokoro model reports no sample rate".into(),
+            ));
+        }
+        if synthesizer.voice >= synthesizer.speakers {
+            return Err(Error::Unavailable(format!(
+                "Kokoro voice {} is out of range; the model has {} voices",
+                synthesizer.voice, synthesizer.speakers
+            )));
+        }
+        Ok(synthesizer)
+    }
+
+    /// The sample rate of the audio produced, 24 kHz for Kokoro.
+    pub fn sample_rate(&self) -> u32 {
+        self.sample_rate
+    }
+
+    /// The number of voices the model has.
+    pub fn speakers(&self) -> u32 {
+        self.speakers
+    }
+}
+
+/// Serve requests on the synthesis thread until the synthesizer is dropped.
+fn serve(tts: &OfflineTts, requests: Receiver<Request>) {
+    for request in requests {
+        let replies = request.replies.clone();
+        let streamed = Rc::new(Cell::new(false));
+        let callback = {
+            let streamed = Rc::clone(&streamed);
+            move |samples: &[f32], _progress: f32| {
+                if samples.is_empty() {
+                    return true;
+                }
+                streamed.set(true);
+                // Stop early if the caller has gone away.
+                replies.send(Message::Audio(samples.to_vec())).is_ok()
+            }
+        };
+        let generation = GenerationConfig {
+            sid: request.voice,
+            speed: request.speed,
+            ..Default::default()
+        };
+        let audio = tts.generate_with_config(&request.text, &generation, Some(callback));
+        let reply = match audio {
+            None => Message::Failed(Error::Engine("Kokoro could not synthesize the text".into())),
+            Some(audio) if !streamed.get() => {
+                // A build that does not call back still returns the whole segment.
+                if audio.samples().is_empty() {
+                    Message::Failed(Error::Engine("Kokoro produced no audio".into()))
+                } else {
+                    let _ = request
+                        .replies
+                        .send(Message::Audio(audio.samples().to_vec()));
+                    Message::Done
+                }
+            }
+            Some(_) => Message::Done,
+        };
+        let _ = request.replies.send(reply);
+    }
+}
+
+/// Convert samples from -1 to 1 into 16-bit PCM.
+fn to_pcm(samples: &[f32]) -> Vec<i16> {
+    samples
+        .iter()
+        .map(|sample| (sample.clamp(-1.0, 1.0) * 32767.0).round() as i16)
+        .collect()
+}
+
+/// The text Kokoro is given: trimmed, without NUL characters, which sherpa-onnx cannot accept.
+fn prepare(text: &str) -> Result<String, Error> {
+    let text = text.replace('\0', " ");
+    let text = text.trim();
+    if text.is_empty() || text.chars().count() > TEXT_LIMIT {
+        return Err(Error::Engine(format!(
+            "speech requires 1 to {TEXT_LIMIT} characters"
+        )));
+    }
+    Ok(text.to_owned())
+}
+
+impl Synthesizer for KokoroSynthesizer {
+    fn synthesize(&mut self, text: &str, output: &mut dyn FnMut(AudioChunk)) -> Result<(), Error> {
+        let text = prepare(text)?;
+        let stopped = || Error::Stopped("the Kokoro synthesis thread stopped".into());
+        let (replies, receiver) = mpsc::channel();
+        let request = Request {
+            text,
+            voice: i32::try_from(self.voice).expect("the voice was checked against the model"),
+            speed: self.speed,
+            replies,
+        };
+        self.requests
+            .as_ref()
+            .ok_or_else(stopped)?
+            .send(request)
+            .map_err(|_| stopped())?;
+        loop {
+            match receiver.recv() {
+                Ok(Message::Audio(samples)) => output(AudioChunk {
+                    sample_rate: self.sample_rate,
+                    samples: to_pcm(&samples),
+                }),
+                Ok(Message::Done) => return Ok(()),
+                Ok(Message::Failed(error)) => return Err(error),
+                Err(_) => return Err(stopped()),
+            }
+        }
+    }
+}
+
+impl Drop for KokoroSynthesizer {
+    /// Waits for the segment being synthesized, if any, then unloads the model.
+    fn drop(&mut self) {
+        self.requests = None;
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
     }
 }
 
@@ -178,23 +298,27 @@ mod tests {
     use super::*;
 
     fn repository() -> PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
+        match std::env::var_os("TOMORI_SPEECH_ROOT") {
+            Some(root) => PathBuf::from(root),
+            None => Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."),
+        }
     }
 
     #[test]
-    fn decodes_audio_chunks() {
-        let message =
-            json!({ "id": 1, "sample_rate": 24_000, "audio": STANDARD.encode([1u8, 0, 255, 255]) });
+    fn converts_samples_to_pcm() {
         assert_eq!(
-            decode(&message),
-            Ok(AudioChunk {
-                sample_rate: 24_000,
-                samples: vec![1, -1]
-            })
+            to_pcm(&[0.0, 1.0, -1.0, 2.0, 0.5]),
+            [0, 32767, -32767, 32767, 16384]
         );
+    }
+
+    #[test]
+    fn prepares_text_for_the_engine() {
+        assert_eq!(prepare(" Hello\0there. "), Ok("Hello there.".to_owned()));
+        assert!(matches!(prepare("  "), Err(Error::Engine(_))));
         assert!(matches!(
-            decode(&json!({ "id": 1, "audio": "" })),
-            Err(Error::Worker(_))
+            prepare(&"a".repeat(TEXT_LIMIT + 1)),
+            Err(Error::Engine(_))
         ));
     }
 
@@ -202,7 +326,7 @@ mod tests {
     fn reports_a_missing_installation() {
         let config = KokoroConfig::from_root(Path::new("/nonexistent"));
         assert!(matches!(
-            KokoroWorker::new(&config),
+            KokoroSynthesizer::new(&config),
             Err(Error::Unavailable(_))
         ));
     }
@@ -218,52 +342,35 @@ mod tests {
         let mut config = KokoroConfig::from_root(&repository());
         config.voice = 54;
         assert!(matches!(
-            KokoroWorker::new(&config),
+            KokoroSynthesizer::new(&config),
             Err(Error::Unavailable(message)) if message.contains("voice")
         ));
     }
 
-    /// Requires the Kokoro model and `sherpa-onnx` in `.tools/asr-venv`; see `worker/readme.md`.
+    /// Requires the Kokoro model; see `readme.md`. Set `TOMORI_SPEECH_ROOT` to use models outside this checkout.
     #[test]
-    #[ignore = "requires the Kokoro model and sherpa-onnx"]
-    fn synthesizes_a_sentence() {
-        let mut worker = KokoroWorker::new(&KokoroConfig::from_root(&repository())).unwrap();
-        let mut samples = 0;
-        let mut rate = 0;
-        worker
-            .synthesize("Hello from Tomori.", &mut |chunk| {
-                rate = chunk.sample_rate;
-                samples += chunk.samples.len();
-            })
-            .unwrap();
-        assert_eq!(rate, 24_000);
-        assert!(samples > 24_000 / 4, "{samples}");
-    }
-
-    /// Speaks a sentence with Kokoro and recognizes it with Whisper. Requires both engines.
-    #[test]
-    #[ignore = "requires the Kokoro and faster-whisper engines"]
-    fn round_trips_through_recognition() {
-        use crate::stt::{RATE, Recognizer, Resampler, WhisperConfig, WhisperWorker};
-
-        let root = repository();
-        let mut worker = KokoroWorker::new(&KokoroConfig::from_root(&root)).unwrap();
-        let mut audio = Vec::new();
-        let mut resampler = None;
-        worker
+    #[ignore = "requires the Kokoro model"]
+    fn synthesizes_sentences_as_they_are_generated() {
+        let mut synthesizer =
+            KokoroSynthesizer::new(&KokoroConfig::from_root(&repository())).unwrap();
+        assert_eq!(synthesizer.speakers(), VOICES);
+        let mut chunks = Vec::new();
+        synthesizer
             .synthesize(
-                "The quick brown fox jumps over the lazy dog.",
-                &mut |chunk| {
-                    resampler
-                        .get_or_insert_with(|| Resampler::new(chunk.sample_rate, RATE))
-                        .process(&chunk.samples, &mut audio);
-                },
+                "Hello from Tomori. This is a second sentence.",
+                &mut |chunk| chunks.push(chunk),
             )
             .unwrap();
-        let mut whisper = WhisperWorker::new(&WhisperConfig::from_root(&root)).unwrap();
-        let words = whisper.decode(&audio, None).unwrap();
-        let text: String = words.iter().map(|word| word.text.as_str()).collect();
-        let text = text.to_lowercase();
-        assert!(text.contains("quick brown fox"), "{text}");
+        // Each sentence arrives as its own chunk.
+        assert!(chunks.len() >= 2, "{} chunks", chunks.len());
+        assert!(chunks.iter().all(|chunk| chunk.sample_rate == 24_000));
+        let samples: usize = chunks.iter().map(|chunk| chunk.samples.len()).sum();
+        assert!(samples > 24_000, "{samples}");
+        // The synthesizer serves further segments.
+        let mut more = 0;
+        synthesizer
+            .synthesize("Again.", &mut |chunk| more += chunk.samples.len())
+            .unwrap();
+        assert!(more > 0);
     }
 }

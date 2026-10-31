@@ -63,7 +63,7 @@ impl Recognizer for Scripted {
             prompt: prompt.map(str::to_owned),
         });
         if self.fail_on == Some(calls.len()) {
-            return Err(Error::Worker("worker exited".into()));
+            return Err(Error::Engine("engine failed".into()));
         }
         let end =
             start + window.iter().filter(|&&sample| sample >= BASE).count() as f32 / RATE as f32;
@@ -282,7 +282,7 @@ fn service_reports_recognizer_failure_for_the_utterance() {
     let (_, last) = final_event(&receiver);
     assert_eq!(
         last,
-        TranscriptEvent::Failed(Error::Worker("worker exited".into()))
+        TranscriptEvent::Failed(Error::Engine("engine failed".into()))
     );
     // The utterance is finished: nothing else is delivered.
     assert!(receiver.recv_timeout(Duration::from_millis(100)).is_err());

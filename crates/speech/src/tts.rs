@@ -12,7 +12,7 @@ use std::{
     thread::{self, JoinHandle},
 };
 
-pub use kokoro::{KokoroConfig, KokoroWorker};
+pub use kokoro::{KokoroConfig, KokoroSynthesizer};
 
 use crate::Error;
 

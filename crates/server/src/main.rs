@@ -1,7 +1,7 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-//! `tomori-server [--bind ADDRESS] [--backend NAME]... [--speech-root PATH] [--name NAME] [--no-advertise] [--keepalive-interval SECONDS] [--keepalive-timeout SECONDS] [--request-timeout SECONDS] [--workspace-root PATH]... [--max-spaces COUNT]`
+//! `tomori-server [--bind ADDRESS] [--backend NAME]... [--speech-root PATH] [--speech-provider NAME] [--name NAME] [--no-advertise] [--keepalive-interval SECONDS] [--keepalive-timeout SECONDS] [--request-timeout SECONDS] [--workspace-root PATH]... [--max-spaces COUNT]`
 //!
 //! Serves Tomori clients on the local network, advertised with Bonjour as `_tomori._tcp`. There is no authentication yet: anyone who can reach the port can join a space. See `design/server.md`.
 
@@ -24,16 +24,19 @@ use protocol::Keepalive;
 use server::{Backends, NullTranscriber, Server, Transcriber, WorkspaceRoots};
 
 const USAGE: &str = "Usage: tomori-server [--bind ADDRESS] [--backend NAME]... [--speech-root PATH]
-                     [--name NAME] [--no-advertise] [--keepalive-interval SECONDS]
+                     [--speech-provider NAME] [--name NAME] [--no-advertise] [--keepalive-interval SECONDS]
                      [--keepalive-timeout SECONDS] [--request-timeout SECONDS]
                      [--workspace-root PATH]... [--max-spaces COUNT]
 
 Options:
   --bind ADDRESS       Listen address (default 0.0.0.0:8765).
   --backend NAME       Offer a backend; repeat for several. Available: fake, claude-code.
-  --speech-root PATH   The directory holding .tools/ with the speech environments and models; see
-                       crates/speech/worker/readme.md. Without it, there is no speech recognition or
+  --speech-root PATH   The directory holding .tools/ with the speech models; see
+                       crates/speech/readme.md. Without it, there is no speech recognition or
                        synthesis.
+  --speech-provider NAME
+                       The ONNX Runtime execution provider for speech recognition: cpu (default), or
+                       cuda in a server built with the speech-shared feature and the CUDA libraries.
   --name NAME          The name clients list for this server (default: the host name).
   --no-advertise       Do not advertise the server with Bonjour (_tomori._tcp); clients must enter
                        its address.
@@ -55,6 +58,7 @@ struct Arguments {
     bind: SocketAddr,
     backends: Vec<String>,
     speech_root: Option<PathBuf>,
+    speech_provider: String,
     name: Option<String>,
     advertise: bool,
     keepalive: Keepalive,
@@ -80,6 +84,7 @@ fn parse(mut arguments: impl Iterator<Item = String>) -> Result<Arguments, Strin
         bind: SocketAddr::from(([0, 0, 0, 0], protocol::DEFAULT_PORT)),
         backends: Vec::new(),
         speech_root: None,
+        speech_provider: "cpu".to_owned(),
         name: None,
         advertise: true,
         keepalive: Keepalive::DEFAULT,
@@ -105,6 +110,15 @@ fn parse(mut arguments: impl Iterator<Item = String>) -> Result<Arguments, Strin
                         .ok_or("--speech-root needs a directory")?
                         .into(),
                 )
+            }
+            "--speech-provider" => {
+                let value = arguments.next().ok_or("--speech-provider needs a name")?;
+                if !matches!(value.as_str(), "cpu" | "cuda") {
+                    return Err(format!(
+                        "--speech-provider needs cpu or cuda, not {value:?}"
+                    ));
+                }
+                parsed.speech_provider = value;
             }
             "--name" => parsed.name = Some(arguments.next().ok_or("--name needs a name")?),
             "--no-advertise" => parsed.advertise = false,
@@ -215,26 +229,24 @@ fn backends(names: &[String]) -> Result<Backends, String> {
     Ok(backends)
 }
 
-/// Speech recognition: Whisper from `root`, or none. Without recognition, every utterance fails visibly.
+/// Speech recognition: the streaming transducer from `root`, run with `provider`, or none. Without recognition, every utterance fails visibly.
 #[cfg(feature = "speech")]
-fn transcriber(root: Option<&Path>) -> Result<Arc<dyn Transcriber>, String> {
-    use speech::stt::{WhisperConfig, WhisperWorker};
+fn transcriber(root: Option<&Path>, provider: &str) -> Result<Arc<dyn Transcriber>, String> {
+    use speech::stt::{TransducerConfig, TransducerRecognizer};
 
     let Some(root) = root else {
         eprintln!("Speech recognition: off (no --speech-root); utterances fail with an error.");
         return Ok(Arc::new(NullTranscriber::new()));
     };
-    let started = WhisperWorker::new(&WhisperConfig::from_root(root)).and_then(|mut worker| {
-        worker.start()?;
-        Ok(worker)
-    });
-    Ok(match started {
-        Ok(worker) => {
-            eprintln!("Speech recognition: Whisper from {}.", root.display());
-            Arc::new(server::RecognitionTranscriber::new(
-                worker,
-                Default::default(),
-            ))
+    let mut config = TransducerConfig::from_root(root);
+    config.provider = provider.to_owned();
+    Ok(match TransducerRecognizer::new(&config) {
+        Ok(recognizer) => {
+            eprintln!(
+                "Speech recognition: streaming transducer from {} ({provider}).",
+                config.model.display()
+            );
+            Arc::new(server::RecognitionTranscriber::streaming(recognizer))
         }
         Err(error) => {
             eprintln!(
@@ -248,7 +260,7 @@ fn transcriber(root: Option<&Path>) -> Result<Arc<dyn Transcriber>, String> {
 }
 
 #[cfg(not(feature = "speech"))]
-fn transcriber(root: Option<&Path>) -> Result<Arc<dyn Transcriber>, String> {
+fn transcriber(root: Option<&Path>, _provider: &str) -> Result<Arc<dyn Transcriber>, String> {
     if root.is_some() {
         return Err(
             "This server was built without the speech feature, so --speech-root is not supported."
@@ -262,20 +274,16 @@ fn transcriber(root: Option<&Path>) -> Result<Arc<dyn Transcriber>, String> {
 /// Speech synthesis: Kokoro from `root`, or none, in which case replies are not spoken.
 #[cfg(feature = "speech")]
 fn synthesis(server: Server, root: Option<&Path>) -> Server {
-    use speech::tts::{KokoroConfig, KokoroWorker};
+    use speech::tts::{KokoroConfig, KokoroSynthesizer};
 
     let Some(root) = root else {
         eprintln!("Speech synthesis: off (no --speech-root); replies are not spoken.");
         return server;
     };
-    let started = KokoroWorker::new(&KokoroConfig::from_root(root)).and_then(|mut worker| {
-        worker.start()?;
-        Ok(worker)
-    });
-    match started {
-        Ok(worker) => {
+    match KokoroSynthesizer::new(&KokoroConfig::from_root(root)) {
+        Ok(synthesizer) => {
             eprintln!("Speech synthesis: Kokoro from {}.", root.display());
-            server.with_synthesizer(worker)
+            server.with_synthesizer(synthesizer)
         }
         Err(error) => {
             eprintln!("Speech synthesis: unavailable ({error}); replies are not spoken.");
@@ -315,7 +323,7 @@ fn main() -> ExitCode {
         }
     };
     let root = arguments.speech_root.as_deref();
-    let transcriber = match transcriber(root) {
+    let transcriber = match transcriber(root, &arguments.speech_provider) {
         Ok(transcriber) => transcriber,
         Err(message) => {
             eprintln!("{message}");
