@@ -310,9 +310,20 @@ fn closed_within(stream: &mut TcpStream, timeout: Duration) -> bool {
 fn silent_sockets_do_not_hold_connection_slots() {
     let server = with_request_timeout(Duration::from_millis(300));
     // More silent sockets than the server serves at once; the rest wait in the listen backlog.
-    let silent: Vec<TcpStream> = (0..300)
-        .map(|_| TcpStream::connect(server.address).unwrap())
-        .collect();
+    // Connecting faster than the server accepts can briefly overflow the listen backlog, which resets a connection attempt; try again.
+    let connect = || {
+        for _ in 0..50 {
+            match TcpStream::connect(server.address) {
+                Ok(stream) => return stream,
+                Err(error) if error.kind() == ErrorKind::ConnectionReset => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("connecting failed: {error}"),
+            }
+        }
+        panic!("connecting kept being reset");
+    };
+    let silent: Vec<TcpStream> = (0..300).map(|_| connect()).collect();
     std::thread::sleep(Duration::from_millis(100));
     let fresh = TcpStream::connect(server.address).unwrap();
     assert_eq!(health(fresh), "HTTP/1.1 200 OK");
