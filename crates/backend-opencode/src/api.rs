@@ -54,6 +54,18 @@ where
             message: error.to_string(),
         })?;
     }
+    // Opt out of connection reuse: opencode closes idle keep-alive connections
+    // after five seconds, and `base-http-client` pools and reuses connections
+    // without retrying. A request that reuses a connection opencode already
+    // dropped reads EOF and fails with "truncated HTTP/1 message" (base-rs/
+    // base-http#36). `Connection: close` keeps the client from reusing: each
+    // call gets a fresh connection, which stays valid for the single exchange.
+    if let Ok(field) = Field::new("connection", "close") {
+        request.fields.append(field).map_err(|error| Failure {
+            status: None,
+            message: error.to_string(),
+        })?;
+    }
     Ok(client.call(request, cancellation).await?)
 }
 
