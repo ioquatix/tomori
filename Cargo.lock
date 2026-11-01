@@ -496,9 +496,9 @@ dependencies = [
 
 [[package]]
 name = "base-markdown"
-version = "0.1.1"
+version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f917d2241d2fc1419cb4f10ff6a537818c80dc5ac08d10fbb9f59ac5d3c3b994"
+checksum = "334406e57d351a23d04bb1dc8804ebb25545f9aabe51a6d8ed87122f6a310453"
 dependencies = [
  "memchr",
 ]

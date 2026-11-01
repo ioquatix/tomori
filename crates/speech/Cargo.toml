@@ -13,7 +13,7 @@ publish = false
 shared = ["sherpa-onnx/shared"]
 
 [dependencies]
-base-markdown = "0.1.1"
+base-markdown = "0.1.4"
 log = "0.4"
 protocol = { path = "../protocol" }
 # 1.13.8 rather than 2.x: 2.0 removed the espeak-ng fallback for words missing from Kokoro's lexicon and skips such words instead; see readme.md.
