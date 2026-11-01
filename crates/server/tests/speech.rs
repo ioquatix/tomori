@@ -674,7 +674,8 @@ fn queueing_and_recording_during_a_reply_do_not_cut_off_speech() {
         "And it lived happily ever after.",
     ];
     let message = session.start_message();
-    session.delta(&message, &format!("{} {} ", sentences[0], sentences[1]));
+    // A blank line closes the first paragraph, so it is spoken while the reply continues.
+    session.delta(&message, &format!("{} {}\n\n", sentences[0], sentences[1]));
 
     // Speech has started; now Bob queues input and Ada records while it plays.
     let started = hear(&bob, 1);

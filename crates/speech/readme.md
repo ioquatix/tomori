@@ -18,6 +18,18 @@ The streaming recognizer decodes each utterance once, as the audio arrives, so p
 
 Kokoro reports each sentence as soon as it is generated.
 
+## Speakable text
+
+`Speakable` turns one assistant message's streaming Markdown into the document-level blocks that have closed, using base-markdown's `IncrementalParser` with GitHub Flavored Markdown. `push` and `finish` return each `Block` once, in order, with:
+
+- its `kind` (paragraph, heading, list, block quote, table, code and so on) and its `span` in `Speakable::source`;
+- its `events`, from its start to its end, including nested blocks, so that a table, code block or list can be shown or run as a unit;
+- its `sentences`, the speakable text split at sentence boundaries, and long sentences at a clause or word break, so that synthesis of the first starts at once.
+
+A block is returned only once no later text can change it: a paragraph when a blank line or another clean block follows it, a heading at the end of its line unless it interrupts a paragraph, a list or block quote when it ends, and the last block when the message finishes. A block that interrupts a paragraph without a blank line, such as a heading or fence, does not yet prove that the paragraph ended, so both wait for the next block to start. A table continues until a blank line. Lists are released whole. The server speaks the sentences and does not use the blocks' structure yet.
+
+Paragraph, heading, list item and block quote text is spoken, with emphasis markers removed and links read by their text. Code blocks (or `SpeakableOptions::code_notice` in their place), tables, raw HTML, images, footnote definitions and bare URLs are not. A reference or footnote definition applies only to uses in its own or a later block; an earlier use is read by its text.
+
 ## Setup
 
 From the repository root:

@@ -3,7 +3,7 @@
 
 //! The agent speech stream of each space. See `design/speech.md` and `design/live-audio.md`.
 //!
-//! A space's driver feeds every backend event to its [`Voice`]. Each assistant message's text deltas pass through a [`speech::Speakable`], and its stable sentences are queued, in order, on the space's one [`speech::Speech`]. Nothing participants do stops, pauses or skips queued speech.
+//! A space's driver feeds every backend event to its [`Voice`]. Each assistant message's text deltas pass through a [`speech::Speakable`], and the sentences of each document-level block that closes are queued, in order, on the space's one [`speech::Speech`]. The blocks' structure is not used yet. Nothing participants do stops, pauses or skips queued speech.
 //!
 //! Synthesis runs ahead of playback on the speech crate's thread. A pacer thread per space announces each segment with [`protocol::ServerMessage::Speech`] and then sends its audio as 20 ms [`protocol::AudioFrame`]s from [`protocol::AGENT_SOURCE`] at the rate it plays, slightly ahead, to whoever is in the space at that moment. Only that thread touches the hub, and only briefly to queue each frame.
 
@@ -52,7 +52,7 @@ mod enabled {
 
     use backend::{Event, Role};
     use protocol::{AGENT_SOURCE, AudioFrame, Gate, ServerMessage};
-    use speech::{AudioChunk, Error, Speakable, Speech, SpeechEvent, Synthesizer};
+    use speech::{AudioChunk, Block, Error, Speakable, Speech, SpeechEvent, Synthesizer};
 
     use crate::hub::Hub;
 
@@ -171,29 +171,29 @@ mod enabled {
                 }
                 Event::TextDelta { message, text } => {
                     if let Some(speakable) = self.speaking.get_mut(message) {
-                        let sentences = speakable.push(text);
-                        self.speak(message, sentences);
+                        let blocks = speakable.push(text);
+                        self.speak(message, blocks);
                     }
                 }
                 Event::MessageCompleted { message } => {
                     if let Some(mut speakable) = self.speaking.remove(message) {
-                        let sentences = speakable.finish();
-                        self.speak(message, sentences);
+                        let blocks = speakable.finish();
+                        self.speak(message, blocks);
                     }
                 }
-                // An incomplete message's held-back text is not stable, so it is not spoken. Queued segments still finish.
+                // An incomplete message's unclosed block is not stable, so it is not spoken. Queued segments still finish.
                 Event::Closed { .. } => self.speaking.clear(),
                 _ => {}
             }
         }
 
-        fn speak(&mut self, message: &str, sentences: Vec<String>) {
-            if sentences.is_empty() {
+        fn speak(&mut self, message: &str, blocks: Vec<Block>) {
+            if blocks.iter().all(|block| block.sentences.is_empty()) {
                 return;
             }
             // Holding the labels across `speak` means the pacer finds each segment's label once synthesis starts it.
             let mut labels = self.labels.lock().unwrap_or_else(PoisonError::into_inner);
-            for sentence in sentences {
+            for sentence in speech::speakable::sentences(blocks) {
                 if let Some(segment) = self.speech.speak(&sentence) {
                     labels.insert(segment, message.to_owned());
                 }

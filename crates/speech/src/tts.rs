@@ -321,12 +321,12 @@ mod tests {
     fn speaks_the_first_sentence_while_the_reply_is_still_streaming() {
         let (mut speech, receiver, _) = spawn(Duration::ZERO);
         let mut speakable = crate::Speakable::new();
-        for delta in ["Hello there. This is", " a reply that is still"] {
-            for sentence in speakable.push(delta) {
+        for delta in ["Hello there.\n", "\nThis is", " a reply that is still"] {
+            for sentence in crate::speakable::sentences(speakable.push(delta)) {
                 speech.speak(&sentence);
             }
         }
-        // The reply has not finished, but the first sentence is already audible.
+        // The reply has not finished, but the sentence of its first, closed paragraph is already audible.
         let event = receiver.recv_timeout(Duration::from_secs(5)).unwrap();
         assert_eq!(
             event,
@@ -339,10 +339,10 @@ mod tests {
             receiver.recv_timeout(Duration::from_secs(5)).unwrap(),
             SpeechEvent::Audio { segment: 1, .. }
         ));
-        for sentence in speakable.push(" arriving.") {
+        for sentence in crate::speakable::sentences(speakable.push(" arriving.")) {
             speech.speak(&sentence);
         }
-        for sentence in speakable.finish() {
+        for sentence in crate::speakable::sentences(speakable.finish()) {
             speech.speak(&sentence);
         }
         speech.close();
