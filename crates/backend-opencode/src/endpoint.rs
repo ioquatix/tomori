@@ -120,8 +120,8 @@ pub fn resolve(explicit: Option<&str>) -> Resolved {
     resolve_url(DEFAULT_URL).expect("the default URL is well-formed")
 }
 
-/// The standard base64 alphabet without padding, enough for the short
-/// `user:password` credential string that HTTP basic auth carries.
+/// The standard base64 alphabet with padding, as HTTP basic auth requires:
+/// opencode's auth middleware rejects an unpadded value.
 fn base64_basic(bytes: &str) -> String {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
@@ -134,9 +134,13 @@ fn base64_basic(bytes: &str) -> String {
         out.push(ALPHABET[((triple >> 12) & 0x3f) as usize] as char);
         if chunk.len() > 1 {
             out.push(ALPHABET[((triple >> 6) & 0x3f) as usize] as char);
+        } else {
+            out.push('=');
         }
         if chunk.len() > 2 {
             out.push(ALPHABET[(triple & 0x3f) as usize] as char);
+        } else {
+            out.push('=');
         }
     }
     out
@@ -148,11 +152,11 @@ mod tests {
 
     #[test]
     fn base64_matches_expected() {
-        // The RFC 4628 examples, without padding.
+        // The RFC 4628 examples.
         assert_eq!(base64_basic("opencode:secret"), "b3BlbmNvZGU6c2VjcmV0");
-        assert_eq!(base64_basic("a"), "YQ");
+        assert_eq!(base64_basic("a"), "YQ==");
         assert_eq!(base64_basic("a b"), "YSBi");
-        assert_eq!(base64_basic("ab"), "YWI");
+        assert_eq!(base64_basic("ab"), "YWI=");
         assert_eq!(base64_basic(""), "");
     }
 
@@ -179,6 +183,14 @@ mod tests {
         assert_eq!(
             resolved.authorization_header().as_deref(),
             Some("Basic b3BlbmNvZGU6c2VjcmV0")
+        );
+        // A credential whose base64 needs padding must still be padded;
+        // opencode's auth middleware rejects unpadded values.
+        let mut resolved = resolve_url(DEFAULT_URL).unwrap();
+        resolved.auth = Some(("opencode".to_owned(), "abcdefghijklmnopqrstuv".to_owned()));
+        assert_eq!(
+            resolved.authorization_header().as_deref(),
+            Some("Basic b3BlbmNvZGU6YWJjZGVmZ2hpamtsbW5vcHFyc3R1dg=="),
         );
     }
 }

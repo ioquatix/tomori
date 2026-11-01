@@ -137,7 +137,9 @@ pub async fn create_session<'scope>(
         cancellation,
     )
     .await?;
-    read_json(response).await
+    let value = read_json(response).await?;
+    // The session record is nested under `data`, as with the list endpoint.
+    Ok(value.get("data").cloned().unwrap_or(value))
 }
 
 /// `GET /api/session?directory=`: the existing sessions in a directory.
@@ -178,7 +180,9 @@ pub async fn session_info<'scope>(
         cancellation,
     )
     .await?;
-    read_json(response).await
+    let value = read_json(response).await?;
+    // The session record is nested under `data`, as with the list endpoint.
+    Ok(value.get("data").cloned().unwrap_or(value))
 }
 
 /// `GET /api/session?parentID=`: the children of a session.
