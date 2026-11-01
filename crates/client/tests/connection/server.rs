@@ -136,6 +136,8 @@ impl<B: ReadableBody> Session<B> {
                             protocol,
                             server: "mini".into(),
                             source: self.connection,
+                            backends: vec![],
+                            roots: vec![],
                         });
                     }
                     ClientMessage::Join { space } => self.reply(ServerMessage::Space {

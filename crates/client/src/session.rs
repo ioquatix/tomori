@@ -304,13 +304,20 @@ fn welcome(context: &Context<'_>, frame: Frame) -> Result<u32, Disconnect> {
             protocol,
             server,
             source,
+            backends,
+            roots,
         } => {
             if protocol != PROTOCOL_VERSION {
                 return Err(Disconnect::Protocol(format!(
                     "server speaks protocol {protocol}, client speaks {PROTOCOL_VERSION}"
                 )));
             }
-            context.set_state(ConnectionState::Connected { source, server });
+            context.set_state(ConnectionState::Connected {
+                source,
+                server,
+                backends,
+                roots,
+            });
             Ok(source)
         }
         ServerMessage::Error { error, .. } => Err(Disconnect::Protocol(format!(

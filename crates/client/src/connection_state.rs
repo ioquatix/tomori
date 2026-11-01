@@ -50,6 +50,10 @@ pub enum ConnectionState {
         /// This client's participant number, which other clients see as the audio frame source.
         source: u32,
         server: String,
+        /// The server's backends, so the client shows only actions each supports.
+        backends: Vec<protocol::BackendInfo>,
+        /// The directories a space may run in, so the client can choose one without typing a path.
+        roots: Vec<protocol::WorkspaceRoot>,
     },
     /// The connection ended; another attempt follows after `retry_in`.
     Disconnected {
@@ -99,7 +103,9 @@ mod tests {
         assert!(
             ConnectionState::Connected {
                 source: 1,
-                server: "s".into()
+                server: "s".into(),
+                backends: vec![],
+                roots: vec![],
             }
             .is_connected()
         );

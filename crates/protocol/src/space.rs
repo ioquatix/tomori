@@ -14,6 +14,31 @@ pub struct SpaceSummary {
     pub participants: usize,
 }
 
+/// An existing agent session a space can be bound to, reported by a backend that supports attaching.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SessionSummary {
+    pub id: String,
+    pub title: String,
+    pub directory: String,
+}
+
+/// A backend the server can bind spaces to, as offered to a client so it can show only working actions.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BackendInfo {
+    pub name: String,
+    /// Existing sessions can be listed and attached through [`crate::ClientMessage::CreateSpace`]'s `session`.
+    pub attach: bool,
+}
+
+/// A directory a space may run in, as offered to a client. A client cannot type a path, so it chooses from what the server sent.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceRoot {
+    /// The canonical path, ready to send in a `CreateSpace`.
+    pub path: String,
+    /// A short name for display, such as the path's final component.
+    pub label: String,
+}
+
 /// The agent's observed state. `Unknown` is never treated as idle or complete, and stands for any state a newer server sends that this build does not know.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
