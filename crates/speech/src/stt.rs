@@ -3,12 +3,13 @@
 
 //! Streaming speech recognition for push-to-talk utterances.
 //!
-//! [`Recognition`] owns one [`StreamingRecognizer`] on a dedicated thread. Each utterance is driven through an [`Utterance`] handle: audio is pushed while the participant is still speaking, decoded once as it arrives, and reported through the utterance's event sink as [`TranscriptEvent::Partial`] results, followed by exactly one [`TranscriptEvent::Final`] or [`TranscriptEvent::Failed`]. The server uses the [`TransducerRecognizer`]. See `design/speech.md`.
+//! [`Recognition`] owns one [`StreamingRecognizer`] on a dedicated thread. Each utterance is driven through an [`Utterance`] handle: audio is pushed while the participant is still speaking, decoded once as it arrives, and reported through the utterance's event sink as [`TranscriptEvent::Partial`] results, followed by exactly one [`TranscriptEvent::Final`] or [`TranscriptEvent::Failed`]. The server uses the [`TransducerRecognizer`], whose final transcripts are [`Punctuated`] when the punctuation model is installed. See `design/speech.md`.
 //!
 //! Utterances from several participants may be active at once; they share the recognizer and are decoded in turn. Finishing utterances take priority over partial decodes. An utterance whose audio waits for more than [`BACKLOG`] samples to be decoded fails with [`Error::Behind`].
 //!
 //! A panic in the recognizer disables recognition until the process restarts: it is logged once, and every open and later utterance fails with [`Error::Stopped`].
 
+mod punctuation;
 mod resample;
 mod transducer;
 mod whisper;
@@ -26,6 +27,9 @@ use std::{
 
 use protocol::AudioFrame;
 
+pub use punctuation::{
+    CnnBilstmPunctuator, DEFAULT_PUNCTUATION_MODEL, Punctuated, PunctuationConfig, Punctuator,
+};
 pub use resample::Resampler;
 pub use transducer::{TransducerConfig, TransducerRecognizer};
 pub use whisper::{WhisperConfig, WhisperRecognizer};

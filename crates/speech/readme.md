@@ -10,10 +10,11 @@ Speech recognition and synthesis for the Tomori server, run in the server proces
 | Engine | Model | Rust type |
 |---|---|---|
 | Streaming recognition (default) | NeMo FastConformer streaming transducer, English, 480 ms chunks, int8 | `stt::TransducerRecognizer` |
+| Transcript punctuation | English CNN-BiLSTM punctuation and casing, int8 | `stt::CnnBilstmPunctuator`, applied by `stt::Punctuated` |
 | Whole-clip recognition (comparison only) | Whisper `small.en`, int8 | `stt::WhisperRecognizer` |
 | Synthesis | Kokoro multi-language v1.0, voice 3 (`af_heart`) | `tts::KokoroSynthesizer` |
 
-The streaming recognizer decodes each utterance once, as the audio arrives, so partial words appear while the participant is still speaking and the final transcript is ready shortly after they let go. Its transcripts are lowercase and unpunctuated. Whisper cannot stream, so the server does not use it; it is kept for the benchmark below.
+The streaming recognizer decodes each utterance once, as the audio arrives, so partial words appear while the participant is still speaking and the final transcript is ready shortly after they let go. Its vocabulary has no capitals or punctuation, so `stt::Punctuated` passes each final transcript through the punctuation model on the recognition thread, and ends it with a full stop, question mark or exclamation mark. Partial transcripts stay lowercase, because punctuating them would change words already shown. Punctuation never fails an utterance: if the model fails or changes the words, the transcript is delivered as recognized, and a panic disables punctuation only, logged once. Without the punctuation model, transcripts are lowercase and unpunctuated, and the server says so when it starts. Whisper cannot stream, so the server does not use it; it is kept for the benchmark below.
 
 Kokoro reports each sentence as soon as it is generated.
 
@@ -23,12 +24,12 @@ From the repository root:
 
 ```bash
 bash scripts/fetch-sherpa-onnx.sh # .tools/sherpa-onnx: the native libraries, checked against a pinned SHA-256 (20 MB)
-bash scripts/fetch-asr-model.sh   # .tools/asr/sherpa-onnx-nemo-streaming-fast-conformer-transducer-en-480ms-int8 (130 MB)
+bash scripts/fetch-asr-model.sh   # .tools/asr: sherpa-onnx-nemo-streaming-fast-conformer-transducer-en-480ms-int8 (130 MB) and sherpa-onnx-online-punct-en-2024-08-06 (30 MB)
 bash scripts/fetch-tts-model.sh   # .tools/tts/kokoro-multi-lang-v1_0 (380 MB)
 cargo run -p server --bin tomori-server -- --speech-root .
 ```
 
-`TransducerConfig::from_root`, `KokoroConfig::from_root` and `WhisperConfig::from_root` expect this layout. `bash scripts/fetch-asr-model.sh whisper` also fetches Whisper `small.en` (640 MB download) for the benchmark.
+`TransducerConfig::from_root`, `PunctuationConfig::from_root`, `KokoroConfig::from_root` and `WhisperConfig::from_root` expect this layout. `bash scripts/fetch-asr-model.sh whisper` also fetches Whisper `small.en` (640 MB download) for the benchmark.
 
 ## Building and linking
 
@@ -61,7 +62,7 @@ The GPU build of sherpa-onnx is published only as shared libraries. To use it:
    The build script sets an rpath to that directory, so keep the libraries there, or put them on `LD_LIBRARY_PATH`.
 3. Run `tomori-server --speech-root . --speech-provider cuda`. A server built without `speech-shared` refuses `--speech-provider cuda`, because its static libraries contain only the CPU provider.
 
-The CUDA path has not been tested yet. Kokoro always runs on the CPU.
+The CUDA path has not been tested yet. Kokoro and the punctuation model always run on the CPU.
 
 ## Tests
 
@@ -79,7 +80,7 @@ The ignored tests use the models under the repository root. To use models instal
 - the LibriSpeech samples that come with the streaming model;
 - sentences spoken by four Kokoro voices: American and British, female and male.
 
-Streaming models are fed in real time, in 100 ms frames, as the server receives them.
+Streaming models are fed in real time, in 100 ms frames, as the server receives them. The real-time factor is measured by decoding each clip again, directly, as fast as possible. With `--punctuation`, final transcripts are punctuated as the server punctuates them, in both passes, so the real-time factor includes punctuation, and the time each punctuation takes is reported. Word errors ignore case and punctuation.
 
 ```bash
 cargo run --release -p speech --example recognition_benchmark -- --root . \
@@ -101,6 +102,16 @@ Results on an Apple M4 Pro (12 cores), 11 clips totalling 55.5 seconds, measured
 
 Notes on the results:
 
-- The FastConformer's only mistake was "week end" for "weekend". Its transcripts are lowercase and unpunctuated.
+- The FastConformer's only mistake was "week end" for "weekend". Its own transcripts are lowercase and unpunctuated; see below for punctuation.
 - Kroko dropped the last word or two of several clips.
 - NVIDIA's larger Nemotron 0.6B streaming model punctuates, but needed about 3 CPU seconds per audio second here, which is too slow for real time on this CPU.
+
+### Punctuation
+
+Measured on the same machine on 1 November 2026, at load average 55, with `--punctuation`:
+
+- Punctuating a final transcript took 22 ms of wall time on average (max 75 ms) under that load; on its own, the model used 7.5–9 ms of processor time for utterances of 1 to 20 words, and 12 ms for 48 words. In back-to-back runs, the mean final after release was 0.11 s with punctuation (load average 55) and 0.07 s without (load average 150), of which punctuation itself accounts for about 0.02 s and the rest is noise on this busy machine; the table above is from an earlier run.
+- 6 of the 8 Kokoro sentences matched their punctuated reference exactly, such as "Can you explain why the build failed on the Linux machine yesterday?". The other two read "What is the weather, like in Tokyo this weekend?", with a stray comma; one of them also has the recognizer's "week end".
+- The LibriSpeech clips came back as "After early nightfall, the yellow lamps would light up here and there the squalid quarter of the brothels." and "Yet these thoughts affected Hester Prynne less with hope than apprehension.", with the names capitalized.
+- sherpa-onnx's Chinese and English CT-Transformer was faster, about 3 ms for a sentence, but writes Chinese full-width punctuation ("，", "。") and does not restore capitals, so it is not used.
+- Without the probe word described in `src/stt/punctuation.rs`, the CNN-BiLSTM model left the end of most utterances unpunctuated, such as "Run the tests" and "What do you think" without its question mark.

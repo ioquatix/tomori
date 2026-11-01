@@ -214,8 +214,9 @@ no open microphone for talking to other participants without the agent yet (see
 Recognition and synthesis run inside the server through sherpa-onnx, whose
 libraries `scripts/fetch-sherpa-onnx.sh` downloads and checks, and the build
 links. Recognition uses
-a streaming transducer that shows words while you speak; synthesis uses Kokoro.
-The models need about 520 MB in `.tools/`. From the repository root:
+a streaming transducer that shows words while you speak, and a punctuation
+model adds capitals and punctuation to the finished transcript; synthesis uses
+Kokoro. The models need about 560 MB in `.tools/`. From the repository root:
 
 ```sh
 bash scripts/fetch-asr-model.sh
@@ -226,7 +227,10 @@ cargo run -p server --bin tomori-server -- --backend claude-code --speech-root .
 Speech runs on the CPU, including on macOS; see
 [crates/speech/readme.md](crates/speech/readme.md) for CUDA on Linux. Without
 `--speech-root`, or if the recognition model can't load, every utterance fails
-with an error that says so. Replies are spoken with Kokoro, which needs another
+with an error that says so. Without the punctuation model, which
+`scripts/fetch-asr-model.sh` also fetches, transcripts are lowercase and
+unpunctuated, and the server says "Transcript punctuation: unavailable" when it
+starts. Replies are spoken with Kokoro, which needs another
 700 MB; without it the server says "Speech synthesis: off" or "unavailable" when
 it starts, and replies are only shown.
 

@@ -286,7 +286,7 @@ fn transcriber(
                 "Speech recognition: streaming transducer from {} ({provider}).",
                 config.model.display()
             );
-            let transcriber = server::RecognitionTranscriber::new(recognizer);
+            let transcriber = server::RecognitionTranscriber::new(punctuated(recognizer, root));
             engines.stoppers.push(transcriber.stopper());
             Arc::new(transcriber)
         }
@@ -299,6 +299,32 @@ fn transcriber(
             )))
         }
     })
+}
+
+/// `recognizer` with its final transcripts punctuated by the model from `root`, or as it is if that model cannot load.
+#[cfg(feature = "speech")]
+fn punctuated(
+    recognizer: impl speech::StreamingRecognizer + 'static,
+    root: &Path,
+) -> Box<dyn speech::StreamingRecognizer> {
+    use speech::stt::{CnnBilstmPunctuator, Punctuated, PunctuationConfig};
+
+    let config = PunctuationConfig::from_root(root);
+    match CnnBilstmPunctuator::new(&config) {
+        Ok(punctuator) => {
+            eprintln!(
+                "Transcript punctuation: CNN-BiLSTM from {} (cpu).",
+                config.model.display()
+            );
+            Box::new(Punctuated::new(recognizer, punctuator))
+        }
+        Err(error) => {
+            eprintln!(
+                "Transcript punctuation: unavailable ({error}); transcripts are lowercase and unpunctuated."
+            );
+            Box::new(recognizer)
+        }
+    }
 }
 
 #[cfg(not(feature = "speech"))]
