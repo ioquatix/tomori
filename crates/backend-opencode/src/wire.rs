@@ -229,8 +229,12 @@ fn inbox_delivered(data: &Value, session_id: &str) -> Option<Event> {
     if !for_session(data, session_id) {
         return None;
     }
+    // The `inboxID` is the `msg_`-prefixed id we sent in `send_prompt`.
+    // Strip the prefix to recover the server's delivery key.
+    let inbox_id = data.get("inboxID")?.as_str()?;
+    let key = inbox_id.strip_prefix("msg_").unwrap_or(inbox_id);
     Some(Event::Delivered {
-        key: data.get("inboxID")?.as_str()?.to_owned(),
+        key: key.to_owned(),
     })
 }
 

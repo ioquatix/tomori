@@ -220,8 +220,10 @@ pub async fn child_sessions<'scope>(
         .unwrap_or_default())
 }
 
-/// `POST /api/session/:id/prompt`: deliver one user turn. `key` is what the
-/// `session.inbox.delivered` event names when the turn is accepted.
+/// `POST /api/session/:id/prompt`: deliver one user turn. `key` is the
+/// server's delivery key; it is sent to opencode as a `msg_`-prefixed id
+/// (which opencode requires) and recovered from the `inboxID` of the
+/// `session.inbox.delivered` event by stripping the same prefix.
 pub async fn send_prompt<'scope>(
     client: &Client<'scope>,
     resolved: &Resolved,
@@ -231,10 +233,17 @@ pub async fn send_prompt<'scope>(
     cancellation: &Cancellation,
 ) -> Result<(), Failure> {
     let path = format!("/api/session/{}/prompt", urlencoding(session_id));
+    // opencode requires the id to start with "msg_"; the server's key does not,
+    // so prefix it. The prefix is stripped again in `wire::inbox_delivered`
+    // when the `session.inbox.delivered` event's `inboxID` arrives.
+    let message_id = if key.starts_with("msg_") {
+        key.to_owned()
+    } else {
+        format!("msg_{key}")
+    };
     let payload = serde_json::json!({
-        "id": key,
-        "text": text,
-        "delivery": "queue"
+        "id": message_id,
+        "text": text
     });
     let response = exchange(
         client,
