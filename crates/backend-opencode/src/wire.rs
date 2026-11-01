@@ -40,8 +40,16 @@ pub fn event_for(
         "session.text.started" => first_seen(data, session_id, seen_messages),
         "session.text.delta" => text_delta(data, session_id, "delta"),
         "session.reasoning.delta" => text_delta(data, session_id, "delta"),
+        // `session.text.ended` names the message that just finished. It fires
+        // once, and only after the `session.text.started` that already
+        // recorded this id in `seen_messages`, so it must not be gated on
+        // `first_seen` (which would return `None` and swallow the completion).
+        // Without `MessageCompleted` the reply's final unclosed sentence is
+        // never flushed to speech.
         "session.text.ended" => {
-            first_seen(data, session_id, seen_messages)?;
+            if !for_session(data, session_id) {
+                return None;
+            }
             Some(Event::MessageCompleted {
                 message: message_id(data)?,
             })
@@ -418,4 +426,65 @@ pub fn form_answer(answers: &[(String, AnswerValue)]) -> Value {
         object.insert(key.clone(), value);
     }
     Value::Object(object)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn event(
+        value: &Value,
+        session_id: &str,
+        seen: &mut std::collections::HashSet<String>,
+    ) -> Option<Event> {
+        event_for(value, session_id, seen)
+    }
+
+    /// Regression: `session.text.ended` must emit `MessageCompleted` even
+    /// though the matching `session.text.started` already recorded the message
+    /// in `seen_messages`. Previously the arm was gated on `first_seen`, which
+    /// returned `None` for an already-seen id and swallowed the completion — so
+    /// the reply's final unclosed sentence was never flushed to speech.
+    #[test]
+    fn text_ended_emits_message_completed_after_text_started() {
+        let session = "ses_test";
+        let mut seen = std::collections::HashSet::new();
+
+        let started = serde_json::json!({
+            "type": "session.text.started",
+            "data": {
+                "sessionID": session,
+                "assistantMessageID": "msg_1",
+                "ordinal": 0
+            }
+        });
+        assert!(
+            matches!(event(&started, session, &mut seen), Some(Event::MessageStarted { message, role }) if message == "msg_1" && role == Role::Assistant)
+        );
+
+        let delta = serde_json::json!({
+            "type": "session.text.delta",
+            "data": {
+                "sessionID": session,
+                "assistantMessageID": "msg_1",
+                "delta": "pong"
+            }
+        });
+        assert!(
+            matches!(event(&delta, session, &mut seen), Some(Event::TextDelta { message, text }) if message == "msg_1" && text == "pong")
+        );
+
+        let ended = serde_json::json!({
+            "type": "session.text.ended",
+            "data": {
+                "sessionID": session,
+                "assistantMessageID": "msg_1",
+                "delta": "pong"
+            }
+        });
+        assert!(
+            matches!(event(&ended, session, &mut seen), Some(Event::MessageCompleted { message }) if message == "msg_1"),
+            "text.ended must complete the message it names"
+        );
+    }
 }
