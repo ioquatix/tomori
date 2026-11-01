@@ -7,7 +7,7 @@
 
 // Built without any backend, the backend enums are empty and every match on them is vacuous.
 #![cfg_attr(
-    not(any(feature = "fake", feature = "claude-code")),
+    not(any(feature = "fake", feature = "claude-code", feature = "opencode")),
     allow(unused_variables, unused_mut, unreachable_code)
 )]
 
@@ -26,11 +26,15 @@ use server::{Backends, NullTranscriber, Server, Transcriber, WorkspaceRoots};
 const USAGE: &str = "Usage: tomori-server [--bind ADDRESS] [--backend NAME]... [--speech-root PATH]
                      [--speech-provider NAME] [--name NAME] [--no-advertise] [--keepalive-interval SECONDS]
                      [--keepalive-timeout SECONDS] [--request-timeout SECONDS]
-                     [--workspace-root PATH]... [--max-spaces COUNT]
+                     [--workspace-root PATH]... [--max-spaces COUNT] [--opencode-url URL]
 
 Options:
   --bind ADDRESS       Listen address (default 0.0.0.0:8765).
-  --backend NAME       Offer a backend; repeat for several. Available: fake, claude-code.
+  --backend NAME       Offer a backend; repeat for several. Available: fake, claude-code,
+                       opencode.
+  --opencode-url URL   Where the opencode backend reaches its `opencode serve` process. Defaults
+                       to the OPENCODE_URL environment variable, then the `opencode serve
+                       --service` registration file, then http://127.0.0.1:4096.
   --speech-root PATH   The directory holding .tools/ with the speech models; see
                        crates/speech/readme.md. Without it, there is no speech recognition or
                        synthesis.
@@ -57,6 +61,7 @@ Options:
 struct Arguments {
     bind: SocketAddr,
     backends: Vec<String>,
+    opencode_url: Option<String>,
     speech_root: Option<PathBuf>,
     speech_provider: String,
     name: Option<String>,
@@ -83,6 +88,7 @@ fn parse(mut arguments: impl Iterator<Item = String>) -> Result<Arguments, Strin
     let mut parsed = Arguments {
         bind: SocketAddr::from(([0, 0, 0, 0], protocol::DEFAULT_PORT)),
         backends: Vec::new(),
+        opencode_url: None,
         speech_root: None,
         speech_provider: "cpu".to_owned(),
         name: None,
@@ -103,6 +109,9 @@ fn parse(mut arguments: impl Iterator<Item = String>) -> Result<Arguments, Strin
             "--backend" => parsed
                 .backends
                 .push(arguments.next().ok_or("--backend needs a name")?),
+            "--opencode-url" => {
+                parsed.opencode_url = Some(arguments.next().ok_or("--opencode-url needs a URL")?)
+            }
             "--speech-root" => {
                 parsed.speech_root = Some(
                     arguments
@@ -219,20 +228,30 @@ fn advertise(arguments: &Arguments, address: SocketAddr) -> Option<discovery::Ad
     }
 }
 
-fn backend(name: &str) -> Result<server::AnyBackend, String> {
+#[cfg_attr(not(feature = "opencode"), allow(unused_variables))]
+fn backend(name: &str, opencode_url: Option<&str>) -> Result<server::AnyBackend, String> {
     match name {
         #[cfg(feature = "fake")]
         "fake" => Ok(server::fake::FakeBackend::new().into()),
         #[cfg(feature = "claude-code")]
         "claude-code" => Ok(backend_claude_code::ClaudeCode::new(Default::default()).into()),
+        #[cfg(feature = "opencode")]
+        "opencode" => Ok(backend_opencode::OpenCode::new(backend_opencode::Config {
+            url: opencode_url.map(str::to_owned),
+        })
+        .into()),
+        #[cfg(not(feature = "opencode"))]
+        "opencode" => {
+            Err("the opencode backend needs a server built with the opencode feature".to_owned())
+        }
         other => Err(format!("unknown backend {other:?}")),
     }
 }
 
-fn backends(names: &[String]) -> Result<Backends, String> {
+fn backends(names: &[String], opencode_url: Option<&str>) -> Result<Backends, String> {
     let mut backends = Backends::new();
     for name in names {
-        backends = backends.with(backend(name)?);
+        backends = backends.with(backend(name, opencode_url)?);
     }
     Ok(backends)
 }
@@ -381,7 +400,7 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let backends = match backends(&arguments.backends) {
+    let backends = match backends(&arguments.backends, arguments.opencode_url.as_deref()) {
         Ok(backends) => backends,
         Err(message) => {
             eprintln!("{message}");

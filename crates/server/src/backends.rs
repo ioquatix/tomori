@@ -7,7 +7,7 @@
 
 // Built without any backend, the backend enums are empty and every match on them is vacuous.
 #![cfg_attr(
-    not(any(feature = "fake", feature = "claude-code")),
+    not(any(feature = "fake", feature = "claude-code", feature = "opencode")),
     allow(unused_variables, unused_mut, unreachable_code)
 )]
 
@@ -20,6 +20,8 @@ use backend::{
 use crate::fake::{FakeBackend, FakeSession};
 #[cfg(feature = "claude-code")]
 use backend_claude_code::{ClaudeCode, ClaudeCodeSession};
+#[cfg(feature = "opencode")]
+use backend_opencode::{OpenCode, OpenCodeSession};
 
 /// One of the backends compiled into this server.
 pub enum AnyBackend {
@@ -27,6 +29,8 @@ pub enum AnyBackend {
     Fake(FakeBackend),
     #[cfg(feature = "claude-code")]
     ClaudeCode(ClaudeCode),
+    #[cfg(feature = "opencode")]
+    OpenCode(OpenCode),
 }
 
 /// A session of one of the backends compiled into this server.
@@ -37,6 +41,8 @@ pub enum AnySession {
     Fake(FakeSession),
     #[cfg(feature = "claude-code")]
     ClaudeCode(ClaudeCodeSession),
+    #[cfg(feature = "opencode")]
+    OpenCode(OpenCodeSession),
 }
 
 /// Forward a method call to the concrete value inside an [`AnyBackend`] or [`AnySession`].
@@ -47,6 +53,8 @@ macro_rules! dispatch {
             Self::Fake(ref $inner) => $call,
             #[cfg(feature = "claude-code")]
             Self::ClaudeCode(ref $inner) => $call,
+            #[cfg(feature = "opencode")]
+            Self::OpenCode(ref $inner) => $call,
         }
     };
 }
@@ -76,6 +84,20 @@ impl From<ClaudeCode> for AnyBackend {
 impl From<ClaudeCodeSession> for AnySession {
     fn from(session: ClaudeCodeSession) -> Self {
         Self::ClaudeCode(session)
+    }
+}
+
+#[cfg(feature = "opencode")]
+impl From<OpenCode> for AnyBackend {
+    fn from(backend: OpenCode) -> Self {
+        Self::OpenCode(backend)
+    }
+}
+
+#[cfg(feature = "opencode")]
+impl From<OpenCodeSession> for AnySession {
+    fn from(session: OpenCodeSession) -> Self {
+        Self::OpenCode(session)
     }
 }
 
