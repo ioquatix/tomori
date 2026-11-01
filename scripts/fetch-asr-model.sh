@@ -24,8 +24,14 @@ fetch() {
         fi
         mv "$archive.part" "$archive"
     fi
-    tar -xjf "$archive" -C "$root"
-    rm "$archive"
+    # Extract beside the model and move it into place, so an interrupted extraction never leaves a partial model that
+    # the checks below would accept and the server would fail to load.
+    local staging="$root/.extract-$name"
+    rm -rf "$staging" && mkdir "$staging"
+    tar -xjf "$archive" -C "$staging"
+    rm -rf "${root:?}/$name"
+    mv "$staging/$name" "$root/$name"
+    rm -rf "$staging" "$archive"
 }
 
 # Check an extracted file `$1` against `$2`.
@@ -46,6 +52,8 @@ echo "Streaming recognition model ready in $root/$model"
 punctuation=sherpa-onnx-online-punct-en-2024-08-06
 if [[ ! -s "$root/$punctuation/model.int8.onnx" || ! -s "$root/$punctuation/bpe.vocab" ]]; then
     fetch punctuation-models "$punctuation" 9f5e5a72c7d2829635bd074fce92b6bbd5b78da8a52e7ad8ed1be933f366b99d
+    # The server uses the int8 model only.
+    rm -f "$root/$punctuation/model.onnx"
 fi
 echo "Punctuation model ready in $root/$punctuation"
 
