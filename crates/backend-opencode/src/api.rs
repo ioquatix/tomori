@@ -399,6 +399,9 @@ pub struct SnapshotParts {
     pub permissions: Vec<Value>,
     pub forms: Vec<Value>,
     pub children: Vec<Value>,
+    /// Whether the session is currently running a turn, derived from the
+    /// session record's `time.busy` / `time.idle` timestamps.
+    pub busy: bool,
 }
 
 impl SnapshotParts {
@@ -432,8 +435,17 @@ impl SnapshotParts {
         session_id: &str,
         cancellation: &Cancellation,
     ) -> Result<Self, Failure> {
-        // Validate the session exists before fetching its parts.
-        let _info = session_info(client, resolved, session_id, cancellation).await?;
+        // Validate the session exists before fetching its parts, and record
+        // whether it is currently running a turn (time.busy after time.idle).
+        let info = session_info(client, resolved, session_id, cancellation).await?;
+        let busy = info
+            .get("time")
+            .and_then(|time| {
+                let busy = time.get("busy")?.as_u64()?;
+                let idle = time.get("idle")?.as_u64()?;
+                Some(busy > idle)
+            })
+            .unwrap_or(false);
         let messages = session_messages(client, resolved, session_id, cancellation).await?;
         let permissions = open_permissions(client, resolved, session_id, cancellation).await?;
         let forms = open_forms(client, resolved, session_id, cancellation).await?;
@@ -443,6 +455,7 @@ impl SnapshotParts {
             permissions,
             forms,
             children,
+            busy,
         })
     }
 }

@@ -626,7 +626,7 @@ async fn snapshot(
     let parts = api::SnapshotParts::fetch(client, resolved, id, cancellation).await?;
     let messages = snapshot_messages(&parts.messages);
     Ok(Snapshot {
-        busy: None,
+        busy: Some(parts.busy),
         messages,
         permission: parts.permission(),
         question: parts.question(),
