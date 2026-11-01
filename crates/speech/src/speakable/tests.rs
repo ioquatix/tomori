@@ -574,3 +574,34 @@ fn streams_a_long_message_block_by_block() {
     segments += finish(&mut speakable).len();
     assert_eq!(segments, 2_000);
 }
+
+#[test]
+fn identifies_rules_definitions_and_html_blocks() {
+    let source = "[r]: http://r.example\n\n---\n\n<div>\nhidden\n</div>\n\nText.\n";
+    let blocks = one_shot_blocks(source, &SpeakableOptions::default());
+    let kinds: Vec<_> = blocks.iter().map(|block| block.kind).collect();
+    assert_eq!(
+        kinds,
+        [
+            BlockKind::Definition,
+            BlockKind::Rule,
+            BlockKind::Html,
+            BlockKind::Paragraph
+        ]
+    );
+    assert_eq!(sentences(blocks).collect::<Vec<_>>(), ["Text."]);
+}
+
+#[test]
+fn a_paragraph_that_leads_into_a_list_waits_for_the_list() {
+    let mut speakable = Speakable::new();
+    assert!(push(&mut speakable, "Here is how:\n- First.\n- Second.\n\n").is_empty());
+    let blocks = speakable.push("Done.\n");
+    let kinds: Vec<_> = blocks.iter().map(|block| block.kind).collect();
+    assert_eq!(kinds, [BlockKind::Paragraph, BlockKind::List]);
+    assert_eq!(
+        sentences(blocks).collect::<Vec<_>>(),
+        ["Here is how:", "First.", "Second."]
+    );
+    assert_eq!(finish(&mut speakable), ["Done."]);
+}

@@ -5,7 +5,7 @@
 //!
 //! Feed the message's Markdown deltas to [`Speakable::push`] and call [`Speakable::finish`] when the message completes. Each returns the document-level [`Block`]s that closed, in order, each with its sentences to speak; every block is returned exactly once. See `design/speech.md`.
 //!
-//! A block is returned only once no later text can change it: base-markdown's [`IncrementalParser`] emits a document-level block when it and every block before it are closed. A paragraph is therefore spoken once a blank line or the next block follows it, and a list or block quote once it ends, all at once. Tables, code blocks and lists arrive whole, with their events, so that a later step can show or run them as well as speak them.
+//! A block is returned only once no later text can change it: base-markdown's [`IncrementalParser`] emits a document-level block when it and every block before it are closed. A paragraph followed by a blank line is spoken at the blank line. A block that follows the previous one without a blank line, such as a list, fence or heading directly after a paragraph, does not yet prove that the previous block ended, so both wait until the next block after them starts. A list, which may continue after a blank line, waits until the first line of the next block, and the last block of a message until it finishes. Tables, code blocks and lists arrive whole, with their events, so that a later step can show or run them as well as speak them.
 //!
 //! Paragraph, heading and list item text is spoken, with emphasis markers removed and links read by their text. Code blocks, tables, raw HTML, images, footnotes and bare URLs are not.
 //!
@@ -53,7 +53,7 @@ pub enum BlockKind {
     /// A list with all of its items.
     List,
     Table,
-    /// A fenced or indented code block, or a math block.
+    /// A fenced or indented code block.
     Code,
     /// A raw HTML block.
     Html,
@@ -62,7 +62,7 @@ pub enum BlockKind {
     /// A link reference definition.
     Definition,
     FootnoteDefinition,
-    /// Anything else, such as frontmatter.
+    /// Any other block, for constructs that GitHub Flavored Markdown parsing does not currently produce.
     Other,
 }
 
@@ -70,9 +70,9 @@ pub enum BlockKind {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Block {
     pub kind: BlockKind,
-    /// The block's byte range in [`Speakable::source`].
+    /// The block's byte range in [`Speakable::source`]. It may include trailing line endings and blank lines, depending on the kind of block, so trim it before showing it.
     pub span: Range<usize>,
-    /// The block's events, from its start to its end, including nested blocks. Text values refer to [`Speakable::source`].
+    /// The block's events, from its start to its end, including nested blocks. Text values refer to [`Speakable::source`]. The event types are those of the re-exported [`crate::base_markdown`].
     pub events: Vec<Event<'static>>,
     /// The sentences to speak for the block, in order; empty when nothing in it is spoken.
     pub sentences: Vec<String>,

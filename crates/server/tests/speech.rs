@@ -674,8 +674,8 @@ fn queueing_and_recording_during_a_reply_do_not_cut_off_speech() {
         "And it lived happily ever after.",
     ];
     let message = session.start_message();
-    // A blank line closes the first paragraph, so it is spoken while the reply continues.
-    session.delta(&message, &format!("{} {}\n\n", sentences[0], sentences[1]));
+    // A blank line closes the first paragraph, so it is spoken while the reply continues. It holds one sentence, so that no later announcement arrives while the test waits for other messages.
+    session.delta(&message, &format!("{}\n\n", sentences[0]));
 
     // Speech has started; now Bob queues input and Ada records while it plays.
     let started = hear(&bob, 1);
@@ -694,7 +694,10 @@ fn queueing_and_recording_during_a_reply_do_not_cut_off_speech() {
         utterance: "u3".into(),
     });
 
-    session.delta(&message, &format!("{} {}", sentences[2], sentences[3]));
+    session.delta(
+        &message,
+        &format!("{} {} {}", sentences[1], sentences[2], sentences[3]),
+    );
     session.emit(backend::Event::MessageCompleted {
         message: message.clone(),
     });

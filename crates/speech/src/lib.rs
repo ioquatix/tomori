@@ -15,6 +15,8 @@ mod stop;
 pub mod stt;
 pub mod tts;
 
+/// The Markdown parser whose events [`Block`] carries.
+pub use base_markdown;
 pub use error::Error;
 pub use speakable::{Block, BlockKind, Speakable, SpeakableOptions};
 pub use stop::Stopper;

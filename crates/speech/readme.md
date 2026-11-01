@@ -26,7 +26,15 @@ Kokoro reports each sentence as soon as it is generated.
 - its `events`, from its start to its end, including nested blocks, so that a table, code block or list can be shown or run as a unit;
 - its `sentences`, the speakable text split at sentence boundaries, and long sentences at a clause or word break, so that synthesis of the first starts at once.
 
-A block is returned only once no later text can change it: a paragraph when a blank line or another clean block follows it, a heading at the end of its line unless it interrupts a paragraph, a list or block quote when it ends, and the last block when the message finishes. A block that interrupts a paragraph without a blank line, such as a heading or fence, does not yet prove that the paragraph ended, so both wait for the next block to start. A table continues until a blank line. Lists are released whole. The server speaks the sentences and does not use the blocks' structure yet.
+A block is returned only once no later text can change it:
+
+- A paragraph or block quote followed by a blank line is returned at the blank line, and a heading or fenced code block after a blank line at the end of its last line.
+- A block that follows the previous one without a blank line, such as a list, fence or heading directly after a paragraph, or a heading directly after a list, does not yet prove that the previous block ended, so both wait until the next block after them starts. A reply that opens with "Here's how:" and goes straight into a list is therefore spoken from the start only once the list has ended.
+- A list may continue after a blank line, so it waits for the first line of the next block, and is returned whole.
+- A table continues with every following plain line as a row, until a blank line or another kind of block.
+- The last block of a message is returned when the message finishes.
+
+`Block::span` may include trailing line endings, depending on the kind of block. The server speaks the sentences and does not use the blocks' structure yet.
 
 Paragraph, heading, list item and block quote text is spoken, with emphasis markers removed and links read by their text. Code blocks (or `SpeakableOptions::code_notice` in their place), tables, raw HTML, images, footnote definitions and bare URLs are not. A reference or footnote definition applies only to uses in its own or a later block; an earlier use is read by its text.
 
