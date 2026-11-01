@@ -11,6 +11,8 @@ mod backends;
 mod connection;
 mod hub;
 mod limits;
+#[cfg(feature = "speech")]
+pub mod offline;
 mod outbox;
 mod projection;
 mod queue;
@@ -32,6 +34,8 @@ pub mod test_support;
 pub use application::Application;
 pub use backends::{AnyBackend, AnySession, Backends};
 pub use hub::CLOSED_SPACES;
+#[cfg(feature = "speech")]
+pub use offline::OfflineTranscriber;
 #[cfg(feature = "speech")]
 pub use recognition::RecognitionTranscriber;
 pub use server::{DEFAULT_PARTICIPANT_RETENTION, Server, bind};
