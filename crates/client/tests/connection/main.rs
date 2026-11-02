@@ -48,7 +48,7 @@ fn wait_connected(client: &Client) -> u32 {
     match wait_for(client, |event| {
         matches!(event, Event::State(ConnectionState::Connected { .. }))
     }) {
-        Event::State(ConnectionState::Connected { source, server }) => {
+        Event::State(ConnectionState::Connected { source, server, .. }) => {
             assert_eq!(server, "mini");
             source
         }

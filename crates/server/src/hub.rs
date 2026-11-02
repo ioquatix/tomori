@@ -8,7 +8,7 @@
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, Weak};
+use std::sync::{Arc, Mutex, MutexGuard, RwLock, Weak};
 use std::time::{Duration, Instant};
 
 use backend::{AnswerValue, Backend, ErrorKind, Event, Prompt, Snapshot};
@@ -16,7 +16,7 @@ use base_scheduler::Cancellation;
 use event_listener::{Event as Notify, EventListener};
 use protocol::{
     AudioFrame, ClientMessage, Frame, FrameKind, Gate, Keepalive, PROTOCOL_VERSION, Participant,
-    ServerMessage,
+    ServerMessage, WorkspaceRoot,
 };
 
 use crate::backends::Backends;
@@ -64,13 +64,27 @@ pub struct CreateRequest {
     pub creator_space: Option<String>,
 }
 
+/// A task for the supervisor, which runs outside the hub lock so it can call backends.
+#[derive(Debug)]
+pub enum Job {
+    Create(CreateRequest),
+    /// List the existing sessions of `backend` in `directory` for `participant`.
+    ListSessions {
+        participant: String,
+        backend: String,
+        directory: String,
+    },
+}
+
 pub struct Hub {
     state: Mutex<HubState>,
     pub(crate) backends: Backends,
     transcriber: Arc<dyn Transcriber>,
-    jobs: async_channel::Sender<CreateRequest>,
+    jobs: async_channel::Sender<Job>,
     /// Spaces whose sessions are starting or running, against the limit.
     slots: Arc<SpaceSlots>,
+    /// The directories a space may run in, sent to clients in `Welcome` so they can choose one without typing a path.
+    roots: RwLock<Vec<WorkspaceRoot>>,
     /// Notified when a space defers a snapshot, so that the server's snapshot timer can wake for it.
     deferred_snapshot: Notify,
     this: Weak<Hub>,
@@ -416,7 +430,8 @@ impl Hub {
     pub fn new(
         backends: Backends,
         transcriber: Arc<dyn Transcriber>,
-        jobs: async_channel::Sender<CreateRequest>,
+        jobs: async_channel::Sender<Job>,
+        roots: Vec<WorkspaceRoot>,
         slots: Arc<SpaceSlots>,
     ) -> Arc<Self> {
         Arc::new_cyclic(|this| Self {
@@ -428,9 +443,18 @@ impl Hub {
             transcriber,
             jobs,
             slots,
+            roots: RwLock::new(roots),
             deferred_snapshot: Notify::new(),
             this: this.clone(),
         })
+    }
+
+    /// Set the workspace roots a client can choose from, as in [`crate::Server::with_workspace_roots`].
+    pub(crate) fn set_roots(&self, roots: Vec<WorkspaceRoot>) {
+        *self
+            .roots
+            .write()
+            .expect("workspace roots are never left poisoned") = roots;
     }
 
     fn lock(&self) -> MutexGuard<'_, HubState> {
@@ -743,10 +767,18 @@ impl Hub {
             .expect("checked above");
         record.participant = Some(participant.clone());
         record.liveness.greeted = true;
+        let backends = self.backends.info();
+        let roots = self
+            .roots
+            .read()
+            .expect("workspace roots are never left poisoned")
+            .clone();
         outbox.message(ServerMessage::Welcome {
             protocol: PROTOCOL_VERSION,
             server: crate::SERVER_NAME.to_owned(),
             source,
+            backends,
+            roots,
         });
         match rejoin.filter(|space| state.space(space).is_some()) {
             Some(space) => state.join(&participant, &space),
@@ -824,7 +856,41 @@ impl Hub {
                     creator: participant.to_owned(),
                     creator_space: space.map(str::to_owned),
                 };
-                if self.jobs.try_send(request).is_err() {
+                if self.jobs.try_send(Job::Create(request)).is_err() {
+                    state.error(participant, "The server is shutting down.");
+                }
+            }
+            ClientMessage::ListSessions { backend, directory } => {
+                let checked = limits::check(&backend, limits::NAME_BYTES, "backend")
+                    .and_then(|()| limits::check(&directory, limits::DIRECTORY_BYTES, "directory"));
+                if let Err(error) = checked {
+                    state.error(participant, error);
+                    return;
+                }
+                let Some(found) = self.backends.get(&backend) else {
+                    let names: Vec<&str> = self.backends.names().collect();
+                    state.error(
+                        participant,
+                        format!("Unknown backend; available: {}.", names.join(", ")),
+                    );
+                    return;
+                };
+                if !found.capabilities().attach {
+                    state.error(
+                        participant,
+                        format!("The {backend} backend cannot list existing sessions."),
+                    );
+                    return;
+                }
+                if self
+                    .jobs
+                    .try_send(Job::ListSessions {
+                        participant: participant.to_owned(),
+                        backend,
+                        directory,
+                    })
+                    .is_err()
+                {
                     state.error(participant, "The server is shutting down.");
                 }
             }
@@ -1320,6 +1386,31 @@ impl Hub {
         self.lock().error(creator, error);
     }
 
+    /// Report a backend's session list to `participant`, its failures as an error.
+    pub(crate) fn sessions(
+        &self,
+        participant: &str,
+        result: Result<Vec<backend::SessionSummary>, String>,
+    ) {
+        let message = match result {
+            Ok(sessions) => ServerMessage::Sessions {
+                sessions: sessions
+                    .into_iter()
+                    .map(|session| protocol::SessionSummary {
+                        id: session.id,
+                        title: session.title,
+                        directory: session.directory,
+                    })
+                    .collect(),
+            },
+            Err(error) => ServerMessage::Error {
+                error: limits::truncate(&error, limits::ERROR_BYTES),
+                space: None,
+            },
+        };
+        self.lock().send(participant, message);
+    }
+
     pub(crate) fn space_event(&self, space: &str, event: Event) {
         let mut state = self.lock();
         let Some(record) = state.space_mut(space) else {
@@ -1557,6 +1648,7 @@ mod tests {
             Backends::new(),
             Arc::new(NullTranscriber::new()),
             jobs,
+            Vec::new(),
             SpaceSlots::new(crate::workspace::DEFAULT_MAX_SPACES),
         )
     }

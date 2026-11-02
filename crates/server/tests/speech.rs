@@ -175,6 +175,15 @@ fn speaking_server(backend: FakeBackend, synthesizer: FakeSynthesizer) -> TestSe
     })
 }
 
+/// A speaking server that splits each closed block into one segment per sentence, so a test can assert the per-sentence announcements the block mode does not produce.
+fn speaking_server_sentence(backend: FakeBackend, synthesizer: FakeSynthesizer) -> TestServer {
+    TestServer::with_server(backend, move |backends| {
+        Server::new(backends, Arc::new(TextTranscriber::default()))
+            .with_synthesizer(synthesizer)
+            .with_voice_mode(server::SpeechMode::Sentence)
+    })
+}
+
 /// Two participants in one space, created by Ada.
 fn pair(server: &TestServer) -> (TestClient, TestClient) {
     let mut ada = server.connect("ada", "Ada");
@@ -615,7 +624,7 @@ fn a_lost_frame_fails_a_streaming_utterance() {
 #[test]
 fn a_streamed_markdown_reply_is_spoken_to_every_participant_without_code() {
     let synthesizer = FakeSynthesizer::default();
-    let server = speaking_server(FakeBackend::manual(), synthesizer.clone());
+    let server = speaking_server_sentence(FakeBackend::manual(), synthesizer.clone());
     let (mut ada, bob) = pair(&server);
 
     ada.say("u1", "how do I run it?");
@@ -661,7 +670,7 @@ fn a_streamed_markdown_reply_is_spoken_to_every_participant_without_code() {
 
 #[test]
 fn queueing_and_recording_during_a_reply_do_not_cut_off_speech() {
-    let server = speaking_server(FakeBackend::manual(), FakeSynthesizer::default());
+    let server = speaking_server_sentence(FakeBackend::manual(), FakeSynthesizer::default());
     let (mut ada, mut bob) = pair(&server);
 
     ada.say("u1", "tell me a story");
@@ -847,7 +856,7 @@ fn the_client_player_plays_the_spoken_reply() {
 #[test]
 fn a_crashed_synthesizer_is_reported_once_as_unavailable() {
     let synthesizer = FakeSynthesizer::default();
-    let server = speaking_server(FakeBackend::manual(), synthesizer.clone());
+    let server = speaking_server_sentence(FakeBackend::manual(), synthesizer.clone());
     let (mut ada, mut bob) = pair(&server);
 
     ada.say("u1", "speak up");

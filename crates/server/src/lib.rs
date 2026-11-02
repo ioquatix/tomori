@@ -11,6 +11,8 @@ mod backends;
 mod connection;
 mod hub;
 mod limits;
+#[cfg(feature = "speech")]
+pub mod offline;
 mod outbox;
 mod projection;
 mod queue;
@@ -33,9 +35,12 @@ pub use application::Application;
 pub use backends::{AnyBackend, AnySession, Backends};
 pub use hub::CLOSED_SPACES;
 #[cfg(feature = "speech")]
+pub use offline::OfflineTranscriber;
+#[cfg(feature = "speech")]
 pub use recognition::RecognitionTranscriber;
 pub use server::{DEFAULT_PARTICIPANT_RETENTION, Server, bind};
 pub use transcriber::{NullTranscriber, Transcriber, TranscriptSink, UtteranceId};
+pub use voice::SpeechMode;
 pub use workspace::{
     DEFAULT_MAX_SPACES, DIRECTORY_UNAVAILABLE, MAX_RESOLVING, Unavailable, WorkspaceRoots,
 };

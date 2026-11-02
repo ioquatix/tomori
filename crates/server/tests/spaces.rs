@@ -39,6 +39,58 @@ fn space_identifiers_are_not_reused_by_a_later_server_run() {
 }
 
 #[test]
+fn listing_the_backend_sessions_returns_the_created_ones() {
+    let server = TestServer::start();
+    let mut ada = server.connect("ada", "Ada");
+    // A created session is listed for the directory it ran in.
+    ada.create_space("First");
+    ada.create_space("Second");
+
+    ada.send(&ClientMessage::ListSessions {
+        backend: "fake".into(),
+        directory: "/tmp".into(),
+    });
+    let sessions = ada.wait_for(|message| match message {
+        ServerMessage::Sessions { sessions } => Some(sessions.clone()),
+        _ => None,
+    });
+    let titles: Vec<&str> = sessions
+        .iter()
+        .map(|session| session.title.as_str())
+        .collect();
+    assert_eq!(titles, vec!["First", "Second"]);
+    assert!(sessions.iter().all(|session| session.directory == "/tmp"));
+
+    // A directory that resolves, beneath a root, but holds no sessions lists none.
+    let empty_dir =
+        std::env::temp_dir().join(format!("tomori-list-sessions-empty-{}", std::process::id()));
+    std::fs::create_dir_all(&empty_dir).unwrap();
+    let empty_dir = empty_dir.canonicalize().unwrap();
+    ada.send(&ClientMessage::ListSessions {
+        backend: "fake".into(),
+        directory: empty_dir.to_string_lossy().into_owned(),
+    });
+    let empty = ada.wait_for(|message| match message {
+        ServerMessage::Sessions { sessions } => Some(sessions.clone()),
+        _ => None,
+    });
+    assert!(empty.is_empty());
+    std::fs::remove_dir(&empty_dir).ok();
+}
+
+#[test]
+fn listing_sessions_refuses_unknown_and_non_attaching_backends() {
+    let server = TestServer::start();
+    let mut ada = server.connect("ada", "Ada");
+
+    ada.send(&ClientMessage::ListSessions {
+        backend: "missing".into(),
+        directory: "/tmp".into(),
+    });
+    assert_eq!(ada.error(), "Unknown backend; available: fake.");
+}
+
+#[test]
 fn a_refused_join_names_the_space() {
     let server = TestServer::start();
     let mut ada = server.connect("ada", "Ada");

@@ -54,6 +54,18 @@ where
             message: error.to_string(),
         })?;
     }
+    // Opt out of connection reuse: opencode closes idle keep-alive connections
+    // after five seconds, and `base-http-client` pools and reuses connections
+    // without retrying. A request that reuses a connection opencode already
+    // dropped reads EOF and fails with "truncated HTTP/1 message" (base-rs/
+    // base-http#36). `Connection: close` keeps the client from reusing: each
+    // call gets a fresh connection, which stays valid for the single exchange.
+    if let Ok(field) = Field::new("connection", "close") {
+        request.fields.append(field).map_err(|error| Failure {
+            status: None,
+            message: error.to_string(),
+        })?;
+    }
     Ok(client.call(request, cancellation).await?)
 }
 
@@ -208,8 +220,10 @@ pub async fn child_sessions<'scope>(
         .unwrap_or_default())
 }
 
-/// `POST /api/session/:id/prompt`: deliver one user turn. `key` is what the
-/// `session.inbox.delivered` event names when the turn is accepted.
+/// `POST /api/session/:id/prompt`: deliver one user turn. `key` is the
+/// server's delivery key; it is sent to opencode as a `msg_`-prefixed id
+/// (which opencode requires) and recovered from the `inboxID` of the
+/// `session.inbox.delivered` event by stripping the same prefix.
 pub async fn send_prompt<'scope>(
     client: &Client<'scope>,
     resolved: &Resolved,
@@ -219,10 +233,17 @@ pub async fn send_prompt<'scope>(
     cancellation: &Cancellation,
 ) -> Result<(), Failure> {
     let path = format!("/api/session/{}/prompt", urlencoding(session_id));
+    // opencode requires the id to start with "msg_"; the server's key does not,
+    // so prefix it. The prefix is stripped again in `wire::inbox_delivered`
+    // when the `session.inbox.delivered` event's `inboxID` arrives.
+    let message_id = if key.starts_with("msg_") {
+        key.to_owned()
+    } else {
+        format!("msg_{key}")
+    };
     let payload = serde_json::json!({
-        "id": key,
-        "text": text,
-        "delivery": "queue"
+        "id": message_id,
+        "text": text
     });
     let response = exchange(
         client,
@@ -378,6 +399,9 @@ pub struct SnapshotParts {
     pub permissions: Vec<Value>,
     pub forms: Vec<Value>,
     pub children: Vec<Value>,
+    /// Whether the session is currently running a turn, derived from the
+    /// session record's `time.busy` / `time.idle` timestamps.
+    pub busy: bool,
 }
 
 impl SnapshotParts {
@@ -411,8 +435,17 @@ impl SnapshotParts {
         session_id: &str,
         cancellation: &Cancellation,
     ) -> Result<Self, Failure> {
-        // Validate the session exists before fetching its parts.
-        let _info = session_info(client, resolved, session_id, cancellation).await?;
+        // Validate the session exists before fetching its parts, and record
+        // whether it is currently running a turn (time.busy after time.idle).
+        let info = session_info(client, resolved, session_id, cancellation).await?;
+        let busy = info
+            .get("time")
+            .and_then(|time| {
+                let busy = time.get("busy")?.as_u64()?;
+                let idle = time.get("idle")?.as_u64()?;
+                Some(busy > idle)
+            })
+            .unwrap_or(false);
         let messages = session_messages(client, resolved, session_id, cancellation).await?;
         let permissions = open_permissions(client, resolved, session_id, cancellation).await?;
         let forms = open_forms(client, resolved, session_id, cancellation).await?;
@@ -422,8 +455,26 @@ impl SnapshotParts {
             permissions,
             forms,
             children,
+            busy,
         })
     }
+}
+
+/// The session record's running state, from its `time.busy` / `time.idle`
+/// timestamps: running when the last turn started after its last end.
+pub async fn session_running<'scope>(
+    client: &Client<'scope>,
+    resolved: &Resolved,
+    session_id: &str,
+    cancellation: &Cancellation,
+) -> Result<Option<bool>, Failure> {
+    let info = session_info(client, resolved, session_id, cancellation).await?;
+    let running = info.get("time").and_then(|time| {
+        let busy = time.get("busy")?.as_u64()?;
+        let idle = time.get("idle")?.as_u64()?;
+        Some(busy > idle)
+    });
+    Ok(running)
 }
 
 /// Percent-encode the segment of a path: ids and directories are opaque.

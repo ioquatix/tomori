@@ -15,6 +15,7 @@ use backend::{
     AnswerValue, Backend, Capabilities, Decision, Event, Prompt, Result, Session, SessionSpec,
     SessionSummary, Snapshot,
 };
+use protocol::BackendInfo;
 
 #[cfg(feature = "fake")]
 use crate::fake::{FakeBackend, FakeSession};
@@ -182,5 +183,16 @@ impl Backends {
 
     pub fn names(&self) -> impl Iterator<Item = &str> {
         self.backends.iter().map(|backend| backend.name())
+    }
+
+    /// The backends, for a client to show: their name and whether existing sessions can be attached.
+    pub fn info(&self) -> Vec<BackendInfo> {
+        self.backends
+            .iter()
+            .map(|backend| BackendInfo {
+                name: backend.name().to_owned(),
+                attach: backend.capabilities().attach,
+            })
+            .collect()
     }
 }

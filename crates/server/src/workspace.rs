@@ -106,6 +106,25 @@ impl WorkspaceRoots {
         &self.roots
     }
 
+    /// The roots, as sent to a client in `Welcome`: each canonical path with a short label, its final component, for choosing without typing a path. A root whose name is not UTF-8 is omitted.
+    pub fn to_protocol(&self) -> Vec<protocol::WorkspaceRoot> {
+        self.roots
+            .iter()
+            .filter_map(|root| {
+                root.to_str().map(|path| {
+                    let label = root
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or(path);
+                    protocol::WorkspaceRoot {
+                        path: path.to_owned(),
+                        label: label.to_owned(),
+                    }
+                })
+            })
+            .collect()
+    }
+
     /// Refuse `directory` without touching the file system unless, with `.` and `..` applied to the path as written, it is a root or lies beneath one, as configured or in canonical form. This keeps the file system calls of [`resolve`](Self::resolve) within the roots, so that a client cannot make the server wait on an arbitrary path, such as a hung network mount. It only narrows what is checked: [`resolve`](Self::resolve) still decides.
     pub fn check(&self, directory: &str) -> Result<(), Unavailable> {
         let Some(normalized) = normalize(Path::new(directory)) else {
