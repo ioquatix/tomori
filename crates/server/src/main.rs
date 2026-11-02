@@ -45,6 +45,9 @@ Options:
                        How utterances are transcribed: streaming (default, a transducer that reports
                        words as you speak) or offline (a whole-clip model, more accurate, that reports
                        the transcript a couple of seconds after you stop).
+  --speech-segmentation NAME
+                       How a reply is spoken, by document-level block: block (default, a whole block
+                       in one go) or sentence (each sentence separately, so a long block starts sooner).
   --name NAME          The name clients list for this server (default: the host name).
   --no-advertise       Do not advertise the server with Bonjour (_tomori._tcp); clients must enter
                        its address.
@@ -70,6 +73,8 @@ struct Arguments {
     speech_provider: String,
     /// How utterances are transcribed: the streaming transducer, or the offline (whole-clip) model.
     speech_backend: String,
+    /// How a space's closed blocks are spoken: one segment per block, or one per sentence.
+    speech_segmentation: String,
     name: Option<String>,
     advertise: bool,
     keepalive: Keepalive,
@@ -98,6 +103,7 @@ fn parse(mut arguments: impl Iterator<Item = String>) -> Result<Arguments, Strin
         speech_root: None,
         speech_provider: "cpu".to_owned(),
         speech_backend: "streaming".to_owned(),
+        speech_segmentation: "block".to_owned(),
         name: None,
         advertise: true,
         keepalive: Keepalive::DEFAULT,
@@ -155,6 +161,20 @@ fn parse(mut arguments: impl Iterator<Item = String>) -> Result<Arguments, Strin
                     }
                 }
                 parsed.speech_backend = value;
+            }
+            "--speech-segmentation" => {
+                let value = arguments
+                    .next()
+                    .ok_or("--speech-segmentation needs a name")?;
+                match value.as_str() {
+                    "block" | "sentence" => {}
+                    _ => {
+                        return Err(format!(
+                            "--speech-segmentation needs block or sentence, not {value:?}"
+                        ));
+                    }
+                }
+                parsed.speech_segmentation = value;
             }
             "--name" => parsed.name = Some(arguments.next().ok_or("--name needs a name")?),
             "--no-advertise" => parsed.advertise = false,
@@ -429,7 +449,12 @@ fn transcriber(
 
 /// Speech synthesis: Kokoro from `root`, or none, in which case replies are not spoken.
 #[cfg(feature = "speech")]
-fn synthesis(server: Server, root: Option<&Path>, engines: &mut Engines) -> Server {
+fn synthesis(
+    server: Server,
+    root: Option<&Path>,
+    segmentation: &str,
+    engines: &mut Engines,
+) -> Server {
     use speech::tts::{KokoroConfig, KokoroSynthesizer};
 
     let Some(root) = root else {
@@ -438,9 +463,18 @@ fn synthesis(server: Server, root: Option<&Path>, engines: &mut Engines) -> Serv
     };
     match KokoroSynthesizer::new(&KokoroConfig::from_root(root)) {
         Ok(synthesizer) => {
-            eprintln!("Speech synthesis: Kokoro from {}.", root.display());
+            eprintln!(
+                "Speech synthesis: Kokoro from {} ({} segmentation).",
+                root.display(),
+                segmentation
+            );
             engines.stoppers.push(synthesizer.stopper());
-            server.with_synthesizer(synthesizer)
+            let mode = match segmentation {
+                "sentence" => server::SpeechMode::Sentence,
+                _ => server::SpeechMode::Block,
+            };
+            let server = server.with_synthesizer(synthesizer);
+            server.with_voice_mode(mode)
         }
         Err(error) => {
             eprintln!("Speech synthesis: unavailable ({error}); replies are not spoken.");
@@ -450,7 +484,12 @@ fn synthesis(server: Server, root: Option<&Path>, engines: &mut Engines) -> Serv
 }
 
 #[cfg(not(feature = "speech"))]
-fn synthesis(server: Server, _root: Option<&Path>, _engines: &mut Engines) -> Server {
+fn synthesis(
+    server: Server,
+    _root: Option<&Path>,
+    _segmentation: &str,
+    _engines: &mut Engines,
+) -> Server {
     eprintln!("Speech synthesis: off (built without speech); replies are not spoken.");
     server
 }
@@ -510,7 +549,7 @@ fn main() -> ExitCode {
     if let Some(timeout) = arguments.request_timeout {
         server = server.with_request_timeout(timeout);
     }
-    let server = synthesis(server, root, &mut engines);
+    let server = synthesis(server, root, &arguments.speech_segmentation, &mut engines);
     let cancellation = Cancellation::new();
     // Stop on Ctrl-C or SIGTERM by shutting down in order, so that the Bonjour advertisement is withdrawn rather than left to expire.
     #[cfg(unix)]

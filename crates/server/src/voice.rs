@@ -3,9 +3,19 @@
 
 //! The agent speech stream of each space. See `design/speech.md` and `design/live-audio.md`.
 //!
-//! A space's driver feeds every backend event to its [`Voice`]. Each assistant message's text deltas pass through a [`speech::Speakable`], and each document-level block that closes is queued, in order, as one segment on the space's one [`speech::Speech`]. Nothing participants do stops, pauses or skips queued speech.
+//! A space's driver feeds every backend event to its [`Voice`]. Each assistant message's text deltas pass through a [`speech::Speakable`], and the closed document-level blocks are queued, in order, as segments on the space's one [`speech::Speech`]. A [`SpeechMode`] decides how a closed block is split into segments: one per block, its sentences joined, so the voice keeps the paragraph's cadence (the default); or one per sentence, so a long block starts speaking while it is still streaming. Nothing participants do stops, pauses or skips queued speech.
 //!
-//! Synthesis runs ahead of playback on the speech crate's thread. A pacer thread per space announces each segment with [`protocol::ServerMessage::Speech`] and then sends its audio as 20 ms [`protocol::AudioFrame`]s from [`protocol::AGENT_SOURCE`] at the rate it plays, slightly ahead, to whoever is in the space at that moment. Only that thread touches the hub, and only briefly to queue each frame.
+//! Synthesis runs ahead of playback on the speech crate's thread. A pacer thread per space announces each segment with [`protocol::ServerMessage::Speech`] and then sends its audio as 20 ms [`protocol::AudioFrame`]s from [`protocol::AGENT_SOURCE`] at the rate it plays, slightly ahead, to whoever is in the space at that moment. A breath of silence follows each segment, so that back-to-back blocks do not run together. Only that thread touches the hub, and only briefly to queue each frame.
+
+/// How a space splits a closed document-level block into speech segments.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SpeechMode {
+    /// One segment per closed block, its speakable sentences joined: the voice keeps the cadence of the paragraph, list or other block it came from.
+    #[default]
+    Block,
+    /// One segment per sentence, so that the first sentence of a long block starts speaking while the rest of the block is still streaming.
+    Sentence,
+}
 
 #[cfg(feature = "speech")]
 pub(crate) use enabled::{Voice, Voices};
@@ -56,12 +66,22 @@ mod enabled {
         AudioChunk, Block, Error, Speakable, SpeakableOptions, Speech, SpeechEvent, Synthesizer,
     };
 
+    use super::SpeechMode;
     use crate::hub::Hub;
 
     /// Frames per second of agent speech: 20 ms frames.
     const FRAMES_PER_SECOND: u32 = 50;
 
-    /// The longest piece of text in one speech segment. Synthesis is in whole document-level blocks, as the incremental parser hands them over, so a block keeps the cadence of the paragraph it came from; the limit only splits the pathological block, a single line of several thousand characters, at a word.
+    /// A breath between spoken segments, so that a list or a series of paragraphs does not run
+    /// together. It is the silence a speaker would take between thoughts, not a long beat; 400 ms
+    /// is comfortably perceptible as a break in a continuous stream of speech.
+    const SEGMENT_GAP: Duration = Duration::from_millis(400);
+
+    /// The longest piece of text in one speech segment. In the `block` mode, synthesis is in whole
+    /// document-level blocks, as the incremental parser hands them over, so a block keeps the
+    /// cadence of the paragraph it came from; the limit only splits the pathological block, a single
+    /// line of several thousand characters, at a word. In the `sentence` mode, each sentence is its
+    /// own segment and the limit is not the normal case.
     const MAXIMUM_SEGMENT: usize = 2100;
 
     /// The speakable filter of an assistant message, splitting at most [`MAXIMUM_SEGMENT`] bytes at a time.
@@ -114,6 +134,7 @@ mod enabled {
     #[derive(Clone, Default)]
     pub struct Voices {
         synthesizer: Option<Shared>,
+        mode: SpeechMode,
     }
 
     impl Voices {
@@ -123,7 +144,14 @@ mod enabled {
                     synthesizer: Mutex::new(Box::new(synthesizer)),
                     disabled: AtomicBool::new(false),
                 }))),
+                mode: SpeechMode::default(),
             }
+        }
+
+        /// How closed blocks are split into segments: one per block (the default), or one per sentence.
+        pub fn with_mode(mut self, mode: SpeechMode) -> Self {
+            self.mode = mode;
+            self
         }
 
         /// Start the speech stream of `space`, or `None` when the server has no synthesizer.
@@ -155,6 +183,7 @@ mod enabled {
                 speech,
                 labels,
                 closing,
+                mode: self.mode,
                 speaking: HashMap::new(),
             })
         }
@@ -169,6 +198,8 @@ mod enabled {
         labels: Arc<Mutex<HashMap<u64, String>>>,
         /// Set when the space stops, so that the pacer can tell an orderly end from a failure.
         closing: Arc<AtomicBool>,
+        /// How closed blocks are split into segments.
+        mode: SpeechMode,
         /// Assistant messages being spoken.
         speaking: HashMap<String, Speakable>,
     }
@@ -205,12 +236,29 @@ mod enabled {
         fn speak(&mut self, message: &str, blocks: Vec<Block>) {
             // Holding the labels across `speak` means the pacer finds each segment's label once synthesis starts it.
             let mut labels = self.labels.lock().unwrap_or_else(PoisonError::into_inner);
-            for block in blocks {
-                // One segment per block, its sentences joined: the voice keeps the paragraph's cadence, and `Speech::speak` skips a block with nothing to say.
-                if let Some(segment) = self.speech.speak(&block.sentences.join(" ")) {
+            for segment_text in self.segments(&blocks) {
+                if let Some(segment) = self.speech.speak(&segment_text) {
                     labels.insert(segment, message.to_owned());
                 }
             }
+        }
+
+        /// The text of each speech segment in `blocks`, in the voice's mode.
+        ///
+        /// In `block` mode a block is one segment, its speakable sentences joined, so the voice keeps the paragraph's cadence. In `sentence` mode each sentence is its own segment, so the first sentence of a long block starts while the rest of the block is still streaming. A block with nothing to say yields no segment.
+        fn segments(&self, blocks: &[Block]) -> Vec<String> {
+            let mut segments = Vec::new();
+            for block in blocks {
+                match self.mode {
+                    SpeechMode::Block => {
+                        if !block.sentences.is_empty() {
+                            segments.push(block.sentences.join(" "));
+                        }
+                    }
+                    SpeechMode::Sentence => segments.extend(block.sentences.iter().cloned()),
+                }
+            }
+            segments
         }
     }
 
@@ -223,7 +271,12 @@ mod enabled {
 
     enum Item {
         Announce(ServerMessage),
-        Frame { sample_rate: u32, samples: Vec<i16> },
+        Frame {
+            sample_rate: u32,
+            samples: Vec<i16>,
+        },
+        /// A breath of [`SEGMENT_GAP`] of silence between two spoken segments.
+        Gap,
         Failed(String),
     }
 
@@ -326,6 +379,12 @@ mod enabled {
             match item {
                 Item::Announce(message) => hub.agent_speech(&self.space, message),
                 Item::Failed(error) => hub.speech_failed(&self.space, error),
+                Item::Gap => {
+                    // A breath between segments: advance the clock so the next frame, and the
+                    // silence the client plays while it waits for it, is later by [`SEGMENT_GAP`].
+                    let clock = self.clock.filter(|clock| *clock >= now).unwrap_or(now);
+                    self.clock = Some(clock + SEGMENT_GAP);
+                }
                 Item::Frame {
                     sample_rate,
                     samples,
@@ -364,7 +423,11 @@ mod enabled {
                 SpeechEvent::Audio { chunk, .. } => self.audio(chunk),
                 SpeechEvent::Finished { .. } => {
                     self.flush();
-                    self.announcing = None;
+                    let had_segment = self.announcing.take().is_some();
+                    if had_segment {
+                        // A breath between this segment and the next, so back-to-back blocks do not run together.
+                        self.pending.push_back(Item::Gap);
+                    }
                 }
                 SpeechEvent::Failed { error, .. } => {
                     self.flush();

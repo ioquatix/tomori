@@ -154,6 +154,13 @@ impl Server {
         self
     }
 
+    /// How each space's closed blocks are split into speech segments: one per block (the default), or one per sentence.
+    #[cfg(feature = "speech")]
+    pub fn with_voice_mode(mut self, mode: crate::voice::SpeechMode) -> Self {
+        self.voices = self.voices.with_mode(mode);
+        self
+    }
+
     /// Serve `listener` until `cancellation` is cancelled, then close every session and connection.
     ///
     /// A failure to serve, such as the listener breaking, also ends the spaces and returns the error, so that the process exits instead of living on without accepting connections. Transient accept errors are not failures; see [`Self::serve`].
