@@ -931,6 +931,15 @@ impl Conversation {
         })
     }
 
+    /// The joined space, and whether its state is current: not while the connection is down, when the server may have moved on without us.
+    pub fn joined_space(&self) -> Option<(&SpaceState, bool)> {
+        let space = self.space.as_ref().filter(|_| self.mode == Mode::Space)?;
+        Some((
+            space,
+            matches!(self.state, Some(ConnectionState::Connected { .. })),
+        ))
+    }
+
     /// What the swarm should show. `Unknown` and a lost connection are never shown as ready.
     pub fn activity(&self) -> SessionActivity {
         let Some(space) = self.space.as_ref().filter(|_| self.mode == Mode::Space) else {
@@ -1877,6 +1886,33 @@ mod tests {
         assert_eq!(conversation.activity(), SessionActivity::Unavailable);
         assert!(conversation.text().contains("Offline, retry in 2s"));
         assert_fits(&mut conversation);
+    }
+
+    #[test]
+    fn the_joined_space_is_current_only_while_connected_and_gone_after_leaving() {
+        assert!(Conversation::new("ada", "Ada").joined_space().is_none());
+        let mut conversation = joined(|state| {
+            state.workers = vec![protocol::Worker {
+                id: "w".into(),
+                parent: None,
+                title: "Explore".into(),
+                state: protocol::WorkerState::Running,
+            }]
+        });
+        let (space, current) = conversation.joined_space().unwrap();
+        assert_eq!(
+            (space.id.as_str(), space.workers.len(), current),
+            (SPACE, 1, true)
+        );
+        conversation.apply(Event::State(ConnectionState::Disconnected {
+            reason: client::Disconnect::Timeout,
+            retry_in: Duration::from_secs(2),
+        }));
+        assert!(!conversation.joined_space().unwrap().1);
+        conversation.apply(connected());
+        assert!(conversation.joined_space().unwrap().1);
+        conversation.back();
+        assert!(conversation.joined_space().is_none());
     }
 
     #[test]
