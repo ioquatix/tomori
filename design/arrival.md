@@ -14,7 +14,7 @@ Choosing a space and creating one happen in one view. Once connected, the partic
 
 Spaces are visually distinct from each other. Each space's object has its own appearance, at least a colour and a form, derived deterministically from the space's identifier. It therefore looks the same to every participant and on every visit, and different spaces very likely look different. It also shows the space's live status: its activity (idle, running, waiting or closed), how many participants it has, and its title. Later, the object should become a preview of the space itself, such as a small version of its environment or scene (see `scene-modules.md`). The deterministic appearance is the fallback for a space that has no preview.
 
-Arrival assumes no environment theme. Server objects, space objects and the swarm do not borrow the look of any one environment, such as the moonlit shrine in `crates/environment-sky`. Arrival works and reads clearly with every environment the client offers. The intended direction, not yet a requirement, is that each space has its own environment suited to its work, that arrival has its own neutral setting, and that entering a space moves from that setting into the space's environment. Today the environment is a per-device choice and isn't part of space state (see `spaces.md`).
+Arrival assumes no environment theme. Server objects, space objects and the swarm do not borrow the look of any one environment, such as the moonlit shrine in `crates/environment-sky`. Arrival takes place in the Minimal environment, the plain floor grid, which reads as a waiting area. It does so whichever environment is chosen on the device. That choice applies once the participant is in a space, and leaving a space returns to the grid. The intended direction, not yet a requirement, is that each space has its own environment suited to its work, and that entering a space moves from the grid into that environment. Today the environment is a per-device choice and isn't part of space state (see `spaces.md`).
 
 When creating a space bound to an existing agent session, the participant can tell the sessions apart without opening them. Each listed session shows, as far as its backend can report them:
 
@@ -40,14 +40,14 @@ The headset client's flow from launch to joining a space (`crates/client-quest`)
 - Confirm that the swarm is visible throughout launch, server choice, space choice and joining, and that it changes shape continuously. It starts as a cloud, forms its shape when a server is chosen, and shows the agent's state only inside a space.
 - Connect to a server with no spaces and confirm that the create object is shown directly. Connect to one with spaces and confirm that the create object sits among them in the same view.
 - Test that a space's colour and form are a function of its identifier alone, and that the same space looks the same after reconnecting and to a second participant. Confirm that a change in a space's activity or participant count shows on its object.
-- Run arrival with each environment the client offers, currently Sky and Minimal. It works and reads the same with both, and its objects use none of an environment's meshes or materials.
+- With Sky chosen on the device, confirm that arrival shows the Minimal grid, that joining a space switches to Sky, and that leaving returns to the grid. Confirm that arrival's objects use none of Sky's meshes or materials.
 - Test the session listing for each backend that supports attaching: sessions are ordered by last activity, the reported fields match the agent's own session records (for Claude Code, its transcripts under `~/.claude/projects`; for OpenCode, its session API), and fields the backend can't report are absent rather than invented.
 
 Open questions, not yet decided:
 
 - The detailed look of server constellations: their size, colour, motion and spacing, and how the pour into the swarm is timed.
 - How quickly advertised counts follow changes.
-- What the neutral arrival setting looks like, whether the existing Minimal environment is it, and how the transition into a space's environment looks.
+- How the transition between the grid and a space's environment looks.
 - Whether the environment becomes part of a space's shared state, how a space chooses it, and where that choice is stored.
 - How space previews are rendered and what they cost on the headset. `scene-modules.md` replicates a space's scene only to the clients in it, so a lobby preview needs either a summary the server makes for the lobby or replication to clients outside the space.
 - How creation choices other than the session, such as the backend and directory, are presented in 3D.
