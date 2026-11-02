@@ -10,7 +10,7 @@ Arrival, outside any space, uses the Minimal grid as its waiting area (see `arri
 
 Long-term direction, not yet requirements:
 
-- An environment is much more than scenery. It can be dynamic and data-backed, with its own interaction, such as Fantail Observe's spatial view of a running system's topology and telemetry, a separate project. Environments are expected to be built on the server-owned scene graph and modules in `scene-modules.md`.
+- An environment is much more than scenery. It can be dynamic and data-backed, with its own interaction, such as Fantail Observe, a separate project that shows a running system's topology and telemetry spatially. Environments are expected to be built on the server-owned scene graph and modules in `scene-modules.md`.
 - The space's agent is aware of its environment: the information and data it presents, and what each participant is pointing at or has selected in it. Pointing and selection identify concrete resources, with their identity and context such as the time window, not only positions or pixels.
 - A participant can refer to what they are pointing at in speech, such as "Tomori, can you investigate why this server is overloaded?". The agent receives the identified resource with the request, and uses the tools available in that space, such as its MCP servers, to investigate and answer.
 
