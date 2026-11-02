@@ -12,7 +12,7 @@ Initially, audio travels over the same HTTP streaming connection. Later, audio m
 
 Whose view the spectator feed shows when a space has several participants is not yet decided.
 
-The server advertises itself on the local network with DNS service discovery over multicast DNS (Bonjour), as service type `_tomori._tcp`, with TXT records for the protocol version and a display name. When a client starts, it browses for that service and lists the servers it finds, so a participant can choose one without typing an address; entering an address manually remains possible. Advertising can be turned off.
+The server advertises itself on the local network with DNS service discovery over multicast DNS (Bonjour), as service type `_tomori._tcp`, with TXT records for the protocol version, a display name, the number of spaces and the number of connected participants. The counts are kept current, for the server's constellation in `arrival.md`. When a client starts, it browses for that service and lists the servers it finds, so a participant can choose one without typing an address; entering an address manually remains possible. Advertising can be turned off.
 
 Wire types are defined once in a shared protocol crate used by both the server and native clients. A client reads a space or worker state that it does not know, such as one added by a newer server, as unknown rather than rejecting the message, so adding such a state does not change the protocol version.
 
