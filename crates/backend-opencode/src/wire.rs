@@ -39,7 +39,12 @@ pub fn event_for(
     match value.get("type")?.as_str()? {
         "session.text.started" => first_seen(data, session_id, seen_messages),
         "session.text.delta" => text_delta(data, session_id, "delta"),
-        "session.reasoning.delta" => text_delta(data, session_id, "delta"),
+        // Reasoning is not spoken: the speech stream reads only the
+        // assistant's text, and the space model records reasoning separately
+        // from the snapshot. The Claude Code backend makes the same
+        // distinction (its `thinking_delta` is collected into the message's
+        // parts but never surfaced as a `TextDelta`).
+        "session.reasoning.delta" => None,
         // `session.text.ended` names the message that just finished. It fires
         // once, and only after the `session.text.started` that already
         // recorded this id in `seen_messages`, so it must not be gated on

@@ -460,6 +460,23 @@ impl SnapshotParts {
     }
 }
 
+/// The session record's running state, from its `time.busy` / `time.idle`
+/// timestamps: running when the last turn started after its last end.
+pub async fn session_running<'scope>(
+    client: &Client<'scope>,
+    resolved: &Resolved,
+    session_id: &str,
+    cancellation: &Cancellation,
+) -> Result<Option<bool>, Failure> {
+    let info = session_info(client, resolved, session_id, cancellation).await?;
+    let running = info.get("time").and_then(|time| {
+        let busy = time.get("busy")?.as_u64()?;
+        let idle = time.get("idle")?.as_u64()?;
+        Some(busy > idle)
+    });
+    Ok(running)
+}
+
 /// Percent-encode the segment of a path: ids and directories are opaque.
 fn urlencoding(value: &str) -> String {
     let mut out = String::with_capacity(value.len());

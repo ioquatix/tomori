@@ -14,6 +14,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
+use std::time::Duration;
 
 use std::future::Future;
 use std::pin::Pin;
@@ -25,7 +26,7 @@ use base_http_client::{Client, Endpoint};
 use base_scheduler::{
     AddressHints, AddressInfoCollection, AddressInfoView, AddressResolution, AddressService,
     Cancellation, SocketClose, SocketConnect, SocketOpen, SocketSetOption, SocketStreamReading,
-    SocketStreamWriting, TcpNoDelay,
+    SocketStreamWriting, TcpNoDelay, Timers,
 };
 use base_scheduler_direct::{DirectOptions, DirectScheduler};
 use futures_lite::future::block_on;
@@ -34,6 +35,14 @@ use serde_json::Value;
 use crate::api::{self, Failure};
 use crate::endpoint::Resolved;
 use crate::wire;
+
+/// How often the running state of each session is re-checked against the
+/// server's record. The fast path is the event stream's idle events; this is
+/// the backstop that clears a busy state when one of those is missed, so a
+/// queue gated on the agent being idle cannot be left stuck. It is a no-op
+/// while a turn is genuinely running, which is why the cadence can be loose:
+/// it only matters once a turn has ended and the stream has not reported it.
+const RECONCILE_INTERVAL: Duration = Duration::from_secs(1);
 
 /// The sender side of one session's event channel.
 #[derive(Clone)]
@@ -60,6 +69,29 @@ pub struct Registration {
     pub events: Events,
     /// The messages this session has reported as started.
     pub seen: Mutex<HashSet<String>>,
+    /// The session's running state as last reconciled against the server's
+    /// record, so the reconciler reports a change only once.
+    running: RunningState,
+}
+
+/// The running state of a session as the server's record reports it, derived
+/// from `time.busy` after `time.idle`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RunningState {
+    /// Not yet reconciled, so no change has been observed.
+    Unknown,
+    Running,
+    Idle,
+}
+
+impl RunningState {
+    fn event(self) -> Option<Event> {
+        match self {
+            RunningState::Unknown => None,
+            RunningState::Running => Some(Event::Busy),
+            RunningState::Idle => Some(Event::Idle),
+        }
+    }
 }
 
 impl Registration {
@@ -69,6 +101,7 @@ impl Registration {
             Self {
                 events,
                 seen: Mutex::new(HashSet::new()),
+                running: RunningState::Unknown,
             },
             rx,
         )
@@ -221,7 +254,7 @@ where
     // both. The cancellation is shared so closing the connection unwinds both.
     let (driver_result, _) = futures_lite::future::zip(
         driver.run(&cancellation),
-        service(&client, resolved, commands, &cancellation),
+        service(&client, resolved, commands, &cancellation, scheduler),
     )
     .await;
     driver_result.map_err(|error| error.to_string())
@@ -236,6 +269,7 @@ trait Scheduler<'scope>:
     + SocketSetOption<TcpNoDelay>
     + SocketStreamReading
     + SocketStreamWriting
+    + Timers
     + 'scope
 {
     type Socket: 'static;
@@ -250,6 +284,7 @@ where
         + SocketSetOption<TcpNoDelay>
         + SocketStreamReading
         + SocketStreamWriting
+        + Timers
         + 'scope,
     S::Socket: 'static,
 {
@@ -295,13 +330,15 @@ impl<F: Future> futures_core::FusedFuture for Fused<F> {
 }
 
 /// Read the server's global event stream and service commands, alternating
-/// reads over the stream and command channel reads, until the last session
-/// closes or the stream ends.
-async fn service(
+/// reads over the stream, command channel reads and a periodic reconciliation
+/// of each session's running state, until the last session closes or the
+/// stream ends.
+async fn service<S: Timers>(
     client: &Client<'_>,
     resolved: Resolved,
     commands: async_channel::Receiver<Command>,
     cancellation: &Cancellation,
+    timers: &S,
 ) {
     let mut request = base_http::Request::get(base_http::Path::from("/api/event".to_owned()));
     if let Some(authorization) = resolved.authorization_header()
@@ -319,6 +356,8 @@ async fn service(
 
     let mut registrations = HashMap::<String, Registration>::new();
     let mut pending = String::new();
+    let mut timer = timers.timer();
+    let mut next_reconcile = timers.now() + RECONCILE_INTERVAL;
 
     loop {
         futures_util::select_biased! {
@@ -360,6 +399,19 @@ async fn service(
                     eprintln!("the opencode event stream ended; closing the connection");
                     break;
                 }
+            }
+            // Re-check each session's running state against the server's record,
+            // so a missed idle event cannot leave a busy state — and the queue it
+            // gates — stuck. A no-op while no session is registered.
+            due = Fused::new(timers.timer_wait_until(&mut timer, next_reconcile, cancellation)) => {
+                if let Err(error) = due {
+                    if !cancellation.is_cancelled() {
+                        eprintln!("the state reconciliation timer failed: {error}");
+                    }
+                    break;
+                }
+                reconcile(client, &resolved, &mut registrations, cancellation).await;
+                next_reconcile = timers.now() + RECONCILE_INTERVAL;
             }
         }
     }
@@ -465,6 +517,45 @@ async fn refresh_workers(
         }
         Err(failure) => {
             eprintln!("refreshing the workers of {id}: {}", failure.message);
+        }
+    }
+}
+
+/// Re-check each session's running state against the server's record, and
+/// report a change. The event stream's busy and idle events are the fast
+/// path; the record is the backstop, so a missed idle event cannot leave a
+/// space — and the queue it gates — stuck on a stale busy state. A session
+/// whose record cannot be read keeps its last state: a transient failure is
+/// not a state change.
+async fn reconcile(
+    client: &Client<'_>,
+    resolved: &Resolved,
+    registrations: &mut HashMap<String, Registration>,
+    cancellation: &Cancellation,
+) {
+    let ids: Vec<String> = registrations.keys().cloned().collect();
+    for id in ids {
+        let Some(running) = api::session_running(client, resolved, &id, cancellation)
+            .await
+            .ok()
+            .flatten()
+        else {
+            continue;
+        };
+        let running = if running {
+            RunningState::Running
+        } else {
+            RunningState::Idle
+        };
+        let Some(registration) = registrations.get_mut(&id) else {
+            continue;
+        };
+        if registration.running == running {
+            continue;
+        }
+        registration.running = running;
+        if let Some(event) = running.event() {
+            registration.events.deliver(event);
         }
     }
 }
