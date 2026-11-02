@@ -25,6 +25,8 @@ pub fn welcome() -> Vec<u8> {
         protocol: protocol::PROTOCOL_VERSION,
         server: "mini".into(),
         source: 1,
+        backends: vec![],
+        roots: vec![],
     })
 }
 

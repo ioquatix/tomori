@@ -33,11 +33,13 @@ name = "speech"
 required-features = ["fake", "speech"]
 
 [features]
-default = ["fake", "claude-code", "speech"]
+default = ["fake", "claude-code", "opencode", "speech"]
 # A scripted in-memory backend for tests and for manual testing without an agent.
 fake = []
 # Claude Code, driven as a persistent `claude` process per space.
 claude-code = ["dep:backend-claude-code"]
+# OpenCode, driven over the HTTP and SSE APIs of a running `opencode serve` process.
+opencode = ["dep:backend-opencode"]
 # Speech recognition and synthesis with the speech crate's in-process sherpa-onnx engines.
 speech = ["dep:speech"]
 # Link the speech engines from the shared sherpa-onnx libraries in `SHERPA_ONNX_LIB_DIR`, such as its CUDA build, for `--speech-provider cuda`; see crates/speech/readme.md.
@@ -47,6 +49,7 @@ speech-shared = ["speech", "speech/shared"]
 async-channel = "2"
 backend = { path = "../backend" }
 backend-claude-code = { path = "../backend-claude-code", optional = true }
+backend-opencode = { path = "../backend-opencode", optional = true }
 base-http = "0.2.0"
 base-http-server = "0.2.0"
 base-scheduler = "0.3.0"

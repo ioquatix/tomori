@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::future::{Future, pending};
 use std::io;
 use std::net::SocketAddr;
-use std::pin::pin;
+use std::pin::{Pin, pin};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -24,7 +24,7 @@ use protocol::Keepalive;
 use crate::admission::{Admission, Admitted, DEFAULT_REQUEST_TIMEOUT, Watch};
 use crate::application::Application;
 use crate::backends::{AnySession, Backends};
-use crate::hub::{CreateRequest, Hub, SpaceCommand};
+use crate::hub::{CreateRequest, Hub, Job, SpaceCommand};
 use crate::transcriber::Transcriber;
 use crate::voice::{Voice, Voices};
 use crate::workspace::{
@@ -37,7 +37,7 @@ use crate::workspace::{
 /// [`run`](Self::run) serves until cancelled or serving fails. All work is owned by that one future: connections, space drivers and the keepalive sweep are joined by it. No detached tasks are created. Speech recognition and synthesis run on the speech crate's own threads, which outlive a space only to finish speech already queued.
 pub struct Server {
     hub: Arc<Hub>,
-    jobs: async_channel::Receiver<CreateRequest>,
+    jobs: async_channel::Receiver<Job>,
     application: Application,
     voices: Voices,
     keepalive: Keepalive,
@@ -89,7 +89,7 @@ impl Server {
     pub fn new(backends: Backends, transcriber: Arc<dyn Transcriber>) -> Self {
         let (sender, jobs) = async_channel::unbounded();
         let slots = SpaceSlots::new(DEFAULT_MAX_SPACES);
-        let hub = Hub::new(backends, transcriber, sender, slots.clone());
+        let hub = Hub::new(backends, transcriber, sender, Vec::new(), slots.clone());
         Self {
             application: Application::new(hub.clone()),
             hub,
@@ -107,6 +107,7 @@ impl Server {
 
     /// Run spaces only in these directories or beneath them. Without this, the only root is the current directory when the server runs. See `design/workspaces.md`.
     pub fn with_workspace_roots(mut self, roots: WorkspaceRoots) -> Self {
+        self.hub.set_roots(roots.to_protocol());
         self.roots = Some(roots);
         self
     }
@@ -114,6 +115,10 @@ impl Server {
     /// Use `roots` unless roots were already given.
     #[cfg(feature = "fake")]
     pub(crate) fn with_default_workspace_roots(mut self, roots: WorkspaceRoots) -> Self {
+        if self.roots.is_none() {
+            // Keep the hub's list, shown to a client, in step with the ones used to resolve.
+            self.hub.set_roots(roots.to_protocol());
+        }
         self.roots.get_or_insert(roots);
         self
     }
@@ -146,6 +151,13 @@ impl Server {
     #[cfg(feature = "speech")]
     pub fn with_synthesizer(mut self, synthesizer: impl speech::Synthesizer + 'static) -> Self {
         self.voices = Voices::new(synthesizer);
+        self
+    }
+
+    /// How each space's closed blocks are split into speech segments: one per block (the default), or one per sentence.
+    #[cfg(feature = "speech")]
+    pub fn with_voice_mode(mut self, mode: crate::voice::SpeechMode) -> Self {
+        self.voices = self.voices.with_mode(mode);
         self
     }
 
@@ -455,18 +467,41 @@ impl Server {
                 }
             };
             match job {
-                Ok(request) => spaces.push(run_space(
-                    scheduler,
-                    self.hub.clone(),
-                    request,
-                    self.voices.clone(),
-                    Places {
+                Ok(Job::Create(request)) => {
+                    let places = Places {
                         roots: &roots,
                         resolving: &resolving,
                         slots: &self.slots,
-                    },
-                    cancellation,
-                )),
+                    };
+                    spaces.push(Box::pin(run_space(
+                        scheduler,
+                        self.hub.clone(),
+                        request,
+                        self.voices.clone(),
+                        places,
+                        cancellation,
+                    )) as Pin<Box<dyn Future<Output = ()>>>);
+                }
+                Ok(Job::ListSessions {
+                    participant,
+                    backend,
+                    directory,
+                }) => {
+                    let places = Places {
+                        roots: &roots,
+                        resolving: &resolving,
+                        slots: &self.slots,
+                    };
+                    spaces.push(Box::pin(list_sessions(
+                        scheduler,
+                        self.hub.clone(),
+                        participant,
+                        backend,
+                        directory,
+                        places,
+                        cancellation,
+                    )) as Pin<Box<dyn Future<Output = ()>>>);
+                }
                 Err(_) => break,
             }
         }
@@ -706,6 +741,34 @@ async fn run_space<S: Timers>(
     if let Err(error) = session.close().await {
         log::warn!("Closing the session of {space} failed: {error}");
     }
+}
+
+/// List a backend's existing sessions in `directory` for `participant`, resolving the directory first so the backend sees it in canonical form. A directory that is not available, an unknown backend, or a backend failure is reported to `participant` as an error.
+async fn list_sessions<S: Timers>(
+    scheduler: &S,
+    hub: Arc<Hub>,
+    participant: String,
+    backend: String,
+    directory: String,
+    places: Places<'_>,
+    cancellation: &Cancellation,
+) {
+    let directory = match resolve(scheduler, &places, &directory, cancellation).await {
+        Some(directory) => directory,
+        None => {
+            hub.sessions(&participant, Err(DIRECTORY_UNAVAILABLE.to_owned()));
+            return;
+        }
+    };
+    let Some(found) = hub.backends.get(&backend) else {
+        hub.sessions(&participant, Err("Unknown backend.".to_owned()));
+        return;
+    };
+    let sessions = found
+        .sessions(&directory)
+        .await
+        .map_err(|error| error.message);
+    hub.sessions(&participant, sessions);
 }
 
 /// The canonical form of a client's directory, checked on its own thread for at most [`RESOLVE_TIMEOUT`] so that a slow file system cannot stall the server, or `None` if it is refused.

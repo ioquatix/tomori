@@ -7,7 +7,7 @@
 
 // Built without any backend, the backend enums are empty and every match on them is vacuous.
 #![cfg_attr(
-    not(any(feature = "fake", feature = "claude-code")),
+    not(any(feature = "fake", feature = "claude-code", feature = "opencode")),
     allow(unused_variables, unused_mut, unreachable_code)
 )]
 
@@ -26,17 +26,28 @@ use server::{Backends, NullTranscriber, Server, Transcriber, WorkspaceRoots};
 const USAGE: &str = "Usage: tomori-server [--bind ADDRESS] [--backend NAME]... [--speech-root PATH]
                      [--speech-provider NAME] [--name NAME] [--no-advertise] [--keepalive-interval SECONDS]
                      [--keepalive-timeout SECONDS] [--request-timeout SECONDS]
-                     [--workspace-root PATH]... [--max-spaces COUNT]
+                     [--workspace-root PATH]... [--max-spaces COUNT] [--opencode-url URL]
 
 Options:
   --bind ADDRESS       Listen address (default 0.0.0.0:8765).
-  --backend NAME       Offer a backend; repeat for several. Available: fake, claude-code.
+  --backend NAME       Offer a backend; repeat for several. Available: fake, claude-code,
+                       opencode.
+  --opencode-url URL   Where the opencode backend reaches its `opencode serve` process. Defaults
+                       to the OPENCODE_URL environment variable, then the `opencode serve
+                       --service` registration file, then http://127.0.0.1:4096.
   --speech-root PATH   The directory holding .tools/ with the speech models; see
                        crates/speech/readme.md. Without it, there is no speech recognition or
                        synthesis.
   --speech-provider NAME
                        The ONNX Runtime execution provider for speech recognition: cpu (default), or
                        cuda in a server built with the speech-shared feature and the CUDA libraries.
+  --speech-backend NAME
+                       How utterances are transcribed: streaming (default, a transducer that reports
+                       words as you speak) or offline (a whole-clip model, more accurate, that reports
+                       the transcript a couple of seconds after you stop).
+  --speech-segmentation NAME
+                       How a reply is spoken, by document-level block: block (default, a whole block
+                       in one go) or sentence (each sentence separately, so a long block starts sooner).
   --name NAME          The name clients list for this server (default: the host name).
   --no-advertise       Do not advertise the server with Bonjour (_tomori._tcp); clients must enter
                        its address.
@@ -57,8 +68,13 @@ Options:
 struct Arguments {
     bind: SocketAddr,
     backends: Vec<String>,
+    opencode_url: Option<String>,
     speech_root: Option<PathBuf>,
     speech_provider: String,
+    /// How utterances are transcribed: the streaming transducer, or the offline (whole-clip) model.
+    speech_backend: String,
+    /// How a space's closed blocks are spoken: one segment per block, or one per sentence.
+    speech_segmentation: String,
     name: Option<String>,
     advertise: bool,
     keepalive: Keepalive,
@@ -83,8 +99,11 @@ fn parse(mut arguments: impl Iterator<Item = String>) -> Result<Arguments, Strin
     let mut parsed = Arguments {
         bind: SocketAddr::from(([0, 0, 0, 0], protocol::DEFAULT_PORT)),
         backends: Vec::new(),
+        opencode_url: None,
         speech_root: None,
         speech_provider: "cpu".to_owned(),
+        speech_backend: "streaming".to_owned(),
+        speech_segmentation: "block".to_owned(),
         name: None,
         advertise: true,
         keepalive: Keepalive::DEFAULT,
@@ -103,6 +122,9 @@ fn parse(mut arguments: impl Iterator<Item = String>) -> Result<Arguments, Strin
             "--backend" => parsed
                 .backends
                 .push(arguments.next().ok_or("--backend needs a name")?),
+            "--opencode-url" => {
+                parsed.opencode_url = Some(arguments.next().ok_or("--opencode-url needs a URL")?)
+            }
             "--speech-root" => {
                 parsed.speech_root = Some(
                     arguments
@@ -127,6 +149,32 @@ fn parse(mut arguments: impl Iterator<Item = String>) -> Result<Arguments, Strin
                     }
                 }
                 parsed.speech_provider = value;
+            }
+            "--speech-backend" => {
+                let value = arguments.next().ok_or("--speech-backend needs a name")?;
+                match value.as_str() {
+                    "streaming" | "offline" => {}
+                    _ => {
+                        return Err(format!(
+                            "--speech-backend needs streaming or offline, not {value:?}"
+                        ));
+                    }
+                }
+                parsed.speech_backend = value;
+            }
+            "--speech-segmentation" => {
+                let value = arguments
+                    .next()
+                    .ok_or("--speech-segmentation needs a name")?;
+                match value.as_str() {
+                    "block" | "sentence" => {}
+                    _ => {
+                        return Err(format!(
+                            "--speech-segmentation needs block or sentence, not {value:?}"
+                        ));
+                    }
+                }
+                parsed.speech_segmentation = value;
             }
             "--name" => parsed.name = Some(arguments.next().ok_or("--name needs a name")?),
             "--no-advertise" => parsed.advertise = false,
@@ -219,20 +267,30 @@ fn advertise(arguments: &Arguments, address: SocketAddr) -> Option<discovery::Ad
     }
 }
 
-fn backend(name: &str) -> Result<server::AnyBackend, String> {
+#[cfg_attr(not(feature = "opencode"), allow(unused_variables))]
+fn backend(name: &str, opencode_url: Option<&str>) -> Result<server::AnyBackend, String> {
     match name {
         #[cfg(feature = "fake")]
         "fake" => Ok(server::fake::FakeBackend::new().into()),
         #[cfg(feature = "claude-code")]
         "claude-code" => Ok(backend_claude_code::ClaudeCode::new(Default::default()).into()),
+        #[cfg(feature = "opencode")]
+        "opencode" => Ok(backend_opencode::OpenCode::new(backend_opencode::Config {
+            url: opencode_url.map(str::to_owned),
+        })
+        .into()),
+        #[cfg(not(feature = "opencode"))]
+        "opencode" => {
+            Err("the opencode backend needs a server built with the opencode feature".to_owned())
+        }
         other => Err(format!("unknown backend {other:?}")),
     }
 }
 
-fn backends(names: &[String]) -> Result<Backends, String> {
+fn backends(names: &[String], opencode_url: Option<&str>) -> Result<Backends, String> {
     let mut backends = Backends::new();
     for name in names {
-        backends = backends.with(backend(name)?);
+        backends = backends.with(backend(name, opencode_url)?);
     }
     Ok(backends)
 }
@@ -265,19 +323,33 @@ impl Engines {
     }
 }
 
-/// Speech recognition: the streaming transducer from `root`, run with `provider`, or none. Without recognition, every utterance fails visibly.
+/// Speech recognition: the streaming transducer or the offline (whole-clip) model from `root`, run with `provider`, or none. Without recognition, every utterance fails visibly.
 #[cfg(feature = "speech")]
 fn transcriber(
     root: Option<&Path>,
+    provider: &str,
+    backend: &str,
+    engines: &mut Engines,
+) -> Result<Arc<dyn Transcriber>, String> {
+    let Some(root) = root else {
+        eprintln!("Speech recognition: off (no --speech-root); utterances fail with an error.");
+        return Ok(Arc::new(NullTranscriber::new()));
+    };
+    if backend == "offline" {
+        return offline_transcriber(root, provider, engines);
+    }
+    streaming_transcriber(root, provider, engines)
+}
+
+/// The streaming transducer from `root`, which reports words as the participant speaks.
+#[cfg(feature = "speech")]
+fn streaming_transcriber(
+    root: &Path,
     provider: &str,
     engines: &mut Engines,
 ) -> Result<Arc<dyn Transcriber>, String> {
     use speech::stt::{TransducerConfig, TransducerRecognizer};
 
-    let Some(root) = root else {
-        eprintln!("Speech recognition: off (no --speech-root); utterances fail with an error.");
-        return Ok(Arc::new(NullTranscriber::new()));
-    };
     let mut config = TransducerConfig::from_root(root);
     config.provider = provider.to_owned();
     Ok(match TransducerRecognizer::new(&config) {
@@ -299,6 +371,37 @@ fn transcriber(
             )))
         }
     })
+}
+
+/// The offline (whole-clip) model from `root`, which buffers each utterance and reports its transcript a couple of seconds after the participant stops.
+#[cfg(feature = "speech")]
+fn offline_transcriber(
+    root: &Path,
+    provider: &str,
+    engines: &mut Engines,
+) -> Result<Arc<dyn Transcriber>, String> {
+    use speech::stt::WhisperConfig;
+
+    let mut config = WhisperConfig::from_root(root);
+    config.provider = provider.to_owned();
+    let recognizer = match server::offline::Whisper::new(&config) {
+        Ok(recognizer) => recognizer,
+        Err(error) => {
+            eprintln!(
+                "Speech recognition: unavailable ({error}); utterances fail with this error."
+            );
+            return Ok(Arc::new(NullTranscriber::with_reason(format!(
+                "Speech recognition is not available on this server: {error}."
+            ))));
+        }
+    };
+    eprintln!(
+        "Speech recognition: offline whole-clip model from {} ({provider}).",
+        config.model.display()
+    );
+    let transcriber = server::OfflineTranscriber::new(recognizer);
+    engines.stoppers.push(transcriber.stopper());
+    Ok(Arc::new(transcriber))
 }
 
 /// `recognizer` with its final transcripts punctuated by the model from `root`, or as it is if that model cannot load.
@@ -331,6 +434,7 @@ fn punctuated(
 fn transcriber(
     root: Option<&Path>,
     _provider: &str,
+    _backend: &str,
     _engines: &mut Engines,
 ) -> Result<Arc<dyn Transcriber>, String> {
     if root.is_some() {
@@ -345,7 +449,12 @@ fn transcriber(
 
 /// Speech synthesis: Kokoro from `root`, or none, in which case replies are not spoken.
 #[cfg(feature = "speech")]
-fn synthesis(server: Server, root: Option<&Path>, engines: &mut Engines) -> Server {
+fn synthesis(
+    server: Server,
+    root: Option<&Path>,
+    segmentation: &str,
+    engines: &mut Engines,
+) -> Server {
     use speech::tts::{KokoroConfig, KokoroSynthesizer};
 
     let Some(root) = root else {
@@ -354,9 +463,18 @@ fn synthesis(server: Server, root: Option<&Path>, engines: &mut Engines) -> Serv
     };
     match KokoroSynthesizer::new(&KokoroConfig::from_root(root)) {
         Ok(synthesizer) => {
-            eprintln!("Speech synthesis: Kokoro from {}.", root.display());
+            eprintln!(
+                "Speech synthesis: Kokoro from {} ({} segmentation).",
+                root.display(),
+                segmentation
+            );
             engines.stoppers.push(synthesizer.stopper());
-            server.with_synthesizer(synthesizer)
+            let mode = match segmentation {
+                "sentence" => server::SpeechMode::Sentence,
+                _ => server::SpeechMode::Block,
+            };
+            let server = server.with_synthesizer(synthesizer);
+            server.with_voice_mode(mode)
         }
         Err(error) => {
             eprintln!("Speech synthesis: unavailable ({error}); replies are not spoken.");
@@ -366,7 +484,12 @@ fn synthesis(server: Server, root: Option<&Path>, engines: &mut Engines) -> Serv
 }
 
 #[cfg(not(feature = "speech"))]
-fn synthesis(server: Server, _root: Option<&Path>, _engines: &mut Engines) -> Server {
+fn synthesis(
+    server: Server,
+    _root: Option<&Path>,
+    _segmentation: &str,
+    _engines: &mut Engines,
+) -> Server {
     eprintln!("Speech synthesis: off (built without speech); replies are not spoken.");
     server
 }
@@ -381,7 +504,7 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let backends = match backends(&arguments.backends) {
+    let backends = match backends(&arguments.backends, arguments.opencode_url.as_deref()) {
         Ok(backends) => backends,
         Err(message) => {
             eprintln!("{message}");
@@ -397,7 +520,12 @@ fn main() -> ExitCode {
     };
     let root = arguments.speech_root.as_deref();
     let mut engines = Engines::default();
-    let transcriber = match transcriber(root, &arguments.speech_provider, &mut engines) {
+    let transcriber = match transcriber(
+        root,
+        &arguments.speech_provider,
+        &arguments.speech_backend,
+        &mut engines,
+    ) {
         Ok(transcriber) => transcriber,
         Err(message) => {
             eprintln!("{message}");
@@ -421,7 +549,7 @@ fn main() -> ExitCode {
     if let Some(timeout) = arguments.request_timeout {
         server = server.with_request_timeout(timeout);
     }
-    let server = synthesis(server, root, &mut engines);
+    let server = synthesis(server, root, &arguments.speech_segmentation, &mut engines);
     let cancellation = Cancellation::new();
     // Stop on Ctrl-C or SIGTERM by shutting down in order, so that the Bonjour advertisement is withdrawn rather than left to expire.
     #[cfg(unix)]

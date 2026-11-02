@@ -3,7 +3,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{Gate, SpaceState, SpaceSummary};
+use crate::{BackendInfo, Gate, SessionSummary, SpaceState, SpaceSummary, WorkspaceRoot};
 
 /// A tracked pose in the space's coordinate system.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -40,6 +40,11 @@ pub enum ClientMessage {
         credentials: Option<String>,
     },
     ListSpaces,
+    /// The existing sessions of `backend` in `directory`, for attaching. A backend without attaching answers with an error.
+    ListSessions {
+        backend: String,
+        directory: String,
+    },
     /// Create a space bound to a new session, or to an existing `session` where the backend supports binding.
     CreateSpace {
         title: String,
@@ -115,9 +120,17 @@ pub enum ServerMessage {
         server: String,
         /// The participant number used as [`crate::AudioFrame::source`] for this client's forwarded audio.
         source: u32,
+        /// The server's backends, so a client shows only actions each supports.
+        backends: Vec<BackendInfo>,
+        /// The directories a space may run in, so a client can choose one without typing a path.
+        roots: Vec<WorkspaceRoot>,
     },
     Spaces {
         spaces: Vec<SpaceSummary>,
+    },
+    /// The answer to [`ClientMessage::ListSessions`].
+    Sessions {
+        sessions: Vec<SessionSummary>,
     },
     /// The complete state of the joined space. Sent on join and whenever it changes.
     Space {

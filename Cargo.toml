@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/environment-sky", "crates/protocol", "crates/backend", "crates/backend-claude-code", "crates/client", "crates/client-quest", "crates/discovery", "crates/server", "crates/speech", "bake"]
+members = ["crates/environment-sky", "crates/protocol", "crates/backend", "crates/backend-claude-code", "crates/backend-opencode", "crates/client", "crates/client-quest", "crates/discovery", "crates/server", "crates/speech", "bake"]
 resolver = "3"
 
 [profile.release]

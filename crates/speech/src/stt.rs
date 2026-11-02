@@ -9,6 +9,7 @@
 //!
 //! A panic in the recognizer disables recognition until the process restarts: it is logged once, and every open and later utterance fails with [`Error::Stopped`].
 
+mod offline;
 mod punctuation;
 mod resample;
 mod transducer;
@@ -27,6 +28,7 @@ use std::{
 
 use protocol::AudioFrame;
 
+pub use offline::{OfflineRecognition, OfflineRecognizer, OfflineUtterance};
 pub use punctuation::{
     CnnBilstmPunctuator, DEFAULT_PUNCTUATION_MODEL, Punctuated, PunctuationConfig, Punctuator,
 };

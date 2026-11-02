@@ -1,0 +1,22 @@
+[package]
+name = "backend-opencode"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.93"
+description = "The OpenCode backend for the Tomori server: sessions on a running `opencode serve` process, driven over its HTTP and SSE APIs"
+repository = "https://github.com/ioquatix/tomori"
+license = "MIT"
+publish = false
+
+[dependencies]
+async-channel = "2"
+backend = { path = "../backend" }
+base-http = "0.2.0"
+base-http-client = "0.2.0"
+base-scheduler = "0.3.0"
+base-scheduler-direct = "0.3.0"
+futures-lite = "2"
+futures-core = "0.3"
+futures-util = { version = "0.3", default-features = false, features = ["alloc", "std", "async-await", "async-await-macro"] }
+serde = "1"
+serde_json = "1"
