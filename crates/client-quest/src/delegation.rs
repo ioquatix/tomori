@@ -150,6 +150,93 @@ fn valid_id(id: &str) -> bool {
     !id.is_empty() && id.len() <= MAX_ID_BYTES
 }
 
+/// The joined space's delegation workspace, derived from its shared worker state, and its root.
+///
+/// The root stands for the space's own agent session and is named by the space identifier, so joining another space is a root change that clears the scene. Space state gives workers the space's session started directly no parent; they hang off the root. A delegated worker keeps its parent.
+#[derive(Debug, Default)]
+pub struct Workers {
+    root: Option<String>,
+    current: bool,
+    error: Option<String>,
+    workers: Vec<protocol::Worker>,
+    workspace: Workspace,
+}
+
+impl Workers {
+    /// Follow the joined space and whether its state is current, as given by `Conversation::joined_space`, or `None` outside a space. The workspace is derived again only when the space, its workers, its error or currency change.
+    pub fn update(
+        &mut self,
+        space: Option<(&protocol::SpaceState, bool)>,
+    ) -> (Option<&str>, &Workspace) {
+        match space {
+            None => {
+                if self.root.is_some() {
+                    *self = Self::default();
+                }
+            }
+            Some((space, current)) => {
+                if self.root.as_deref() != Some(space.id.as_str())
+                    || self.current != current
+                    || self.error != space.error
+                    || self.workers != space.workers
+                {
+                    self.root = Some(space.id.clone());
+                    self.current = current;
+                    self.error.clone_from(&space.error);
+                    self.workers.clone_from(&space.workers);
+                    self.workspace = Workspace::from_space(space, current);
+                }
+            }
+        }
+        (self.root.as_deref(), &self.workspace)
+    }
+}
+
+impl Workspace {
+    /// The projection of `space`'s workers under the root named by its identifier, for [`Scene::update`].
+    ///
+    /// Workers beyond the node limit, and any with an out-of-contract identifier, are omitted and the projection marked truncated, so the scene treats it as partial rather than removing what it cannot see. A space error marks it partial in the same way, and state that is not `current` marks it stale. Cycles and duplicate identifiers are left for [`Workspace::valid`] to reject.
+    pub fn from_space(space: &protocol::SpaceState, current: bool) -> Self {
+        let mut truncated = false;
+        let mut nodes = Vec::with_capacity(space.workers.len().min(MAX_NODES));
+        for worker in &space.workers {
+            if nodes.len() == MAX_NODES
+                || !valid_id(&worker.id)
+                || worker.parent.as_deref().is_some_and(|id| !valid_id(id))
+            {
+                truncated = true;
+                continue;
+            }
+            nodes.push(Node {
+                id: worker.id.clone(),
+                parent_id: Some(worker.parent.clone().unwrap_or_else(|| space.id.clone())),
+                title: worker.title.chars().take(160).collect(),
+                state: match worker.state {
+                    protocol::WorkerState::Running => State::Running,
+                    protocol::WorkerState::Waiting => State::Waiting,
+                    protocol::WorkerState::Idle => State::Idle,
+                    protocol::WorkerState::Completed => State::Completed,
+                    protocol::WorkerState::Error => State::Error,
+                    protocol::WorkerState::Unknown => State::Unknown,
+                },
+            });
+        }
+        Self {
+            nodes,
+            presentations: Vec::new(),
+            error: space.error.as_deref().map(|error| {
+                let mut end = error.len().min(4096);
+                while !error.is_char_boundary(end) {
+                    end -= 1;
+                }
+                error[..end].to_owned()
+            }),
+            truncated,
+            stale: !current,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub struct Cube {
     pub position: [f32; 3],
@@ -3191,5 +3278,230 @@ mod tests {
             assert!(a.distance(b) <= 0.301);
         }
         assert!(scene.cubes().iter().all(Cube::valid));
+    }
+}
+
+#[cfg(test)]
+mod space_tests {
+    use super::*;
+    use protocol::{SpaceState, Worker as SpaceWorker, WorkerState};
+
+    const SPACE: &str = "space-1";
+
+    fn worker(id: &str, parent: Option<&str>, state: WorkerState) -> SpaceWorker {
+        SpaceWorker {
+            id: id.into(),
+            parent: parent.map(Into::into),
+            title: format!("{id} title"),
+            state,
+        }
+    }
+
+    fn space(workers: Vec<SpaceWorker>) -> SpaceState {
+        SpaceState {
+            id: SPACE.into(),
+            workers,
+            ..Default::default()
+        }
+    }
+
+    fn stations(scene: &Scene) -> BTreeMap<&str, State> {
+        scene
+            .stations()
+            .iter()
+            .map(|station| (station.id.as_str(), station.state))
+            .collect()
+    }
+
+    fn show(scene: &mut Scene, workers: &mut Workers, space: Option<(&SpaceState, bool)>) {
+        for _ in 0..10 {
+            let (root, workspace) = workers.update(space);
+            scene.update(root, workspace, 1.0 / 60.0);
+        }
+    }
+
+    #[test]
+    fn a_space_without_workers_is_an_empty_trusted_root() {
+        let state = space(vec![]);
+        let mut workers = Workers::default();
+        let (root, workspace) = workers.update(Some((&state, true)));
+        assert_eq!(root, Some(SPACE));
+        assert!(workspace.nodes.is_empty());
+        assert!(workspace.valid());
+        assert!(!workspace.stale && !workspace.truncated && workspace.error.is_none());
+        let mut scene = Scene::new();
+        show(&mut scene, &mut workers, Some((&state, true)));
+        assert!(scene.stations().is_empty());
+        assert!(scene.cubes().is_empty());
+    }
+
+    #[test]
+    fn a_top_level_worker_hangs_off_the_space() {
+        let state = space(vec![worker("a", None, WorkerState::Running)]);
+        let workspace = Workspace::from_space(&state, true);
+        assert_eq!(workspace.nodes.len(), 1);
+        assert_eq!(workspace.nodes[0].id, "a");
+        assert_eq!(workspace.nodes[0].parent_id.as_deref(), Some(SPACE));
+        assert_eq!(workspace.nodes[0].title, "a title");
+        assert_eq!(workspace.nodes[0].state, State::Running);
+
+        let mut scene = Scene::new();
+        show(&mut scene, &mut Workers::default(), Some((&state, true)));
+        assert_eq!(stations(&scene), BTreeMap::from([("a", State::Running)]));
+        assert!(!scene.cubes().is_empty());
+        assert!(scene.cubes().iter().all(Cube::valid));
+    }
+
+    #[test]
+    fn a_nested_worker_keeps_its_parent() {
+        let state = space(vec![
+            worker("a", None, WorkerState::Running),
+            worker("b", Some("a"), WorkerState::Waiting),
+        ]);
+        let workspace = Workspace::from_space(&state, true);
+        assert_eq!(workspace.nodes[1].parent_id.as_deref(), Some("a"));
+
+        let mut scene = Scene::new();
+        show(&mut scene, &mut Workers::default(), Some((&state, true)));
+        assert_eq!(
+            stations(&scene),
+            BTreeMap::from([("a", State::Running), ("b", State::Waiting)])
+        );
+    }
+
+    #[test]
+    fn every_worker_state_maps_to_its_station_state() {
+        for (from, to) in [
+            (WorkerState::Running, State::Running),
+            (WorkerState::Waiting, State::Waiting),
+            (WorkerState::Idle, State::Idle),
+            (WorkerState::Completed, State::Completed),
+            (WorkerState::Error, State::Error),
+            (WorkerState::Unknown, State::Unknown),
+        ] {
+            let workspace = Workspace::from_space(&space(vec![worker("a", None, from)]), true);
+            assert_eq!(workspace.nodes[0].state, to);
+        }
+    }
+
+    #[test]
+    fn state_changes_reach_the_scene_and_removals_retire_workers() {
+        let mut workers = Workers::default();
+        let mut scene = Scene::new();
+        let running = space(vec![
+            worker("a", None, WorkerState::Running),
+            worker("b", Some("a"), WorkerState::Running),
+        ]);
+        show(&mut scene, &mut workers, Some((&running, true)));
+        let completed = space(vec![
+            worker("a", None, WorkerState::Running),
+            worker("b", Some("a"), WorkerState::Completed),
+        ]);
+        show(&mut scene, &mut workers, Some((&completed, true)));
+        assert_eq!(
+            stations(&scene),
+            BTreeMap::from([("a", State::Running), ("b", State::Completed)])
+        );
+        let failed = space(vec![worker("a", None, WorkerState::Error)]);
+        show(&mut scene, &mut workers, Some((&failed, true)));
+        assert_eq!(scene.workers["a"].state, State::Error);
+        assert!(scene.workers["b"].retired.is_some());
+    }
+
+    #[test]
+    fn leaving_the_space_clears_the_workers() {
+        let state = space(vec![worker("a", None, WorkerState::Running)]);
+        let mut workers = Workers::default();
+        let mut scene = Scene::new();
+        show(&mut scene, &mut workers, Some((&state, true)));
+        assert!(!scene.stations().is_empty());
+        let (root, workspace) = workers.update(None);
+        assert_eq!(root, None);
+        assert!(workspace.nodes.is_empty());
+        show(&mut scene, &mut workers, None);
+        assert!(scene.stations().is_empty());
+        assert!(scene.cubes().is_empty());
+    }
+
+    #[test]
+    fn joining_another_space_is_a_new_root() {
+        let first = space(vec![worker("a", None, WorkerState::Running)]);
+        let second = SpaceState {
+            id: "space-2".into(),
+            ..space(vec![worker("c", None, WorkerState::Idle)])
+        };
+        let mut workers = Workers::default();
+        let mut scene = Scene::new();
+        show(&mut scene, &mut workers, Some((&first, true)));
+        show(&mut scene, &mut workers, Some((&second, true)));
+        assert_eq!(workers.update(Some((&second, true))).0, Some("space-2"));
+        assert_eq!(stations(&scene), BTreeMap::from([("c", State::Idle)]));
+    }
+
+    #[test]
+    fn a_lost_connection_is_stale_and_a_space_error_is_partial() {
+        let state = space(vec![worker("a", None, WorkerState::Running)]);
+        let mut workers = Workers::default();
+        let mut scene = Scene::new();
+        show(&mut scene, &mut workers, Some((&state, true)));
+        assert!(workers.update(Some((&state, false))).1.stale);
+        show(&mut scene, &mut workers, Some((&state, false)));
+        assert_eq!(stations(&scene), BTreeMap::from([("a", State::Unknown)]));
+
+        // With the backend lost, an empty worker list is no evidence that the worker finished.
+        let errored = SpaceState {
+            error: Some("é".repeat(3000)),
+            ..space(vec![])
+        };
+        let (_, workspace) = workers.update(Some((&errored, true)));
+        assert!(workspace.valid());
+        assert!(workspace.error.as_ref().unwrap().len() <= 4096);
+        show(&mut scene, &mut workers, Some((&errored, true)));
+        assert!(scene.workers["a"].retired.is_none());
+    }
+
+    #[test]
+    fn out_of_contract_workers_are_omitted_as_truncated() {
+        let mut list: Vec<_> = (0..MAX_NODES + 3)
+            .map(|i| worker(&format!("w{i}"), None, WorkerState::Running))
+            .collect();
+        list.insert(0, worker("", None, WorkerState::Running));
+        let long = "p".repeat(MAX_ID_BYTES + 1);
+        list.insert(1, worker("bad-parent", Some(&long), WorkerState::Running));
+        list[2].title = "t".repeat(400);
+        let workspace = Workspace::from_space(&space(list.clone()), true);
+        assert_eq!(workspace.nodes.len(), MAX_NODES);
+        assert_eq!(workspace.nodes[0].id, "w0");
+        assert_eq!(workspace.nodes[0].title.chars().count(), 160);
+        assert!(workspace.truncated);
+        assert!(workspace.valid());
+
+        let mut scene = Scene::new();
+        show(
+            &mut scene,
+            &mut Workers::default(),
+            Some((&space(list), true)),
+        );
+        assert_eq!(scene.stations().len(), MAX_NODES);
+    }
+
+    #[test]
+    fn a_parent_cycle_is_rejected_by_validation() {
+        let state = space(vec![
+            worker("a", Some("b"), WorkerState::Running),
+            worker("b", Some("a"), WorkerState::Running),
+        ]);
+        assert!(!Workspace::from_space(&state, true).valid());
+        let mut scene = Scene::new();
+        show(&mut scene, &mut Workers::default(), Some((&state, true)));
+        assert!(scene.stations().is_empty());
+    }
+
+    #[test]
+    fn a_worker_whose_parent_is_missing_keeps_that_parent() {
+        let state = space(vec![worker("b", Some("gone"), WorkerState::Running)]);
+        let workspace = Workspace::from_space(&state, true);
+        assert!(workspace.valid());
+        assert_eq!(workspace.nodes[0].parent_id.as_deref(), Some("gone"));
     }
 }

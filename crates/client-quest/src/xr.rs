@@ -163,11 +163,9 @@ pub fn run(
     // After focus loss, X must be released before it records again, so that holding it through a system menu does not start a recording.
     let mut talk_blocked = false;
     let mut signals = crate::interaction::Signals::default();
-    #[cfg(target_os = "android")]
     let mut delegation_scene = crate::delegation::Scene::new();
-    #[cfg(target_os = "android")]
+    let mut workers = crate::delegation::Workers::default();
     let mut coordinator_samples = Vec::with_capacity(crate::swarm::AGENT_COUNT);
-    #[cfg(target_os = "android")]
     let mut presentation_navigation = crate::workspace_graphics::CardNavigation::default();
     log::info!(
         "Ready: {width}x{height} per eye, {} swapchain images. Right trigger: attract; A: choose or reset.",
@@ -191,7 +189,6 @@ pub fn run(
                         was_talking = false;
                         talk_blocked = true;
                         conversation.stop_talking();
-                        #[cfg(target_os = "android")]
                         presentation_navigation.release();
                     }
                     focused = state == xr::SessionState::FOCUSED;
@@ -234,7 +231,6 @@ pub fn run(
             was_talking = false;
             talk_blocked = true;
             conversation.stop_talking();
-            #[cfg(target_os = "android")]
             presentation_navigation.release();
         }
         if !running {
@@ -300,7 +296,6 @@ pub fn run(
             controls.replay,
             controls.audience_grip,
         );
-        #[cfg(target_os = "android")]
         presentation_navigation.update(
             None,
             &crate::delegation::Workspace::default(),
@@ -379,10 +374,7 @@ pub fn run(
             },
             controls.attracting,
         );
-        // Workers arrive with the space state once the scene reads it.
-        #[cfg(target_os = "android")]
-        let (root, current_workspace) = (None, &crate::delegation::Workspace::default());
-        #[cfg(target_os = "android")]
+        let (root, current_workspace) = workers.update(conversation.joined_space());
         {
             renderer.set_presentation_page(presentation_navigation.card);
             renderer.set_presentation_content_page(presentation_navigation.content);
