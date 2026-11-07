@@ -6,7 +6,7 @@ This describes how a participant travels in a space beyond the room they stand i
 
 **Environments declare it; Tomori owns the devices.** An environment declares a locomotion profile, and Tomori's clients turn the controllers, the keyboard and the mouse into travel for it. There are three:
 
-- **None**, the default: room scale, as before. Nothing in this document changes anything in a space whose environment declares none, or anywhere outside a space. Sky and the Minimal grid declare none.
+- **None**, the default: room scale, as before. Nothing in this document changes anything in a space whose environment declares none, or anywhere outside a space. Sky and the Minimal grid declare none; the farmyard declares teleport about its yard (see `farmyard.md`).
 - **Teleport**: point and release onto walkable surfaces that the environment declares, with a preview, and turn in snaps of 30°.
 - **Fly**: teleport, and rise as well, up to a ceiling the environment declares; landing on a surface brings the participant back down to it.
 
@@ -75,5 +75,5 @@ The maintainer decided, reviewing the first pass in November 2026, that the buil
 - A desktop window test, on lavapipe, that after travelling and with the transcript showing, the window draws exactly what the renderer draws with the space and its panels both taken to the participant's room, and that drawing either from home instead differs.
 - Frame step tests: in a space with a teleport profile, the ray ends at the landing with its ring, workers are not pointed at while aiming, a carried card is not put down by the stick, the hover and choose cues are given, the landing frame is dark and drawn from where the participant was, and the next frame's head, controllers, a tracked hand, listener and presence are where the participant travelled, as are the headset's eye matrices and the desktop window's view, while the pill stays with the participant; with a profile of none, or outside a space, the left stick changes nothing.
 - Documentation tests that the constructors build a profile and that a variant's fields cannot be given directly outside `tomori-scene`.
-- A test that the conversation applies a declared profile only in a space bound to an environment it draws, and that Tomori's own build declares none.
+- A test that the conversation applies a declared profile only in a space bound to an environment it draws, and that Tomori's own build declares a profile for the farmyard alone.
 - On the headset: confirm that teleporting and snap turns are comfortable, that the ring is easy to see and place, that the stick's thresholds suit a real Quest, and that the spectator sees and hears from where the participant travelled.

@@ -58,7 +58,7 @@ enum Role {
 }
 
 /// Which half of an environment a crate is.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Half {
     Common,
     Server,
@@ -112,10 +112,48 @@ fn packages_are_told_apart_by_their_names() {
         role("tomori-environment-github-server"),
         Role::Environment(Half::Server)
     );
+    assert_eq!(
+        role("tomori-environment-farmyard"),
+        Role::Environment(Half::Common)
+    );
+    assert_eq!(
+        role("tomori-environment-farmyard-client"),
+        Role::Environment(Half::Client)
+    );
     assert_eq!(role("tomori-environment"), Role::Core);
     assert_eq!(role("tomori-server"), Role::Core);
     assert_eq!(role("tomori-server-app"), Role::App);
     assert_eq!(role("tomori-example-headset"), Role::Exempt);
+}
+
+/// Tomori's own environments' crates, each by its role, which the rule must find among the workspace's packages, so that one renamed out of the convention, which the rule would then take for core or skip, fails here rather than going unchecked.
+const ENVIRONMENTS: &[(&str, Half)] = &[
+    ("tomori-environment-farmyard", Half::Common),
+    ("tomori-environment-farmyard-client", Half::Client),
+    ("tomori-environment-github", Half::Common),
+    ("tomori-environment-github-client", Half::Client),
+    ("tomori-environment-github-server", Half::Server),
+    ("tomori-environment-sky", Half::Common),
+    ("tomori-environment-sky-client", Half::Client),
+];
+
+#[test]
+fn the_rule_checks_every_one_of_tomoris_environments_crates() {
+    let mut found: Vec<(String, Role)> = packages()
+        .iter()
+        .map(|package| package["name"].as_str().unwrap().to_owned())
+        .map(|name| {
+            let role = role(&name);
+            (name, role)
+        })
+        .filter(|(_, role)| matches!(role, Role::Environment(_)))
+        .collect();
+    found.sort_by(|(left, _), (right, _)| left.cmp(right));
+    let expected: Vec<(String, Role)> = ENVIRONMENTS
+        .iter()
+        .map(|(name, half)| ((*name).to_owned(), Role::Environment(*half)))
+        .collect();
+    assert_eq!(found, expected);
 }
 
 #[test]

@@ -1,0 +1,27 @@
+[package]
+name = "tomori-environment-farmyard-client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Tomori's farmyard environment, its client half: the scenery Tomori's clients draw and its registration with a client's sceneries"
+repository.workspace = true
+license.workspace = true
+readme = "readme.md"
+keywords = ["tomori", "environment", "xr", "farmyard", "wgpu"]
+categories = ["rendering", "game-development"]
+
+[dependencies]
+bytemuck = { version = "1", features = ["derive"] }
+glam = "0.30"
+log = "0.4"
+tomori-assets = { version = "0.2.0", path = "../assets" }
+tomori-environment-farmyard = { version = "0.2.0", path = "../environment-farmyard" }
+tomori-render = { version = "0.2.0", path = "../render" }
+tomori-scene = { version = "0.2.0", path = "../scene" }
+wgpu = { version = "30.0.1", default-features = false, features = ["std", "vulkan", "wgsl"] }
+
+[dev-dependencies]
+image = { version = "0.25", default-features = false, features = ["png"] }
+pollster = "0.4"
+# The device for offscreen rendering tests and WGSL validation. It has no version, so that packaging leaves it out: only the tests use it.
+tomori-render = { path = "../render", features = ["test-gpu"] }

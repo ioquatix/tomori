@@ -3588,6 +3588,7 @@ dependencies = [
  "tomori-client",
  "tomori-client-desktop",
  "tomori-client-spectator",
+ "tomori-environment-farmyard-client",
  "tomori-environment-github-client",
  "tomori-environment-sky-client",
  "tomori-protocol",
@@ -3612,6 +3613,7 @@ dependencies = [
  "serde_json",
  "tomori-client",
  "tomori-client-desktop",
+ "tomori-environment-farmyard-client",
  "tomori-environment-github-client",
  "tomori-environment-sky-client",
  "tomori-protocol",
@@ -3635,6 +3637,31 @@ name = "tomori-environment"
 version = "0.2.0"
 dependencies = [
  "base-scheduler",
+]
+
+[[package]]
+name = "tomori-environment-farmyard"
+version = "0.2.0"
+dependencies = [
+ "glam",
+ "log",
+ "tomori-assets",
+]
+
+[[package]]
+name = "tomori-environment-farmyard-client"
+version = "0.2.0"
+dependencies = [
+ "bytemuck",
+ "glam",
+ "image",
+ "log",
+ "pollster",
+ "tomori-assets",
+ "tomori-environment-farmyard",
+ "tomori-render",
+ "tomori-scene",
+ "wgpu",
 ]
 
 [[package]]
@@ -3817,6 +3844,7 @@ dependencies = [
  "tomori-client",
  "tomori-client-quest",
  "tomori-client-spectator",
+ "tomori-environment-farmyard",
  "tomori-environment-github-server",
  "tomori-environment-sky",
  "tomori-protocol",

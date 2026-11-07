@@ -1,0 +1,17 @@
+[package]
+name = "tomori-environment-farmyard"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Tomori's farmyard environment, an evening yard with a chicken coop: its identity, layout and models, shared by its server and its clients"
+repository.workspace = true
+license.workspace = true
+readme = "readme.md"
+keywords = ["tomori", "environment", "xr", "farmyard"]
+categories = ["game-development"]
+
+[dependencies]
+glam = "0.30"
+log = "0.4"
+# Its models, built in code and loaded, without drawing them.
+tomori-assets = { version = "0.2.0", path = "../assets", default-features = false }

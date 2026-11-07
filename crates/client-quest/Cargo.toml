@@ -22,7 +22,7 @@ required-features = ["app"]
 [features]
 default = ["app"]
 # Tomori's own app: `tomori::app::builder()`, which registers Tomori's own environments from their crates, the `tomori` executable that runs it, and the `android_main` that runs it on the Quest. A headset build of another project's turns it off, with `default-features = false`, to write its own `android_main` that runs its builder, and to depend on no environment it does not register; see design/builders.md.
-app = ["dep:tomori-environment-github-client", "dep:tomori-environment-sky-client"]
+app = ["dep:tomori-environment-farmyard-client", "dep:tomori-environment-github-client", "dep:tomori-environment-sky-client"]
 
 [dependencies]
 anyhow = "1"
@@ -36,6 +36,8 @@ tomori-protocol = { version = "0.2.0", path = "../protocol" }
 tomori-assets = { version = "0.2.0", path = "../assets", default-features = false }
 tomori-render = { version = "0.2.0", path = "../render" }
 tomori-scene = { version = "0.2.0", path = "../scene" }
+# The farmyard, which Tomori's own app registers.
+tomori-environment-farmyard-client = { version = "0.2.0", path = "../environment-farmyard-client", optional = true }
 # The GitHub prototype's presentation, which Tomori's own app registers.
 tomori-environment-github-client = { version = "0.2.0", path = "../environment-github-client", optional = true }
 # Sky, which Tomori's own app registers.

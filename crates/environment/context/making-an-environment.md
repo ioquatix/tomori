@@ -46,7 +46,7 @@ let server = tomori_server::Server::builder().environment(
 let headset = tomori::Builder::default().register(observe_client::register);
 ```
 
-The server offers a client only the environments it presents at the same version, and a client in a space whose environment it lacks shows the grid and names it. Tomori's own server program, `tomori-server-app`, registers Sky and the grid, and Tomori's own app, `tomori-client-quest`'s `app` feature, registers Sky's client half, in the same way.
+The server offers a client only the environments it presents at the same version, and a client in a space whose environment it lacks shows the grid and names it. Tomori's own server program, `tomori-server-app`, registers Sky, the grid and the farmyard, and Tomori's own app, `tomori-client-quest`'s `app` feature, registers Sky's and the farmyard's client halves, in the same way.
 
 ## The dependency rule
 

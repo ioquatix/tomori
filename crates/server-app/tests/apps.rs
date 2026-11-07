@@ -101,11 +101,12 @@ fn tomoris_own_server_offers_tomoris_own_app_and_spectator_exactly_what_they_pre
         offered.sort();
         offered
     };
-    // A client that lists nothing is offered every one, at the server's versions: Sky, the grid and GitHub.
+    // A client that lists nothing is offered every one, at the server's versions: Sky, the grid, the farmyard and GitHub.
     let everything = offered(None);
     assert_eq!(
         everything,
         [
+            ("farmyard".to_owned(), 1),
             ("github".to_owned(), 1),
             ("minimal".to_owned(), 1),
             ("sky".to_owned(), 1)

@@ -19,6 +19,8 @@ The crates share one version and are released together, so depend on the same ve
 | `tomori-speech` | Streaming speech recognition, speakable text selection and synthesis, through prebuilt sherpa-onnx libraries. |
 | `tomori-environment-sky` | The identity of the Sky environment, its identifier and version, which its server and client halves share. |
 | `tomori-environment-sky-client` | The renderer of the Sky environment, a moonlit sky, clouds, a platform and a shrine, drawn with wgpu, and its registration as a scenery. Tomori's own app and spectator register it; its interface changes when environments get a shared interface. |
+| `tomori-environment-farmyard` | The farmyard environment, an evening yard with a chicken coop: its identity, layout and models, which its server and client halves share. |
+| `tomori-environment-farmyard-client` | The farmyard's client half: its scenery and teleport profile, registered with a client's sceneries. Tomori's own app and spectator register it. |
 | `tomori-server` | The server library, whose builder registers backends and environments, starting with none, of Tomori's own or another project's. See its Building a Tomori Server guide. |
 | `tomori-server-app` | Tomori's own server, the `tomori-server` executable, which registers Tomori's own environments on the library's builder. |
 
