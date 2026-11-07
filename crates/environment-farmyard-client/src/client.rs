@@ -80,7 +80,7 @@ impl FarmyardClient {
     /// The farmyard's clock at `now`, once a message has said what it is.
     pub fn clock(&self, now: Instant) -> Option<u64> {
         self.offset
-            .map(|offset| (self.local(now) + offset).max(0) as u64)
+            .map(|offset| self.local(now).saturating_add(offset).max(0) as u64)
     }
 
     /// Take what the server side sent at `now`: a state, which begins anew, or a chicken's new behaviour. Each says the
@@ -95,7 +95,7 @@ impl FarmyardClient {
                 log::debug!("A farmyard state could not be read.");
                 return;
             };
-            self.offset = Some(state.clock as i64 - local);
+            self.offset = Some((state.clock as i64).saturating_sub(local));
             self.controllers = match &self.chicken {
                 Some(chicken) => state
                     .chickens
@@ -114,7 +114,7 @@ impl FarmyardClient {
             };
             self.offset = self
                 .offset
-                .map(|offset| offset.max(event.clock as i64 - local));
+                .map(|offset| offset.max((event.clock as i64).saturating_sub(local)));
             if let Some(controller) = self.controllers.get_mut(event.chicken) {
                 controller.behave(event.behaviour);
             }

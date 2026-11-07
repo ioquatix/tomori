@@ -286,3 +286,45 @@ fn chickens_cluck_when_noticed_squawk_when_startled_and_now_and_then_of_their_ow
     ));
     assert!(output.sounds.is_empty());
 }
+
+#[test]
+fn a_state_or_event_at_the_ends_of_the_clock_is_shown_without_overflowing() {
+    // What a server shares is read as untrusted: clocks and moments at the very ends of their range, far-off places and
+    // headings, move and draw the chickens without overflowing, so a debug build does not panic.
+    let epoch = Instant::now();
+    for clock in [0, u64::MAX] {
+        let mut client = FarmyardClient::new("space-1", Some(chicken()), epoch);
+        let mut shared =
+            serde_json::to_value(Flock::new(flock::seed("space-1"), chicken(), 0).state(0))
+                .unwrap();
+        shared["clock"] = clock.into();
+        let mut updates = vec![Update::State(Payload::new(shared))];
+        for (chicken, doing) in [
+            Doing::Walk {
+                to: [f32::MAX, 0.0, -f32::MAX],
+            },
+            Doing::Recover,
+            Doing::Sprint {
+                away: [f32::MAX, f32::MAX],
+            },
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            updates.push(event(
+                clock,
+                chicken,
+                Behaviour {
+                    since: u64::MAX,
+                    at: [-f32::MAX, 0.0, f32::MAX],
+                    heading: 1.0e30,
+                    doing,
+                },
+            ));
+        }
+        let later = epoch + Duration::from_secs(2);
+        let output = client.update(Input::new(updates, later));
+        assert!(!drawn(&output).chickens.is_empty());
+        assert!(client.clock(later).is_some());
+    }
+}

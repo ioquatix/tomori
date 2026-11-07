@@ -124,13 +124,14 @@ impl Behaviour {
             halves += 1;
             distance = (halves / 2) as f32 * stride + if halves % 2 == 1 { half } else { 0.0 };
         }
-        let walks = self.since + (turning * 1000.0).round() as u64;
+        // Moments a server shares are untrusted on its clients, so they saturate rather than overflow.
+        let walks = self.since.saturating_add((turning * 1000.0).round() as u64);
         let seconds = halves as f32 * loop_seconds / 2.0 / pace;
         Some(Walk {
             direction: offset.normalize_or_zero(),
             heading,
             walks,
-            stops: walks + (seconds * 1000.0).round() as u64,
+            stops: walks.saturating_add((seconds * 1000.0).round() as u64),
             distance,
         })
     }
@@ -141,12 +142,11 @@ impl Behaviour {
         match self.doing {
             Doing::Walk { .. } => self.walk(chicken, pace).map(|walk| walk.stops),
             Doing::Peck { until } | Doing::Look { until, .. } => Some(until),
-            Doing::Recover => Some(self.since + RECOVERING),
-            Doing::Sprint { .. } => Some(
-                self.since
-                    + (chicken.sprint.step * (chicken.sprint.distances.len() - 1) as f32 * 1000.0)
-                        .round() as u64,
-            ),
+            Doing::Recover => Some(self.since.saturating_add(RECOVERING)),
+            Doing::Sprint { .. } => Some(self.since.saturating_add(
+                (chicken.sprint.step * (chicken.sprint.distances.len() - 1) as f32 * 1000.0).round()
+                    as u64,
+            )),
             Doing::Stand | Doing::Confused { .. } | Doing::Roost => None,
         }
     }

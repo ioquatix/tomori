@@ -14,4 +14,4 @@ The farmyard's chickens are split as a model, a view and a controller, across it
 
 ## Changing them
 
-A change to what the server and clients exchange, the JSON of `State`, `Event` or `Intent`, or to what both compute, such as `Behaviour::place`, the layout or the chicken's asset, raises the farmyard's version in `tomori_protocol::environments::FARMYARD`, unless an older client can ignore it. To replace the chicken, export it again as `assets/source/readme.md` says, and update `DIGEST` and the tests that keep its stride and sprint.
+A change to what the server and clients exchange, the JSON of `State`, `Event` or `Intent`, or to what both compute, such as `Behaviour::place`, the layout or the chicken's asset, raises the farmyard's version, `VERSION` in this crate, unless an older client can ignore it. To replace the chicken, export it again as `assets/source/readme.md` says, and update `DIGEST` and the tests that keep its stride and sprint.
