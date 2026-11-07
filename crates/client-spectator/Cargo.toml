@@ -18,7 +18,7 @@ required-features = ["app"]
 [features]
 default = ["app"]
 # Tomori's own spectator: `tomori_client_spectator::app::sceneries()`, which registers Tomori's own environments from their crates, and the `tomori-spectator` executable that draws them. `tomori-client-quest` turns it off, as its spectator modes draw the build's sceneries.
-app = ["dep:tomori-environment-github-client", "dep:tomori-environment-sky-client"]
+app = ["dep:tomori-environment-farmyard-client", "dep:tomori-environment-github-client", "dep:tomori-environment-sky-client"]
 
 [dependencies]
 anyhow = "1"
@@ -32,6 +32,8 @@ tomori-client-desktop = { version = "0.2.0", path = "../client-desktop" }
 tomori-protocol = { version = "0.2.0", path = "../protocol" }
 tomori-render = { version = "0.2.0", path = "../render" }
 tomori-scene = { version = "0.2.0", path = "../scene" }
+# The farmyard, which Tomori's own app registers.
+tomori-environment-farmyard-client = { version = "0.2.0", path = "../environment-farmyard-client", optional = true }
 # The GitHub prototype's presentation, which Tomori's own app registers.
 tomori-environment-github-client = { version = "0.2.0", path = "../environment-github-client", optional = true }
 # Sky, which Tomori's own spectator registers.

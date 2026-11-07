@@ -101,11 +101,12 @@ fn tomoris_own_server_offers_tomoris_own_app_and_spectator_exactly_what_they_pre
         offered.sort();
         offered
     };
-    // A client that lists nothing is offered every one, at the server's versions: Sky, the grid and GitHub.
+    // A client that lists nothing is offered every one, at the server's versions: Sky, the grid, the farmyard and GitHub.
     let everything = offered(None);
     assert_eq!(
         everything,
         [
+            ("farmyard".to_owned(), 1),
             ("github".to_owned(), 1),
             ("minimal".to_owned(), 1),
             ("sky".to_owned(), 1)
@@ -131,4 +132,26 @@ fn tomoris_own_server_offers_tomoris_own_app_and_spectator_exactly_what_they_pre
     }
     stop(&mut server, said);
     std::fs::remove_dir_all(state).unwrap();
+}
+
+#[test]
+fn tomoris_own_app_credits_the_farmyards_chicken_with_its_licence() {
+    // The chicken is by Hinoki Maple Williams, under CC BY 4.0, which asks that whoever shares it credits her and links
+    // the licence: `tomori --licenses` shows its notice, as the farmyard's registration adds it.
+    let notices = tomori::app::builder().sceneries().licenses();
+    assert!(
+        notices
+            .iter()
+            .any(|(_, notice)| *notice == tomori_environment_farmyard::LICENSE)
+    );
+    for credit in [
+        "Hinoki Maple Williams",
+        "Creative Commons Attribution 4.0 International",
+        "https://creativecommons.org/licenses/by/4.0/",
+    ] {
+        assert!(
+            tomori_environment_farmyard::LICENSE.contains(credit),
+            "{credit}"
+        );
+    }
 }

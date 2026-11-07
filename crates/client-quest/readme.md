@@ -21,7 +21,7 @@ fn builder() -> tomori::Builder {
         // Sky, as Tomori's own build draws it.
         .register(tomori_environment_sky_client::register)
         .scenery("observe", my_scenery)
-        // Teleport onto a floor 40 m across, and turn in snaps of 30°; Tomori's own environments declare none. Provisional, until environments have server sides to declare it.
+        // Teleport onto a floor 40 m across, and turn in snaps of 30°; of Tomori's own environments, only the farmyard declares one. Provisional, until environments have server sides to declare it.
         .locomotion(
             "observe",
             tomori::Locomotion::teleport(vec![tomori::Surface::rectangle(

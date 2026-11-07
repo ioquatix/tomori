@@ -95,6 +95,7 @@ impl Participant {
         conversation.set_drawable(sceneries.environments());
         conversation.set_over_grid(sceneries.over_grid());
         conversation.set_locomotion(sceneries.locomotion());
+        conversation.set_client_sides(sceneries.client_sides());
         let samples = gpu.samples(gpu.format);
         let renderer = Renderer::with_sceneries(
             &gpu.device,

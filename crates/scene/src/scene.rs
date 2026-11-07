@@ -176,6 +176,8 @@ pub struct Frame<'a> {
     pub landing: Option<Vec3>,
     /// How dark the view is drawn, from 0 to 1, as it comes back after a teleport; see `design/locomotion.md`.
     pub blink: f32,
+    /// What the environment's client side shows, for its scenery to draw. See `design/environments.md`.
+    pub environment: Option<crate::client_side::Drawn>,
 }
 
 /// Where travel applies: the joined space, by its identifier, and its environment as drawn.
@@ -226,6 +228,12 @@ pub struct Step {
     travel: Travel,
     /// The left stick, which travels in such a space, from the last buttons.
     travel_stick: Vec2,
+    /// The client side of the joined space's environment, for that space and environment. See `design/environments.md`.
+    client: Option<(
+        String,
+        crate::environment::Environment,
+        Box<dyn crate::client_side::ClientSide>,
+    )>,
 }
 
 impl Default for Step {
@@ -254,6 +262,7 @@ impl Default for Step {
             board: crate::board::Board::default(),
             travel: Travel::default(),
             travel_stick: Vec2::ZERO,
+            client: None,
         }
     }
 }
@@ -643,6 +652,52 @@ impl Step {
                 .map(|(card, _, _)| card.clone())
         });
         let worker = worker.filter(|_| card.is_none());
+        // The environment's client side, in a space whose scenery has grown in, made for the space and environment it
+        // is in. It points at what the environment shows only where nothing else is nearer, and not while a card is
+        // carried.
+        let shown = conversation.client_side().filter(|(environment, _)| {
+            scenery.reveal.is_none() && scenery.environment == *environment
+        });
+        let space = conversation
+            .joined_space()
+            .map(|(space, _)| space.id.clone());
+        match (shown, space) {
+            (Some((environment, factory)), Some(space)) => {
+                let current = self.client.as_ref().is_some_and(|(in_space, drawn, _)| {
+                    *in_space == space && *drawn == environment
+                });
+                if !current {
+                    let client = factory(&space);
+                    self.client = Some((space, environment, client));
+                }
+            }
+            _ => self.client = None,
+        }
+        let nearest = card
+            .as_ref()
+            .and_then(|_| board.pointed.as_ref().map(|(_, distance, _)| *distance))
+            .or_else(|| {
+                worker
+                    .as_ref()
+                    .and(self.delegation_scene.hit_point())
+                    .map(reach)
+            })
+            .unwrap_or(f32::INFINITY);
+        let object = self
+            .client
+            .as_ref()
+            .zip(
+                senses
+                    .ray
+                    .filter(|_| in_space && self.board.held().is_none()),
+            )
+            .and_then(|((_, _, client), ray)| client.pick(&ray))
+            .filter(|picked| picked.distance < nearest);
+        let (card, worker) = if object.is_some() {
+            (None, None)
+        } else {
+            (card, worker)
+        };
         // Entering a new target, an arrival object, a hand menu row, a card or a worker, ticks very lightly, but not while the trigger pulls the swarm.
         let target = self
             .highlighted
@@ -650,16 +705,51 @@ impl Step {
             .map(feedback::key)
             .or_else(|| card.as_ref().map(feedback::key))
             .or_else(|| worker.as_ref().map(feedback::key))
+            .or_else(|| object.as_ref().map(|picked| feedback::key(&picked.object)))
             .or_else(|| travel.landing.map(|_| feedback::key("landing")));
         if self.hover.update(target, attracting) {
             feedback.emit(feedback::Event::Hover, now);
         }
         let card_end = card.as_ref().and(board.end);
-        conversation.point(match (card, worker) {
-            (Some(card), _) => Some(tomori_protocol::Resource::card(card)),
-            (None, Some(worker)) => Some(tomori_protocol::Resource::worker(worker)),
-            (None, None) => None,
-        });
+        let object_end = object
+            .as_ref()
+            .zip(senses.ray)
+            .map(|(picked, ray)| ray.at(picked.distance));
+        match (card, worker, &object) {
+            (Some(card), _, _) => conversation.point(Some(tomori_protocol::Resource::card(card))),
+            (None, Some(worker), _) => {
+                conversation.point(Some(tomori_protocol::Resource::worker(worker)))
+            }
+            (None, None, Some(picked)) => {
+                conversation.point_at_object(&picked.object, &picked.label)
+            }
+            (None, None, None) => conversation.point(None),
+        }
+        // What the environment's server side sent reaches its client side, which says what to ask, what it sounds and
+        // what its scenery draws.
+        let drawn = match self.client.as_mut() {
+            Some((_, environment, client)) => {
+                let updates =
+                    conversation.environment_updates(environment.id(), environment.version());
+                let head = senses.head_pose.map(|pose| Vec3::from_array(pose.position));
+                let output = client.update(
+                    crate::client_side::Input::new(updates, now)
+                        .pointing(object.as_ref().map(|picked| picked.object.as_str()), head),
+                );
+                for intent in output.intents {
+                    conversation.environment_intent(
+                        environment.id(),
+                        environment.version(),
+                        intent,
+                    );
+                }
+                for (sound, position) in output.sounds {
+                    feedback.ambient(sound, position, now);
+                }
+                output.drawn
+            }
+            None => None,
+        };
         let (root, workspace) = self.workers.update(conversation.joined_space());
         self.coordinator_samples.clear();
         self.coordinator_samples.extend(
@@ -690,7 +780,9 @@ impl Step {
                 hit: travel.landing.is_some(),
             })
         } else {
-            let hit = card_end.or_else(|| self.delegation_scene.hit_point());
+            let hit = card_end
+                .or(object_end)
+                .or_else(|| self.delegation_scene.hit_point());
             ray.filter(|_| in_space).map(|ray| crate::pointing::Beam {
                 origin: ray.origin,
                 end: hit.unwrap_or_else(|| ray.at(crate::pointing::SPACE_RAY_LENGTH)),
@@ -755,6 +847,7 @@ impl Step {
             cards: board.sheets,
             landing: travel.landing,
             blink: travel.blink,
+            environment: drawn,
         }
     }
 }
@@ -976,6 +1069,140 @@ mod tests {
         let mut buttons = Buttons::default();
         change(&mut buttons);
         buttons
+    }
+
+    /// What a fake client side was told each frame: how many updates, what was pointed at, and whether the head was known.
+    type Told = std::sync::Arc<std::sync::Mutex<Vec<(usize, Option<String>, bool)>>>;
+
+    /// A client side that picks whatever the ray meets a metre away, asks and sounds once a frame, and shows how many
+    /// frames it has had, keeping what it was told.
+    struct Fake {
+        frames: usize,
+        told: Told,
+    }
+
+    impl crate::client_side::ClientSide for Fake {
+        fn pick(&self, _ray: &Ray) -> Option<crate::client_side::Picked> {
+            Some(crate::client_side::Picked::new("thing-1", "the thing", 1.0))
+        }
+
+        fn update(&mut self, input: crate::client_side::Input<'_>) -> crate::client_side::Output {
+            self.frames += 1;
+            self.told.lock().unwrap().push((
+                input.updates.len(),
+                input.pointed.map(str::to_owned),
+                input.head.is_some(),
+            ));
+            crate::client_side::Output::new()
+                .with_intent(tomori_protocol::Payload::new(serde_json::json!(
+                    self.frames
+                )))
+                .with_sound(
+                    crate::client_side::Sound::new(vec![0.0; 4], 48_000),
+                    [0.0, 1.0, -1.0],
+                )
+                .drawing(std::sync::Arc::new(self.frames))
+        }
+    }
+
+    #[test]
+    fn an_environment_s_client_side_is_made_for_its_space_once_it_grows_in_and_presents_what_its_side_shares()
+     {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::{Arc, Mutex};
+        use tomori_client::Event;
+        use tomori_protocol::Resource;
+        use tomori_protocol::{ClientMessage, ServerMessage};
+        let made = Arc::new(AtomicUsize::new(0));
+        let told = Arc::new(Mutex::new(Vec::new()));
+        let factory: crate::client_side::Factory = {
+            let (made, told) = (made.clone(), told.clone());
+            Arc::new(move |space: &str| {
+                assert_eq!(space, SPACE);
+                made.fetch_add(1, Ordering::Relaxed);
+                Box::new(Fake {
+                    frames: 0,
+                    told: told.clone(),
+                }) as Box<dyn crate::client_side::ClientSide>
+            })
+        };
+        let mut conversation = lobby(ConnectionRole::Owner);
+        conversation.set_client_sides(vec![(crate::test_support::SKY, factory)]);
+        assert!(conversation.client_side().is_none());
+        let mut step = Step::default();
+        let mut feedback = felt();
+        let now = Instant::now();
+        let senses = Senses {
+            ray: Ray::new(arrival::HOME, Vec3::NEG_Z),
+            ..senses()
+        };
+        conversation.apply(space(|_| {}));
+        conversation.take_actions();
+        assert_eq!(
+            conversation
+                .client_side()
+                .map(|(environment, _)| environment),
+            Some(crate::test_support::SKY)
+        );
+        // Not while the space's scenery grows in.
+        let growing = step.update(&senses, &mut conversation, &mut feedback, now, FRAME);
+        assert!(growing.environment.is_none());
+        let mut shown = None;
+        for _ in 0..400 {
+            shown = step
+                .update(&senses, &mut conversation, &mut feedback, now, FRAME)
+                .environment;
+        }
+        // Made once, it shows what it shows, sounds, and points at what the ray meets, which the participant attends to.
+        assert_eq!(made.load(Ordering::Relaxed), 1);
+        let frames = *shown.unwrap().downcast_ref::<usize>().unwrap();
+        assert!(frames > 1);
+        assert_eq!(
+            told.lock().unwrap().last(),
+            Some(&(0, Some("thing-1".to_owned()), true))
+        );
+        assert_eq!(feedback.take_ambient().count(), 1);
+        conversation.talk(true);
+        conversation.talk(false);
+        let actions = conversation.take_actions();
+        let Some(Action::BeginUtterance(utterance)) = actions.first() else {
+            unreachable!("recording begins, not {actions:?}")
+        };
+        assert_eq!(utterance.attention, [Resource::object("thing-1")]);
+        // Before the server sends the environment's state, its intents are not sent; after, they are, and it is told.
+        assert!(!format!("{actions:?}").contains("EnvironmentIntent"));
+        conversation.apply(Event::Message(ServerMessage::EnvironmentState {
+            environment: "sky".into(),
+            version: 1,
+            state: tomori_protocol::Payload::new(serde_json::json!({})),
+        }));
+        step.update(&senses, &mut conversation, &mut feedback, now, FRAME);
+        assert_eq!(told.lock().unwrap().last().unwrap().0, 1);
+        assert!(conversation.take_actions().iter().any(|action| matches!(
+            action,
+            Action::Send(ClientMessage::EnvironmentIntent { .. })
+        )));
+        // Leaving, it is gone; joining again, it is made anew.
+        conversation.apply(Event::Message(ServerMessage::Left));
+        assert!(
+            step.update(&senses, &mut conversation, &mut feedback, now, FRAME)
+                .environment
+                .is_none()
+        );
+        assert!(conversation.client_side().is_none());
+        conversation.apply(space(|_| {}));
+        for _ in 0..400 {
+            step.update(&senses, &mut conversation, &mut feedback, now, FRAME);
+        }
+        assert_eq!(made.load(Ordering::Relaxed), 2);
+        // An environment it has no client side for has none.
+        conversation.set_client_sides(Vec::new());
+        assert!(conversation.client_side().is_none());
+        assert!(
+            step.update(&senses, &mut conversation, &mut feedback, now, FRAME)
+                .environment
+                .is_none()
+        );
     }
 
     #[test]

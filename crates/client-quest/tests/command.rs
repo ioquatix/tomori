@@ -65,6 +65,15 @@ fn licenses_name_the_bundled_assets() {
     assert!(output.status.success());
     assert!(stdout(&output).contains("Basis Universal transcoder:"));
     assert!(stdout(&output).contains("SIL OPEN FONT LICENSE Version 1.1"));
+    // And the notices of what Tomori's own app's environments bundle, as their registration added them.
+    let bundled = tomori::app::builder().sceneries().licenses();
+    assert!(!bundled.is_empty());
+    for (what, notice) in bundled {
+        assert!(
+            stdout(&output).contains(&format!("\n\n{what}:\n\n{notice}")),
+            "{what}"
+        );
+    }
 }
 
 #[test]

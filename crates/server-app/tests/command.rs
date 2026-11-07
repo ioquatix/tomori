@@ -95,7 +95,7 @@ fn sigterm_shuts_the_server_down_in_order() {
         .unwrap()
         .parse()
         .unwrap();
-    // It serves: a client is welcomed, and offered Tomori's own environments, Sky first, then the grid.
+    // It serves: a client is welcomed, and offered Tomori's own environments, Sky first, then the grid and the farmyard.
     let mut client = tomori_server::test_support::TestClient::open(address);
     let offered: Vec<(String, String, u32)> = client
         .hello_presenting("quest", "Ada", None)
@@ -106,7 +106,8 @@ fn sigterm_shuts_the_server_down_in_order() {
         offered,
         [
             ("sky".to_owned(), "Sky".to_owned(), 1),
-            ("minimal".to_owned(), "Grid".to_owned(), 1)
+            ("minimal".to_owned(), "Grid".to_owned(), 1),
+            ("farmyard".to_owned(), "Farmyard".to_owned(), 1)
         ]
     );
     drop(client);

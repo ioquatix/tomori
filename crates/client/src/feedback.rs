@@ -16,6 +16,9 @@ pub const REMINDER: Duration = Duration::from_secs(60);
 pub const WARNING: Duration = Duration::from_secs(30);
 /// How far from the limit a recording turns red, and is felt again.
 pub const CRITICAL: Duration = Duration::from_secs(10);
+/// At most one ambient sound in this time, however many an environment makes, so that they stay rare. See
+/// `design/feedback.md`.
+pub const AMBIENT_INTERVAL: Duration = Duration::from_secs(2);
 /// How long each vibration of the hold-to-leave ramp lasts; it is renewed every frame while B is held, so it never outlasts the hold by more than this.
 const RAMP_PULSE: Duration = Duration::from_millis(40);
 
@@ -273,6 +276,8 @@ pub struct Feedback {
     ramping: bool,
     requests: Vec<Waiting>,
     knocks: Vec<String>,
+    ambient: Vec<(crate::playback::Sound, crate::playback::spatial::Position)>,
+    last_ambient: Option<Instant>,
 }
 
 impl Feedback {
@@ -359,6 +364,32 @@ impl Feedback {
     /// The cues to play, oldest first, and where each sounds from.
     pub fn take_earcons(&mut self) -> std::vec::Drain<'_, (Earcon, Direction)> {
         self.earcons.drain(..)
+    }
+
+    /// An environment made `sound` at `position`, in the scene, at `now`, such as an animal calling. Ambient sounds are
+    /// not part of the vocabulary: they mark nothing, so they are heard only with sounds at full, never on a client that
+    /// plays no cues, and at most once in [`AMBIENT_INTERVAL`]. See `design/feedback.md`.
+    pub fn ambient(
+        &mut self,
+        sound: crate::playback::Sound,
+        position: crate::playback::spatial::Position,
+        now: Instant,
+    ) {
+        let recent = self
+            .last_ambient
+            .is_some_and(|last| now.saturating_duration_since(last) < AMBIENT_INTERVAL);
+        if self.muted || self.settings.sounds != Level::Full || recent {
+            return;
+        }
+        self.last_ambient = Some(now);
+        self.ambient.push((sound, position));
+    }
+
+    /// The ambient sounds to play, oldest first, and where each is.
+    pub fn take_ambient(
+        &mut self,
+    ) -> std::vec::Drain<'_, (crate::playback::Sound, crate::playback::spatial::Position)> {
+        self.ambient.drain(..)
     }
 
     /// B is held in a space, `progress` from 0 to 1 through the hold that leaves, or released (`None`). The right controller ramps from light to firm while it is held, until [`Event::Left`] says it left.
@@ -718,6 +749,33 @@ mod tests {
                 }
             );
         }
+    }
+
+    #[test]
+    fn ambient_sounds_are_heard_only_with_sounds_at_full_and_rarely() {
+        let (mut feedback, now) = feedback();
+        let sound = || crate::playback::Sound::new(vec![1.0; 4], 48_000);
+        feedback.ambient(sound(), [1.0, 0.0, 0.0], now);
+        // At most one in the interval.
+        feedback.ambient(sound(), [2.0, 0.0, 0.0], now + AMBIENT_INTERVAL / 2);
+        let heard: Vec<_> = feedback
+            .take_ambient()
+            .map(|(_, position)| position)
+            .collect();
+        assert_eq!(heard, [[1.0, 0.0, 0.0]]);
+        feedback.ambient(sound(), [3.0, 0.0, 0.0], now + AMBIENT_INTERVAL);
+        assert_eq!(feedback.take_ambient().count(), 1);
+        // Not with sounds reduced, nor on a client that plays no cues.
+        feedback.set_settings(Settings {
+            sounds: Level::Reduced,
+            ..Settings::default()
+        });
+        feedback.ambient(sound(), [0.0; 3], now + AMBIENT_INTERVAL * 4);
+        assert_eq!(feedback.take_ambient().count(), 0);
+        let (mut muted, now) = self::feedback();
+        muted.mute_sounds();
+        muted.ambient(sound(), [0.0; 3], now);
+        assert_eq!(muted.take_ambient().count(), 0);
     }
 
     #[test]

@@ -113,6 +113,9 @@ pub fn draw(
     frame: &Frame,
 ) {
     renderer.set_scenery(frame.scenery);
+    if let Some(drawn) = &frame.environment {
+        renderer.animate(device, queue, drawn.as_ref());
+    }
     renderer.set_landing(frame.landing);
     renderer.set_blink(frame.blink);
     renderer.update(queue, frame.swarm, frame.marker, frame.attracting);
@@ -175,9 +178,12 @@ mod tests {
             let mut step = Step::default();
             let start = Instant::now();
             step.update(&senses, &mut conversation, &mut felt(), start, 0.01);
-            let frame = step.update(&senses, &mut conversation, &mut felt(), start + HOLD, 0.01);
+            let mut frame =
+                step.update(&senses, &mut conversation, &mut felt(), start + HOLD, 0.01);
             let pill = frame.panels.pill.model;
             let wrist = frame.panels.wrist.model.expect("the transcript shows");
+            // What an environment's client side shows is handed to the renderer, which here has no scenery for it.
+            frame.environment = Some(std::sync::Arc::new(1usize));
             draw(&mut renderer, &device, &queue, &mut panels, &frame);
             // The pill is hidden while a hand's panel shows; the transcript is moved from the scene to the eyes' space.
             assert!(pill.is_none());
@@ -188,8 +194,10 @@ mod tests {
             // In arrival, the objects are drawn, with the pill hidden and the transcript gone.
             let mut lobby = lobby(tomori_protocol::ConnectionRole::Owner);
             let mut step = Step::default();
-            let frame = step.update(&senses, &mut lobby, &mut felt(), start, 1.0);
+            let mut frame = step.update(&senses, &mut lobby, &mut felt(), start, 1.0);
             assert!(frame.arrival.is_some());
+            // The grid has no scenery to show it.
+            frame.environment = Some(std::sync::Arc::new(1usize));
             draw(&mut renderer, &device, &queue, &mut panels, &frame);
             assert!(panels.list(scene_to_space).is_empty());
             // In a space with nothing on the hands, only the pill, already in the eyes' space.

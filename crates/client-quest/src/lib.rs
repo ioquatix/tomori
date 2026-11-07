@@ -211,6 +211,7 @@ fn run_android(app: AndroidApp, sceneries: &tomori_render::scenery::Sceneries) {
             conversation.set_drawable(sceneries.environments());
             conversation.set_over_grid(sceneries.over_grid());
             conversation.set_locomotion(sceneries.locomotion());
+            conversation.set_client_sides(sceneries.client_sides());
             xr::run(
                 &platform,
                 samples,

@@ -14,7 +14,7 @@ pub use duck::Duck;
 pub use earcon::{Bank, Earcon, Note, PROBE_LENGTH, PROBE_LEVEL, Spec, probe};
 pub use jitter_buffer::{JitterBuffer, JitterOptions};
 pub use limiter::{CEILING, Limiter};
-pub use mixer::{Direction, Layout, Mixer, MixerOptions};
+pub use mixer::{Direction, Layout, Mixer, MixerOptions, Sound};
 pub use player::{Player, PlayerControl};
 
 /// Counters describing how playback handled imperfect input, summed across sources.

@@ -263,6 +263,8 @@ pub struct Conversation {
     over_grid: Vec<Environment>,
     /// The locomotion profiles this build declares, by environment; see `design/locomotion.md`.
     locomotion: Vec<(Environment, Locomotion)>,
+    /// The client sides this build registers, by environment. See `design/environments.md`.
+    client_sides: Vec<(Environment, crate::client_side::Factory)>,
     /// The backend chosen on the backend ring, kept until the space is created.
     menu_backend: Option<String>,
     /// The directory chosen on the directory ring, kept until the space is created.
@@ -277,6 +279,9 @@ pub struct Conversation {
     talk: Option<Talk>,
     /// What the participant points at now, a worker or a card, as the frame loop or console last reported.
     pointing_at: Option<tomori_protocol::Resource>,
+    /// What each object of an environment's that the participant pointed at is called, by its identity, to name it as
+    /// a worker or card is named. See `design/environments.md`.
+    object_labels: std::collections::HashMap<String, String>,
     /// The cards of the space, in a space whose environment shows them. See `design/github.md`.
     cards: Option<tomori_protocol::Cards>,
     /// The state and events of the joined space's environment, as its server side sent them, until its client side takes them. See `design/environments.md`.
@@ -396,6 +401,7 @@ impl Conversation {
             drawable: Vec::new(),
             over_grid: Vec::new(),
             locomotion: Vec::new(),
+            client_sides: Vec::new(),
             sessions: Vec::new(),
             menu_backend: None,
             menu_directory: None,
@@ -406,6 +412,7 @@ impl Conversation {
             paged: None,
             talk: None,
             pointing_at: None,
+            object_labels: std::collections::HashMap::new(),
             cards: None,
             channel: crate::channel::Replica::default(),
             watching: None,
@@ -1689,6 +1696,26 @@ impl Conversation {
         self.over_grid = over_grid;
     }
 
+    /// Present each environment `client_sides` names with its client side, in a space bound to it whose scenery this
+    /// build draws. See `design/environments.md`.
+    pub fn set_client_sides(
+        &mut self,
+        client_sides: Vec<(Environment, crate::client_side::Factory)>,
+    ) {
+        self.client_sides = client_sides;
+    }
+
+    /// The client side of the joined space's environment, as this build draws it, if the build registers one: the
+    /// environment, at the version drawn, and what makes its client side.
+    pub fn client_side(&self) -> Option<(Environment, crate::client_side::Factory)> {
+        let environment = self.environment();
+        self.joined_space()?;
+        self.client_sides
+            .iter()
+            .find(|(registered, _)| registered.id() == environment.id())
+            .map(|(_, factory)| (environment, factory.clone()))
+    }
+
     /// Let the participant travel as `locomotion` declares, for each environment it names, in a space bound to it whose scenery this build draws. An environment it does not name has none, as Tomori's own do.
     pub fn set_locomotion(&mut self, locomotion: Vec<(Environment, Locomotion)>) {
         self.locomotion = locomotion;
@@ -2741,6 +2768,14 @@ impl Conversation {
         }
     }
 
+    /// The participant points at `object`, something an environment shows, called `label`: attended to as
+    /// `Resource::object` while they talk, as a worker or card is, and named `label` while they do.
+    pub fn point_at_object(&mut self, object: &str, label: &str) {
+        self.object_labels
+            .insert(object.to_owned(), label.to_owned());
+        self.point(Some(tomori_protocol::Resource::object(object)));
+    }
+
     /// The worker the participant points at now, as the console shows it.
     #[cfg(not(target_os = "android"))]
     pub fn pointing_at(&self) -> Option<&str> {
@@ -2768,6 +2803,9 @@ impl Conversation {
                 .cards()
                 .and_then(|cards| cards.cards.iter().find(|known| &known.id == card))
                 .map(|card| format!("#{} {}", card.number, card.title)),
+            Resource::Object { object, .. } => self
+                .joined_space()
+                .and_then(|_| self.object_labels.get(object).cloned()),
             _ => None,
         }
     }

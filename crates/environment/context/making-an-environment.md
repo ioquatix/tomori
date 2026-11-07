@@ -10,7 +10,7 @@ An environment is up to three crates, named for it:
 - **Server**, `NAME-server`: what runs only in the server, such as its server side, an implementation of this crate's `ServerSide`, its data sources and its credentials. A credential, such as an API token, lives here and nowhere else: never in the common crate, which clients build, nor in what the server sends. It must not depend on a renderer either.
 - **Client**, `NAME-client`, such as `tomori-environment-sky-client`: how a client presents it, such as a scenery, an implementation of [`tomori-render`](https://crates.io/crates/tomori-render)'s `Scenery`, with a `register` function that registers it on a client's `Sceneries` at the common crate's identity. It may depend on the renderer.
 
-Leave out a crate an environment has no use for: Sky has no server half. The GitHub prototype has all three: `tomori-environment-github`, its identity; `tomori-environment-github-server`, which holds its GitHub client and token and adds its `--github-repository` option to a server's builder; and `tomori-environment-github-client`, which presents it over the grid.
+Leave out a crate an environment has no use for: Sky has no server half. The GitHub prototype has all three: `tomori-environment-github`, its identity; `tomori-environment-github-server`, which holds its GitHub client and token and adds its `--github-repository` option to a server's builder; and `tomori-environment-github-client`, which presents it over the grid. The farmyard has a common crate and a client crate: its server side, which runs a flock of chickens that its clients replay with the same functions, holds nothing that must stay in the server, so it is in `tomori-environment-farmyard`, its common crate, which depends on this crate but not on `tomori-server`; `tomori-environment-farmyard-client` draws the yard and the chickens.
 
 ```rust
 // NAME: the common crate.
@@ -46,7 +46,7 @@ let server = tomori_server::Server::builder().environment(
 let headset = tomori::Builder::default().register(observe_client::register);
 ```
 
-The server offers a client only the environments it presents at the same version, and a client in a space whose environment it lacks shows the grid and names it. Tomori's own server program, `tomori-server-app`, registers Sky and the grid, and Tomori's own app, `tomori-client-quest`'s `app` feature, registers Sky's client half, in the same way.
+The server offers a client only the environments it presents at the same version, and a client in a space whose environment it lacks shows the grid and names it. Tomori's own server program, `tomori-server-app`, registers Sky, the grid and the farmyard, and Tomori's own app, `tomori-client-quest`'s `app` feature, registers Sky's and the farmyard's client halves, in the same way.
 
 ## The dependency rule
 

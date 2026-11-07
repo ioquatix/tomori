@@ -1320,8 +1320,14 @@ impl Connection {
                 for (earcon, direction) in self.feedback.take_earcons() {
                     control.play(earcon, direction);
                 }
+                for (sound, position) in self.feedback.take_ambient() {
+                    control.ambient(sound, position);
+                }
             }
-            None => self.feedback.take_earcons().for_each(drop),
+            None => {
+                self.feedback.take_earcons().for_each(drop);
+                self.feedback.take_ambient().for_each(drop);
+            }
         }
     }
 
