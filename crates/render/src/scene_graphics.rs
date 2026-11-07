@@ -182,7 +182,7 @@ mod tests {
                 step.update(&senses, &mut conversation, &mut felt(), start + HOLD, 0.01);
             let pill = frame.panels.pill.model;
             let wrist = frame.panels.wrist.model.expect("the transcript shows");
-            // What an environment's client side shows reaches its scenery, here Sky's, which shows nothing of it.
+            // What an environment's client side shows is handed to the renderer, which here has no scenery for it.
             frame.environment = Some(std::sync::Arc::new(1usize));
             draw(&mut renderer, &device, &queue, &mut panels, &frame);
             // The pill is hidden while a hand's panel shows; the transcript is moved from the scene to the eyes' space.

@@ -446,7 +446,6 @@ impl Renderer {
         self.environment = environment;
     }
 
-    /// The environment and, while it grows out of a space's object or shrinks back into it, the sphere it fills, with the grid outside. See `design/arrival.md`.
     /// What the current environment's client side shows now, for its scenery to draw. See `design/environments.md`.
     pub fn animate(
         &mut self,
@@ -464,6 +463,7 @@ impl Renderer {
         }
     }
 
+    /// The environment and, while it grows out of a space's object or shrinks back into it, the sphere it fills, with the grid outside. See `design/arrival.md`.
     pub fn set_scenery(&mut self, scenery: crate::arrival_motion::Scenery) {
         self.environment = scenery.environment;
         self.reveal = scenery.reveal;

@@ -433,7 +433,8 @@ mod tests {
                     &[],
                 );
             };
-            // The grid has no scenery of its own.
+            // The grid has no scenery of its own, nor any to hand what a client side shows.
+            renderer.animate(&device, &queue, &1usize);
             render(&renderer);
             assert_eq!(counted.drawn(), 0);
             renderer.set_scenery(crate::arrival_motion::Scenery {
@@ -443,6 +444,8 @@ mod tests {
                     radius: 1.0,
                 }),
             });
+            // What its client side shows reaches the current environment's scenery, which, as this one, may ignore it.
+            renderer.animate(&device, &queue, &1usize);
             render(&renderer);
             assert_eq!(counted.drawn(), 2);
             assert_eq!(renderer.environment(), floor);

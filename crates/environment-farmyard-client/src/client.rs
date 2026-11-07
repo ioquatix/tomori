@@ -89,8 +89,16 @@ impl FarmyardClient {
     fn receive(&mut self, update: Update, now: Instant) {
         let local = self.local(now);
         // `Update` is non-exhaustive: an update of a kind this client does not know, such as a later step of state
-        // synchronization's, is ignored.
-        if let Update::State(state) = &update {
+        // synchronization's, is neither, and is ignored.
+        let state = match &update {
+            Update::State(state) => Some(state),
+            _ => None,
+        };
+        let event = match &update {
+            Update::Event(event) => Some(event),
+            _ => None,
+        };
+        if let Some(state) = state {
             let Ok(state) = serde_json::from_value::<State>(state.value().clone()) else {
                 log::debug!("A farmyard state could not be read.");
                 return;
@@ -107,7 +115,8 @@ impl FarmyardClient {
             };
             self.names = state.chickens.iter().map(|hen| hen.name.clone()).collect();
             self.held = self.held.filter(|held| *held < self.controllers.len());
-        } else if let Update::Event(event) = &update {
+        }
+        if let Some(event) = event {
             let Ok(event) = serde_json::from_value::<Event>(event.value().clone()) else {
                 log::debug!("A farmyard event could not be read.");
                 return;
