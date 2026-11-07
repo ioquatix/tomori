@@ -6,18 +6,26 @@
 //!
 //! It is an environment built as another project would build one, from Tomori's published crates and their extension
 //! points, without anything in Tomori's own crates knowing about it. This crate is what its server and its clients
-//! share, free of GPU and client code: where everything is in the yard, and its models, built in code as `tomori-assets`
-//! models. Its client half, the scenery and teleport profile a client registers, is
-//! `tomori-environment-farmyard-client`. See `design/farmyard.md`.
+//! share, building no renderer or GPU stack: its identity; where everything is in the yard; its models, built in code
+//! as `tomori-assets` models; the chicken, its asset, its animator's graph and its controller; what each chicken does,
+//! and where that puts it; the flock its server side owns; and the server side itself, which has nothing that must stay
+//! in the server, so that it needs no server crate of its own. Its client half, the scenery, teleport profile and client
+//! side a client registers, is `tomori-environment-farmyard-client`. See `design/farmyard.md`.
 //!
 //! ```
 //! use tomori_environment_farmyard::{ID, LABEL, VERSION};
 //! assert_eq!((ID, VERSION, LABEL), ("farmyard", 1, "Farmyard"));
 //! ```
+pub mod behaviour;
+pub mod chicken;
+pub mod cluck;
+pub mod controller;
 pub mod coop;
+pub mod flock;
 pub mod layout;
 pub mod props;
 mod shapes;
+pub mod side;
 
 /// The identifier spaces name the farmyard by.
 pub const ID: &str = "farmyard";
@@ -28,6 +36,10 @@ pub const VERSION: u32 = 1;
 
 /// The label clients show for the farmyard.
 pub const LABEL: &str = "Farmyard";
+
+/// The licence of the farmyard's bundled models, which a build shows with its other bundled assets' and carries in its
+/// APK.
+pub const LICENSE: &str = include_str!("../assets/models/LICENSE.md");
 
 #[cfg(test)]
 pub(crate) mod tests {

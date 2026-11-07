@@ -183,7 +183,8 @@ impl Command {
                 builder.into_sceneries(),
             ),
             Mode::Licenses => {
-                println!("{}", licenses());
+                let mut builder = builder;
+                println!("{}", licenses(&builder.sceneries().licenses()));
                 Ok(())
             }
             Mode::Help => {
@@ -194,14 +195,18 @@ impl Command {
     }
 }
 
-/// The licenses of the assets bundled with the executable.
-pub fn licenses() -> String {
-    format!(
+/// The licenses of the assets bundled with the executable: Tomori's own, and then `bundled`, each a heading and its notice, which the build's environments bundle, such as their models, as their registration added them to its sceneries.
+pub fn licenses(bundled: &[(&str, &str)]) -> String {
+    let mut licenses = format!(
         "Bundled WebXR Input Profiles controller assets:\n\n{}\n\nBasis Universal transcoder:\n\n{}\n\nBundled fonts:\n\n{}",
         tomori_render::CONTROLLER_LICENSE,
         tomori_render::BASISU_LICENSE,
         tomori_render::FONT_LICENSES
-    )
+    );
+    for (what, notice) in bundled {
+        licenses.push_str(&format!("\n\n{what}:\n\n{notice}"));
+    }
+    licenses
 }
 
 /// What `--help` shows, for a build that draws `drawable`, which `TOMORI_ENVIRONMENT` chooses among, starting with the first after the grid.
@@ -214,7 +219,7 @@ pub fn help(drawable: &[tomori_scene::environment::Environment]) -> String {
         .map(|environment| environment.id())
         .collect();
     format!(
-        "tomori [MODE] [--server ADDRESS] [--name NAME] [--space ID] [--follow NAME] [--audio-output NAME]\n\nModes:\n  (none)                  desktop window (no headset needed), without a server.\n  --desktop               take part in a server's spaces from a desktop window, as on the headset.\n  --xr                    use the desktop OpenXR runtime.\n  --console               show the headset's panel in the terminal, driven by typed commands.\n  discover                list the servers on the network; with --server ADDRESS, list that server's spaces too.\n  --spectator             render the live space as a read-only, participant-following view.\n  --spectator-pipewire    headless PipeWire video source (Linux; Ctrl-C to stop).\n  --spectator-pipewire-preview  PipeWire video source with preview window.\n                          The spectator modes are also the tomori-spectator executable: tomori-spectator, --pipewire and --pipewire-preview; see tomori-spectator --help.\n  --licenses              show the licenses of the bundled controller assets, transcoder and fonts.\n\nOptions:\n  --server ADDRESS  with --desktop, --xr, --console, discover (and the spectator modes), connect to this Tomori server (host:port) instead of choosing one; TOMORI_SERVER does the same.\n  --name NAME       with --desktop, --xr or --console, the display name other participants see (default: this computer's name).\n  --token TOKEN     a token from the server, such as from `tomori-server auth mint`, presented to the server this device connects to and kept for it; TOMORI_TOKEN does the same.\n  --space ID        with the spectator modes, join this space (see `tomori discover --server ADDRESS`).\n  --follow NAME     with the spectator modes, follow this participant by name (default: the first in the space).\n  --audio-output NAME  with the spectator modes on Linux, play to this PipeWire output, by its node name (see `pactl list short sinks`), instead of the default.\n\n--desktop controls:\n{}\n\nDesktop window controls: left mouse attract, right drag orbit, wheel zoom, E environment, R reset, Space pause, Esc quit.\nTOMORI_ENVIRONMENT={} selects the desktop window's initial environment (default {}); with a server, the space chooses it.",
+        "tomori [MODE] [--server ADDRESS] [--name NAME] [--space ID] [--follow NAME] [--audio-output NAME]\n\nModes:\n  (none)                  desktop window (no headset needed), without a server.\n  --desktop               take part in a server's spaces from a desktop window, as on the headset.\n  --xr                    use the desktop OpenXR runtime.\n  --console               show the headset's panel in the terminal, driven by typed commands.\n  discover                list the servers on the network; with --server ADDRESS, list that server's spaces too.\n  --spectator             render the live space as a read-only, participant-following view.\n  --spectator-pipewire    headless PipeWire video source (Linux; Ctrl-C to stop).\n  --spectator-pipewire-preview  PipeWire video source with preview window.\n                          The spectator modes are also the tomori-spectator executable: tomori-spectator, --pipewire and --pipewire-preview; see tomori-spectator --help.\n  --licenses              show the licenses of the bundled controller assets, transcoder, fonts and environments' assets.\n\nOptions:\n  --server ADDRESS  with --desktop, --xr, --console, discover (and the spectator modes), connect to this Tomori server (host:port) instead of choosing one; TOMORI_SERVER does the same.\n  --name NAME       with --desktop, --xr or --console, the display name other participants see (default: this computer's name).\n  --token TOKEN     a token from the server, such as from `tomori-server auth mint`, presented to the server this device connects to and kept for it; TOMORI_TOKEN does the same.\n  --space ID        with the spectator modes, join this space (see `tomori discover --server ADDRESS`).\n  --follow NAME     with the spectator modes, follow this participant by name (default: the first in the space).\n  --audio-output NAME  with the spectator modes on Linux, play to this PipeWire output, by its node name (see `pactl list short sinks`), instead of the default.\n\n--desktop controls:\n{}\n\nDesktop window controls: left mouse attract, right drag orbit, wheel zoom, E environment, R reset, Space pause, Esc quit.\nTOMORI_ENVIRONMENT={} selects the desktop window's initial environment (default {}); with a server, the space chooses it.",
         crate::DESKTOP_CONTROLS,
         choices.join("|"),
         Environment::first(drawable).id()
@@ -404,7 +409,11 @@ mod tests {
             "TOMORI_ENVIRONMENT=deck|minimal selects the desktop window's initial environment (default deck);"
         ));
         assert!(super::help(&[]).contains("TOMORI_ENVIRONMENT=minimal selects the desktop window's initial environment (default minimal);"));
-        assert!(licenses().contains("Basis Universal transcoder:"));
-        assert!(licenses().contains("Noto Sans JP"));
+        assert!(licenses(&[]).contains("Basis Universal transcoder:"));
+        assert!(licenses(&[]).contains("Noto Sans JP"));
+        // What the build's environments bundle follows, under its heading.
+        let bundled = licenses(&[("Deck tiles", "CC0 1.0"), ("Lamps", "MIT")]);
+        assert!(bundled.starts_with(&licenses(&[])));
+        assert!(bundled.ends_with("\n\nDeck tiles:\n\nCC0 1.0\n\nLamps:\n\nMIT"));
     }
 }

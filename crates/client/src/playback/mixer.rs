@@ -17,6 +17,33 @@ const LEVEL_RELEASE: Duration = Duration::from_millis(150);
 const FADE: Duration = Duration::from_millis(10);
 /// The most sound cues that play at once; another replaces the one furthest through.
 const VOICES: usize = 8;
+/// The most ambient sounds that play at once; another replaces the one furthest through.
+const AMBIENT: usize = 3;
+
+/// A sound an environment plays at a place in the scene, such as an animal calling: its samples, in `i16`
+/// units, at `rate` samples a second, which the mixer plays at its own rate. See `design/spatial-audio.md`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Sound {
+    pub samples: std::sync::Arc<[f32]>,
+    pub rate: u32,
+}
+
+impl Sound {
+    pub fn new(samples: impl Into<std::sync::Arc<[f32]>>, rate: u32) -> Self {
+        Self {
+            samples: samples.into(),
+            rate,
+        }
+    }
+}
+
+/// An ambient sound playing: what, from where, and how far through it is, in its own samples.
+#[derive(Clone, Debug)]
+struct Ambient {
+    sound: Sound,
+    position: spatial::Position,
+    played: f64,
+}
 /// How far to the side a cue for one hand sounds.
 const HAND_PAN: f32 = 0.4;
 
@@ -152,6 +179,8 @@ pub struct Mixer {
     limited: Layout,
     /// How far playback has faded out, in samples: 0 is full volume, and the fade length is silent.
     faded: u32,
+    /// The ambient sounds playing.
+    ambient: [Option<Ambient>; AMBIENT],
 }
 
 impl Mixer {
@@ -179,7 +208,50 @@ impl Mixer {
             duck: Duck::default(),
             probe: None,
             limited: Layout::Mono,
+            ambient: Default::default(),
         }
+    }
+
+    /// Play `sound` from `position`, in the scene, unless someone can be heard speaking now, the agent or a person, so
+    /// that it never plays over speech. Placed and made quieter with distance as a person's voice is, but without its
+    /// delay or shadow. When [`AMBIENT`] already play, it replaces the one furthest through.
+    pub fn ambient(&mut self, sound: Sound, position: spatial::Position) {
+        let speaking = self.sources.iter().any(|(&id, source)| {
+            if is_agent(id) {
+                !self.agent_muted && source.buffer.is_playing()
+            } else {
+                source.loud
+            }
+        });
+        if speaking || sound.rate == 0 {
+            return;
+        }
+        let slot = self
+            .ambient
+            .iter()
+            .position(Option::is_none)
+            .unwrap_or_else(|| {
+                (0..AMBIENT)
+                    .max_by(|a, b| {
+                        let played = |index: usize| {
+                            self.ambient[index]
+                                .as_ref()
+                                .map_or(0.0, |playing| playing.played)
+                        };
+                        played(*a).total_cmp(&played(*b))
+                    })
+                    .expect("there are slots")
+            });
+        self.ambient[slot] = Some(Ambient {
+            sound,
+            position,
+            played: 0.0,
+        });
+    }
+
+    /// How many ambient sounds are playing.
+    pub fn playing_ambient(&self) -> usize {
+        self.ambient.iter().flatten().count()
     }
 
     /// Where the listener and the sources are, which the next mix glides to. The application keeps the scene current, typically once a frame; see [`super::PlayerControl::set_scene`].
@@ -443,6 +515,43 @@ impl Mixer {
             let position = voice.position + samples.len().min(frames);
             self.voices[index] = (position < self.bank.samples(voice.earcon).len())
                 .then_some(Voice { position, ..voice });
+        }
+        for slot in &mut self.ambient {
+            let Some(playing) = slot.as_mut() else {
+                continue;
+            };
+            let gains = match self.scene.listener {
+                Some(listener) => {
+                    spatial::place(
+                        &listener,
+                        playing.position,
+                        spatial::PERSON_FLOOR,
+                        rate,
+                        self.scene.mono || layout == Layout::Mono,
+                    )
+                    .gain
+                }
+                None => [1.0, 1.0],
+            };
+            // Played at the mixer's rate, in a straight line between its own samples.
+            let step = f64::from(playing.sound.rate) / f64::from(rate);
+            let samples = &playing.sound.samples;
+            for frame in self.accumulator.chunks_exact_mut(channels) {
+                let at = playing.played as usize;
+                if at + 1 >= samples.len() {
+                    playing.played = samples.len() as f64;
+                    break;
+                }
+                let fraction = (playing.played - at as f64) as f32;
+                let sample = samples[at] + (samples[at + 1] - samples[at]) * fraction;
+                for (total, gain) in frame.iter_mut().zip(gains) {
+                    *total += sample * gain;
+                }
+                playing.played += step;
+            }
+            if playing.played as usize + 1 >= samples.len() {
+                *slot = None;
+            }
         }
         if let Some(position) = self.probe {
             let samples = &self.bank.probe()[position..];

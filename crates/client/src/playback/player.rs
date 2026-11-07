@@ -8,8 +8,8 @@ use std::time::Duration;
 
 use tomori_protocol::{AudioFrame, REPLAY_SOURCE};
 
-use super::spatial::Scene;
-use super::{Direction, Earcon, Layout, Mixer, MixerOptions, PlaybackStatistics};
+use super::spatial::{Position, Scene};
+use super::{Direction, Earcon, Layout, Mixer, MixerOptions, PlaybackStatistics, Sound};
 
 /// How long after its last audio agent speech played again still counts as playing: longer than the breath between spoken segments, so that a replay counts as playing throughout.
 const REPLAY_PAUSE: Duration = Duration::from_millis(700);
@@ -19,6 +19,7 @@ enum Command {
     Clear,
     AgentMuted(bool),
     Play(Earcon, Direction),
+    Ambient(Sound, Position),
     Probe,
 }
 
@@ -130,6 +131,7 @@ impl Player {
                     mixer.set_agent_muted(muted);
                 }
                 Command::Play(earcon, direction) => mixer.play(earcon, direction),
+                Command::Ambient(sound, position) => mixer.ambient(sound, position),
                 Command::Probe => mixer.play_probe(),
                 Command::Clear => {
                     mixer.clear();
@@ -195,6 +197,11 @@ impl PlayerControl {
     /// Play a sound cue, once, from `direction`. It is local: never sent and never a source, and [`Self::clear`] does not stop it.
     pub fn play(&self, earcon: Earcon, direction: Direction) {
         let _ = self.commands.send(Command::Play(earcon, direction));
+    }
+
+    /// Play an environment's `sound`, once, from `position` in the scene, unless someone is speaking. See [`Mixer::ambient`].
+    pub fn ambient(&self, sound: Sound, position: Position) {
+        let _ = self.commands.send(Command::Ambient(sound, position));
     }
 
     /// Play the echo probe, once [`Player::load_probe`] has rendered it, for the echo test to measure what the microphone hears of it.

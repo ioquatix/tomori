@@ -99,6 +99,7 @@ impl Builder {
         conversation.set_drawable(self.environments());
         conversation.set_over_grid(self.over_grid());
         conversation.set_locomotion(self.sceneries.locomotion());
+        conversation.set_client_sides(self.sceneries.client_sides());
         (conversation, connection)
     }
 

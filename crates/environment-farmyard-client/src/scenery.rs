@@ -78,6 +78,8 @@ pub struct Farmyard {
     models: Renderer,
     yard: Drawn,
     coop: Drawn,
+    /// The chickens, uploaded once their client side first shows them, placed as it last did.
+    chickens: Option<Drawn>,
     reveal: Option<(Vec3, f32)>,
 }
 
@@ -179,12 +181,39 @@ impl Farmyard {
             models,
             yard,
             coop,
+            chickens: None,
             reveal: None,
         }
     }
 }
 
 impl Scenery for Farmyard {
+    fn animate(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        drawn: &(dyn std::any::Any + Send + Sync),
+    ) {
+        let Some(drawn) = drawn.downcast_ref::<crate::client::Drawn>() else {
+            return;
+        };
+        let Some(first) = drawn.chickens.first() else {
+            return;
+        };
+        let models = &self.models;
+        let chickens = self.chickens.get_or_insert_with(|| Drawn {
+            model: models.upload(device, queue, first.model()),
+            batch: models.batch(device),
+        });
+        models.place(
+            device,
+            queue,
+            &chickens.model,
+            &mut chickens.batch,
+            &drawn.chickens,
+        );
+    }
+
     fn prepare(&self, queue: &wgpu::Queue, eye: usize, scene_to_clip: Mat4) {
         self.models
             .prepare(queue, eye, scene_to_clip, self::eye(scene_to_clip));
@@ -208,7 +237,10 @@ impl Scenery for Farmyard {
         pass.set_pipeline(&self.sky);
         pass.set_bind_group(0, &self.bindings[eye], &[]);
         pass.draw(0..3, 0..1);
-        for drawn in [&self.yard, &self.coop] {
+        for drawn in [Some(&self.yard), Some(&self.coop), self.chickens.as_ref()]
+            .into_iter()
+            .flatten()
+        {
             self.models.draw(pass, eye, &drawn.model, &drawn.batch);
         }
     }

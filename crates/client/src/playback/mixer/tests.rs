@@ -584,3 +584,69 @@ fn without_a_listener_cues_play_in_the_middle() {
     let (left, right) = stereo(&mut mixer, length);
     assert_eq!(left, right);
 }
+
+#[test]
+fn an_ambient_sound_plays_once_at_the_mixer_s_rate_and_ends() {
+    let mut mixer = mixer();
+    // At twice the mixer's rate, it lasts half as many of the mixer's samples, in a straight line between its own.
+    let sound = Sound::new(
+        vec![0.0, 100.0, 200.0, 300.0, 400.0, 500.0, 600.0, 700.0, 800.0],
+        RATE * 2,
+    );
+    mixer.ambient(sound.clone(), [0.0, 0.0, 0.0]);
+    assert_eq!(mixer.playing_ambient(), 1);
+    assert_eq!(mix(&mut mixer, 2), [0, 200]);
+    assert_eq!(mix(&mut mixer, 4), [400, 600, 0, 0]);
+    assert_eq!(mixer.playing_ambient(), 0);
+    // Nothing at a rate of nothing.
+    mixer.ambient(Sound::new(vec![1.0; 4], 0), [0.0; 3]);
+    assert_eq!(mixer.playing_ambient(), 0);
+    // At most three; another replaces the one furthest through.
+    for _ in 0..3 {
+        mixer.ambient(Sound::new(vec![10.0; 100], RATE), [0.0; 3]);
+        mix(&mut mixer, 1);
+    }
+    mixer.ambient(sound, [0.0; 3]);
+    assert_eq!(mixer.playing_ambient(), 3);
+    assert_eq!(mix(&mut mixer, 1), [20]);
+}
+
+#[test]
+fn an_ambient_sound_never_plays_over_speech() {
+    let quiet = || Sound::new(vec![10.0; 100], RATE);
+    // A person speaking.
+    let mut mixer = mixer();
+    for sequence in 0..4 {
+        mixer.push(frame(1, sequence, 10_000));
+    }
+    mix(&mut mixer, 8);
+    mixer.ambient(quiet(), [0.0; 3]);
+    assert_eq!(mixer.playing_ambient(), 0);
+    // The agent speaking, unless it is muted here.
+    let mut mixer = self::mixer();
+    for sequence in 0..4 {
+        mixer.push(frame(AGENT_SOURCE, sequence, 10));
+    }
+    mix(&mut mixer, 4);
+    mixer.ambient(quiet(), [0.0; 3]);
+    assert_eq!(mixer.playing_ambient(), 0);
+    mixer.set_agent_muted(true);
+    mixer.ambient(quiet(), [0.0; 3]);
+    assert_eq!(mixer.playing_ambient(), 1);
+}
+
+#[test]
+fn an_ambient_sound_is_heard_from_where_it_is() {
+    let mut mixer = Mixer::new(MixerOptions {
+        sample_rate: 48_000,
+        jitter: JitterOptions::default(),
+    });
+    *mixer.scene_mut() = Scene {
+        listener: Some(listener()),
+        sources: Vec::new(),
+        mono: false,
+    };
+    mixer.ambient(Sound::new(vec![1_000.0; 960], 48_000), [-2.0, 1.6, 0.0]);
+    let (left, right) = stereo(&mut mixer, 960);
+    assert!(energy(&left) > 2.0 * energy(&right));
+}

@@ -3,7 +3,7 @@
 
 //! The farmyard drawn on the shared test device, on lavapipe in CI: from home, looking into the yard at the coop, as a
 //! participant arriving sees it, and growing out of a point. `TOMORI_FARMYARD_PREVIEW`, set to a PNG path, saves the
-//! view from home and from beside the coop's window.
+//! view from home and from beside the coop's window there, and the chickens beside it, with `-chickens` added to its name.
 use glam::{Mat4, Vec3};
 use tomori_render::test_gpu;
 
@@ -240,6 +240,79 @@ fn the_farmyard_is_an_evening_yard_with_a_warmly_lit_red_coop() {
         });
         assert_eq!(made.len(), 1);
         assert_eq!(capture(&device, &queue, made[0].1.as_ref(), 4, HOME), home);
+        assert!(pollster::block_on(scope.pop()).is_none());
+    });
+}
+
+#[test]
+fn the_chickens_are_drawn_where_their_client_side_shows_them() {
+    use tomori_scene::client_side::{ClientSide, Input};
+    test_gpu::with(|test_gpu::Gpu { device, queue, .. }| {
+        let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let mut farmyard = target(&device, &queue, 4);
+        // The flock of a space, as its server side shares it, a few seconds on.
+        let chicken = tomori_environment_farmyard::chicken::Chicken::shared().unwrap();
+        let flock = tomori_environment_farmyard::flock::Flock::new(
+            tomori_environment_farmyard::flock::seed("space-1"),
+            chicken.clone(),
+            0,
+        );
+        let state = tomori_protocol::Payload::new(serde_json::to_value(flock.state(0)).unwrap());
+        let epoch = std::time::Instant::now();
+        let mut client = crate::client::FarmyardClient::new("space-1", Some(chicken), epoch);
+        let output = client.update(Input::new(
+            vec![tomori_scene::channel::Update::State(state)],
+            epoch + std::time::Duration::from_millis(400),
+        ));
+        let drawn = output.drawn.unwrap();
+        let at = glam::Vec3::from(flock.hens()[0].behaviour.at);
+        let close = (
+            at + Vec3::new(0.0, 0.45, 1.1),
+            at + Vec3::new(0.0, 0.18, 0.0),
+        );
+        let without = capture(&device, &queue, &farmyard, 4, close);
+        // What is not the farmyard's, or shows no chickens, changes nothing.
+        farmyard.animate(&device, &queue, &42u32);
+        farmyard.animate(
+            &device,
+            &queue,
+            &crate::client::Drawn {
+                chickens: Vec::new(),
+            },
+        );
+        assert_eq!(capture(&device, &queue, &farmyard, 4, close), without);
+        // Its chickens are drawn, a chicken filling the middle of a close view of it; again, from the same upload.
+        farmyard.animate(&device, &queue, drawn.as_ref());
+        farmyard.animate(&device, &queue, drawn.as_ref());
+        let with = capture(&device, &queue, &farmyard, 4, close);
+        // Pixels the chickens change, by a clear difference.
+        let changed = |a: &[u8], b: &[u8]| {
+            a.chunks(4)
+                .zip(b.chunks(4))
+                .filter(|(a, b)| {
+                    a[..3]
+                        .iter()
+                        .zip(&b[..3])
+                        .map(|(a, b)| a.abs_diff(*b) as u32)
+                        .sum::<u32>()
+                        > 30
+                })
+                .count()
+        };
+        let home = capture(&device, &queue, &farmyard, 4, HOME);
+        if let Ok(path) = std::env::var("TOMORI_FARMYARD_PREVIEW") {
+            let mut sheet = image::RgbaImage::new(WIDTH, HEIGHT * 3);
+            for (row, pixels) in [&home, &with, &without].into_iter().enumerate() {
+                let view = image::RgbaImage::from_raw(WIDTH, HEIGHT, pixels.clone()).unwrap();
+                image::imageops::replace(&mut sheet, &view, 0, i64::from(row as u32 * HEIGHT));
+            }
+            sheet.save(path.replace(".png", "-chickens.png")).unwrap();
+        }
+        assert!(
+            changed(&with, &without) > 500,
+            "{}",
+            changed(&with, &without)
+        );
         assert!(pollster::block_on(scope.pop()).is_none());
     });
 }

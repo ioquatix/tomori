@@ -22,6 +22,15 @@ pub struct Target<'a> {
 
 /// Scenery drawn natively in each eye's pass.
 pub trait Scenery {
+    /// Once a frame, before the eyes: what the environment's client side shows now, the environment's own, which only
+    /// its own scenery reads, such as where its animated models stand. See `design/environments.md`.
+    fn animate(
+        &mut self,
+        _device: &wgpu::Device,
+        _queue: &wgpu::Queue,
+        _drawn: &(dyn std::any::Any + Send + Sync),
+    ) {
+    }
     /// Before the eye's pass: per-eye uniforms, for the eye's view and projection.
     fn prepare(&self, queue: &wgpu::Queue, eye: usize, scene_to_clip: Mat4);
     /// Before the eye's pass: work in its own passes, such as Sky's clouds.
@@ -45,6 +54,8 @@ pub struct Sceneries {
     entries: Vec<(Environment, Create)>,
     locomotion: Vec<(Environment, Locomotion)>,
     over_grid: Vec<Environment>,
+    client_sides: Vec<(Environment, tomori_scene::client_side::Factory)>,
+    licenses: Vec<(&'static str, &'static str)>,
 }
 
 impl Sceneries {
@@ -97,9 +108,43 @@ impl Sceneries {
         self.locomotion.push((environment, locomotion));
     }
 
+    /// Present the environment `id`, where this build draws its scenery, with the client side `create` makes for each
+    /// space bound to it, in place of any registered before for it: what it shows beyond its scenery, from what its server
+    /// side shares, such as its animated models, what the ray points at in it, and its sounds. See
+    /// `design/environments.md`.
+    pub fn set_client_side(
+        &mut self,
+        id: &'static str,
+        create: impl Fn(&str) -> Box<dyn tomori_scene::client_side::ClientSide> + Send + Sync + 'static,
+    ) {
+        let environment = Environment::new(id);
+        self.client_sides
+            .retain(|(declared, _)| *declared != environment);
+        self.client_sides.push((environment, Arc::new(create)));
+    }
+
+    /// The client sides registered for each environment, for the conversation.
+    pub fn client_sides(&self) -> Vec<(Environment, tomori_scene::client_side::Factory)> {
+        self.client_sides.clone()
+    }
+
     /// The locomotion declared for each environment, for the conversation.
     pub fn locomotion(&self) -> Vec<(Environment, Locomotion)> {
         self.locomotion.clone()
+    }
+
+    /// Carry the licence notice `text` of what a registered environment bundles, such as its models, under the heading
+    /// `what`, in place of any added before under the same heading, so that an application shows it with its own
+    /// bundled assets' notices, as `tomori --licenses` does. An environment's own `register` adds its notices with
+    /// its scenery.
+    pub fn add_license(&mut self, what: &'static str, text: &'static str) {
+        self.licenses.retain(|(added, _)| *added != what);
+        self.licenses.push((what, text));
+    }
+
+    /// The licence notices added, each as its heading and its text, in the order they were added.
+    pub fn licenses(&self) -> Vec<(&'static str, &'static str)> {
+        self.licenses.clone()
     }
 
     /// Whether the environment `id` has a scenery here; the grid's, `minimal`, always does.
@@ -188,6 +233,74 @@ pub mod test {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A client side that shows nothing.
+    struct Empty;
+
+    impl tomori_scene::client_side::ClientSide for Empty {
+        fn pick(
+            &self,
+            _ray: &tomori_scene::pointing::Ray,
+        ) -> Option<tomori_scene::client_side::Picked> {
+            None
+        }
+
+        fn update(
+            &mut self,
+            _input: tomori_scene::client_side::Input<'_>,
+        ) -> tomori_scene::client_side::Output {
+            tomori_scene::client_side::Output::new()
+        }
+    }
+
+    #[test]
+    fn client_sides_are_registered_by_identifier_and_none_by_default() {
+        assert!(Sceneries::default().client_sides().is_empty());
+        let mut sceneries = Sceneries::empty();
+        let empty = |_: &str| Box::new(Empty) as Box<dyn tomori_scene::client_side::ClientSide>;
+        sceneries.set_client_side("floor", empty);
+        sceneries.set_client_side("deck", empty);
+        // Registering an identifier again replaces it, at the end.
+        sceneries.set_client_side("floor", empty);
+        let registered = sceneries.client_sides();
+        let ids: Vec<&str> = registered
+            .iter()
+            .map(|(environment, _)| environment.id())
+            .collect();
+        assert_eq!(ids, ["deck", "floor"]);
+        assert!(
+            (registered[0].1)("space-1")
+                .pick(&tomori_scene::pointing::Ray::new(Vec3::ZERO, Vec3::Z).unwrap())
+                .is_none()
+        );
+        let mut made = (registered[1].1)("space-1");
+        assert!(
+            made.pick(&tomori_scene::pointing::Ray::new(Vec3::ZERO, Vec3::Z).unwrap())
+                .is_none()
+        );
+        assert!(
+            made.update(tomori_scene::client_side::Input::new(
+                Vec::new(),
+                std::time::Instant::now()
+            ))
+            .drawn
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn licence_notices_are_kept_in_order_by_heading_and_none_by_default() {
+        assert!(Sceneries::default().licenses().is_empty());
+        let mut sceneries = Sceneries::empty();
+        sceneries.add_license("Floor tiles", "CC0");
+        sceneries.add_license("Deck", "MIT");
+        // Adding a heading again replaces its text, at the end.
+        sceneries.add_license("Floor tiles", "CC BY 4.0");
+        assert_eq!(
+            sceneries.licenses(),
+            [("Deck", "MIT"), ("Floor tiles", "CC BY 4.0")]
+        );
+    }
 
     #[test]
     fn locomotion_is_declared_by_identifier_and_none_by_default() {

@@ -3,15 +3,25 @@ name = "tomori-environment-farmyard"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-description = "Tomori's farmyard environment, an evening yard with a chicken coop: its identity, layout and models, shared by its server and its clients"
+description = "Tomori's farmyard environment, an evening yard with a chicken coop and a flock of chickens: its identity, layout, models, chickens and server side, shared by its server and its clients"
 repository.workspace = true
-license.workspace = true
+# The code is MIT, as is the rest of Tomori; the chicken in `assets/models`, and its sources in `assets/source`, by Hinoki Maple Williams, are under the Creative Commons Attribution 4.0 International licence (CC BY 4.0); see assets/models/LICENSE.md. Both apply.
+license = "MIT AND CC-BY-4.0"
 readme = "readme.md"
+# The chicken's editable `.blend` sources stay in the repository; the package carries its exported `.glb`, which builds embed, and the export script and Blender's reference deformation, which its tests read.
+exclude = ["assets/source/*.blend"]
 keywords = ["tomori", "environment", "xr", "farmyard"]
 categories = ["game-development"]
 
 [dependencies]
 glam = "0.30"
 log = "0.4"
-# Its models, built in code and loaded, without drawing them.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Its models, built in code and loaded, and the chickens' animator, without drawing them.
 tomori-assets = { version = "0.2.0", path = "../assets", default-features = false }
+tomori-environment = { version = "0.2.0", path = "../environment" }
+
+[dev-dependencies]
+# The cancellation a test's space stops with, as the server's do.
+base-scheduler = "0.3.0"

@@ -447,6 +447,23 @@ impl Renderer {
     }
 
     /// The environment and, while it grows out of a space's object or shrinks back into it, the sphere it fills, with the grid outside. See `design/arrival.md`.
+    /// What the current environment's client side shows now, for its scenery to draw. See `design/environments.md`.
+    pub fn animate(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        drawn: &(dyn std::any::Any + Send + Sync),
+    ) {
+        let environment = self.environment;
+        if let Some((_, scenery)) = self
+            .sceneries
+            .iter_mut()
+            .find(|(registered, _)| *registered == environment)
+        {
+            scenery.animate(device, queue, drawn);
+        }
+    }
+
     pub fn set_scenery(&mut self, scenery: crate::arrival_motion::Scenery) {
         self.environment = scenery.environment;
         self.reveal = scenery.reveal;

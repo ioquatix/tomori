@@ -14,8 +14,10 @@ categories = ["rendering", "game-development"]
 bytemuck = { version = "1", features = ["derive"] }
 glam = "0.30"
 log = "0.4"
+serde_json = "1"
 tomori-assets = { version = "0.2.0", path = "../assets" }
 tomori-environment-farmyard = { version = "0.2.0", path = "../environment-farmyard" }
+tomori-protocol = { version = "0.2.0", path = "../protocol" }
 tomori-render = { version = "0.2.0", path = "../render" }
 tomori-scene = { version = "0.2.0", path = "../scene" }
 wgpu = { version = "30.0.1", default-features = false, features = ["std", "vulkan", "wgsl"] }

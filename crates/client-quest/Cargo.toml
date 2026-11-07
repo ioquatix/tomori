@@ -89,8 +89,8 @@ package = "com.codeotaku.tomori"
 apk_name = "tomori"
 build_targets = ["aarch64-linux-android"]
 runtime_libs = "../../android/libs"
-# The licence notices of the controller models and the Basis Universal transcoder, which `tomori-render` compiles in.
-assets = "../render/assets"
+# Tomori's own APK's assets, `android/assets`, links into the crates that package them: the licence notices of the controller models and the Basis Universal transcoder, which `tomori-render` compiles in, and the models of the environments Tomori's own app registers, each at its environment's identifier, which Android reads from here rather than embedding, with their licence notices. See design/assets.md.
+assets = "../../android/assets"
 strip = "strip"
 
 [package.metadata.android.sdk]

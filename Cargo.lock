@@ -3643,9 +3643,13 @@ dependencies = [
 name = "tomori-environment-farmyard"
 version = "0.2.0"
 dependencies = [
+ "base-scheduler",
  "glam",
  "log",
+ "serde",
+ "serde_json",
  "tomori-assets",
+ "tomori-environment",
 ]
 
 [[package]]
@@ -3657,8 +3661,10 @@ dependencies = [
  "image",
  "log",
  "pollster",
+ "serde_json",
  "tomori-assets",
  "tomori-environment-farmyard",
+ "tomori-protocol",
  "tomori-render",
  "tomori-scene",
  "wgpu",

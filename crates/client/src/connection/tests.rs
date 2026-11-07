@@ -1774,11 +1774,16 @@ fn without_a_connection_nothing_is_sent_and_the_participant_is_told() {
             .iter()
             .all(|report| matches!(report, Report::Tick { .. } | Report::Replaying(false)))
     );
-    // Without a speaker, cues have nowhere to play, and are dropped.
+    // Without a speaker, cues and ambient sounds have nowhere to play, and are dropped.
     session.listening = false;
     connection.feedback().emit(Feedback::Choose, Instant::now());
+    let sound = crate::playback::Sound::new(vec![1_000.0; 480], 48_000);
+    connection
+        .feedback()
+        .ambient(sound, [0.0; 3], Instant::now());
     connection.poll(true, &mut session);
     assert_eq!(connection.feedback().take_earcons().count(), 0);
+    assert_eq!(connection.feedback().take_ambient().count(), 0);
 }
 
 #[test]
@@ -2245,6 +2250,23 @@ fn a_catch_up_nobody_asked_for_is_cued_once() {
             .iter()
             .all(|report| *report != Report::Replaying(true))
     );
+}
+
+#[test]
+fn an_environment_s_ambient_sound_plays_through_the_speaker() {
+    let peer = Peer::start();
+    let held = Held::default();
+    let mut session = Script::default();
+    let mut connection = with_peer(&peer, &mut session, Scripted::default(), held.clone());
+    until(&mut connection, &mut session, |_, _| held.opened());
+    held.flush();
+    assert!(!held.heard());
+    let sound = crate::playback::Sound::new(vec![1_000.0; 4_800], 48_000);
+    connection
+        .feedback()
+        .ambient(sound, [0.0, 1.6, -1.0], Instant::now());
+    connection.poll(true, &mut session);
+    assert!((0..10).any(|_| held.heard()));
 }
 
 #[test]
