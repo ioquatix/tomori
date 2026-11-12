@@ -65,6 +65,10 @@ impl Scenery for Sky {
         Sky::resize(self, device, width, height);
     }
 
+    fn views(&self) -> tomori_render::multiview::Views {
+        Sky::views(self)
+    }
+
     fn haze(&self) -> tomori_render::haze::Haze {
         crate::HAZE
     }
@@ -72,13 +76,14 @@ impl Scenery for Sky {
 
 /// Tomori's moonlit sky, for `target`.
 pub fn scenery(target: &Target) -> Box<dyn Scenery> {
-    Box::new(Sky::with_samples(
+    Box::new(Sky::with_views(
         target.device,
         target.queue,
         target.format,
         target.width,
         target.height,
         target.samples,
+        target.views,
     ))
 }
 
@@ -279,6 +284,122 @@ mod tests {
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
             sky.encode(&mut encoder, 0);
             gpu.queue.submit([encoder.finish()]);
+        });
+    }
+
+    /// Each eye's picture of Sky, its platform, shrine, sky and clouds, as a renderer of `views` draws them with 4
+    /// samples a pixel, from the platform looking out over the clouds.
+    fn drawn(
+        gpu: &tomori_render::test_gpu::Gpu,
+        views: tomori_render::multiview::Views,
+    ) -> Vec<image::RgbaImage> {
+        use tomori_render::graphics::Renderer;
+        const SIZE: u32 = 128;
+        let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+        let mut sceneries = Sceneries::empty();
+        register(&mut sceneries);
+        let mut renderer = Renderer::with_views(
+            &gpu.device,
+            &gpu.queue,
+            format,
+            SIZE,
+            SIZE,
+            4,
+            &sceneries,
+            views,
+        );
+        assert_eq!(renderer.views(), views);
+        renderer.set_scenery(tomori_scene::arrival_motion::Scenery {
+            environment: tomori_scene::environment::Environment::new(crate::ID)
+                .with_version(crate::VERSION),
+            reveal: None,
+        });
+        let layers = views.count() as u32;
+        let textures: Vec<_> = (0..views.passes(2))
+            .map(|_| {
+                gpu.device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some("Sky multiview test eyes"),
+                    size: wgpu::Extent3d {
+                        width: SIZE,
+                        height: SIZE,
+                        depth_or_array_layers: layers,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format,
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                    view_formats: &[],
+                })
+            })
+            .collect();
+        let targets: Vec<_> = textures
+            .iter()
+            .map(|texture| {
+                texture.create_view(&wgpu::TextureViewDescriptor {
+                    dimension: Some(if layers == 2 {
+                        wgpu::TextureViewDimension::D2Array
+                    } else {
+                        wgpu::TextureViewDimension::D2
+                    }),
+                    ..Default::default()
+                })
+            })
+            .collect();
+        let lens = glam::camera::rh::proj::directx::perspective(1.6, 1.0, 0.05, 2000.0);
+        let eyes = [-0.032, 0.032].map(|x| {
+            let eye = Vec3::new(x, 1.6, 0.0);
+            lens * glam::camera::rh::view::look_at_mat4(
+                eye,
+                eye + Vec3::new(0.3, -0.4, -1.0),
+                Vec3::Y,
+            )
+        });
+        renderer.render(
+            &gpu.device,
+            &gpu.queue,
+            &targets,
+            &eyes,
+            Mat4::IDENTITY,
+            &[],
+        );
+        (0..2)
+            .map(|eye| {
+                let (texture, layer) = match views {
+                    tomori_render::multiview::Views::One => (&textures[eye], 0),
+                    tomori_render::multiview::Views::Both => (&textures[0], eye as u32),
+                };
+                tomori_render::test_gpu::read_layer(
+                    &gpu.device,
+                    &gpu.queue,
+                    texture,
+                    layer,
+                    (SIZE, SIZE),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn sky_drawn_for_both_eyes_in_one_pass_is_what_each_eye_s_own_pass_draws() {
+        use tomori_render::multiview::Views;
+        tomori_render::test_gpu::with_multiview(|gpu| {
+            let scope = gpu.device.push_error_scope(wgpu::ErrorFilter::Validation);
+            let each = drawn(&gpu, Views::One);
+            let both = drawn(&gpu, Views::Both);
+            assert_ne!(each[0], each[1]);
+            for eye in 0..2 {
+                let differing = each[eye]
+                    .pixels()
+                    .zip(both[eye].pixels())
+                    .filter(|(a, b)| a.0.iter().zip(b.0).any(|(a, b)| a.abs_diff(b) > 2))
+                    .count();
+                assert!(
+                    differing * 1_000 <= 128 * 128,
+                    "eye {eye}: {differing} pixels differ"
+                );
+            }
+            assert!(pollster::block_on(scope.pop()).is_none());
         });
     }
 }

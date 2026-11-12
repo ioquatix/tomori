@@ -362,6 +362,7 @@ mod tests {
     mod freeze;
     mod image_sharpness;
     mod linked_cursor;
+    mod multiview;
     mod padlock_corner;
     mod padlock_floor;
     mod people;

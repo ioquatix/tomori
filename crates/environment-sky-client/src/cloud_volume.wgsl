@@ -12,7 +12,8 @@ fn density(position: vec3<f32>) -> f32 {
 }
 
 @fragment
-fn volume_fragment(in: RayVertex) -> @location(0) vec4<f32> {
+fn volume_fragment(/* view_index */ in: RayVertex) -> @location(0) vec4<f32> {
+    let camera = cameras[0u /* view */];
     let direction = normalize(in.far - in.near);
     let interval = cloud_interval(in.near, direction);
     if interval.y <= interval.x { discard; }

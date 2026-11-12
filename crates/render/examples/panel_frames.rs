@@ -17,7 +17,10 @@
 //!
 //! With `panels`, only that many of them are projected, the walls still all shown, so that what each panel costs is
 //! told from what the walls do. With `walls`, that many walls of six slots stand about home, in rings 4, 7, 10 m and
-//! more away, fourteen to a ring, as an environment's own walls stand about a console.
+//! more away, fourteen to a ring, as an environment's own walls stand about a console. Set `TOMORI_MULTIVIEW=on` to draw
+//! both eyes in one pass, by multiview, as the headset does where it can, and `TOMORI_EYES` to the eyes' size and
+//! samples, such as `1680x1760x4`, the headset's, rather than 256 × 256 without multisampling; the GPU's time for the
+//! frames, by its timestamps, follows.
 use std::time::{Duration, Instant};
 
 use glam::{Vec2, Vec3};
@@ -149,9 +152,35 @@ fn main() {
     };
     let (device, queue) = (&gpu.device, &gpu.queue);
     let format = wgpu::TextureFormat::Rgba8UnormSrgb;
-    let (width, height) = (256, 256);
-    let mut renderer = Renderer::new(device, queue, format, width, height);
-    let eyes: Vec<wgpu::TextureView> = (0..2)
+    let sized: Vec<u32> = std::env::var("TOMORI_EYES")
+        .ok()
+        .map(|eyes| {
+            eyes.split('x')
+                .filter_map(|part| part.parse().ok())
+                .collect()
+        })
+        .unwrap_or_default();
+    let (width, height, samples) = match sized[..] {
+        [width, height, samples] => (width, height, samples),
+        _ => (256, 256, 1),
+    };
+    let views = match std::env::var("TOMORI_MULTIVIEW").as_deref() {
+        Ok("on") => tomori_render::multiview::Views::Both,
+        _ => tomori_render::multiview::Views::One,
+    };
+    let mut renderer = Renderer::with_views(
+        device,
+        queue,
+        format,
+        width,
+        height,
+        samples,
+        &tomori_render::scenery::Sceneries::empty(),
+        views,
+    );
+    let views = renderer.views();
+    let layers = views.count() as u32;
+    let eyes: Vec<wgpu::TextureView> = (0..views.passes(2))
         .map(|_| {
             device
                 .create_texture(&wgpu::TextureDescriptor {
@@ -159,7 +188,7 @@ fn main() {
                     size: wgpu::Extent3d {
                         width,
                         height,
-                        depth_or_array_layers: 1,
+                        depth_or_array_layers: layers,
                     },
                     mip_level_count: 1,
                     sample_count: 1,
@@ -168,7 +197,14 @@ fn main() {
                     usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
                     view_formats: &[],
                 })
-                .create_view(&Default::default())
+                .create_view(&wgpu::TextureViewDescriptor {
+                    dimension: Some(if layers == 2 {
+                        wgpu::TextureViewDimension::D2Array
+                    } else {
+                        wgpu::TextureViewDimension::D2
+                    }),
+                    ..Default::default()
+                })
         })
         .collect();
     let mut panels = Panels::new(device, &renderer);
@@ -266,7 +302,8 @@ fn main() {
     let total = summary(&mut total);
     let count = projection.panels.len().max(1) as f64;
     println!(
-        "{} panels on {} walls, panel LOD {lod}, {sheets} sheets of {vertices} vertices, {frames} frames: projector {:.3} ms (p95 {:.3}), uploads {:.3} ms (p95 {:.3}), together {:.3} ms (p95 {:.3}), {:.4} ms a panel; drawing both eyes {:.3} ms (p95 {:.3}), {:.4} ms a sheet, of which encoding {:.3} ms (p95 {:.3}) and submitting {:.3} ms (p95 {:.3}); waiting for the GPU {:.3} ms (p95 {:.3})",
+        "{width}x{height}x{samples}, {}: {} panels on {} walls, panel LOD {lod}, {sheets} sheets of {vertices} vertices, {frames} frames: projector {:.3} ms (p95 {:.3}), uploads {:.3} ms (p95 {:.3}), together {:.3} ms (p95 {:.3}), {:.4} ms a panel; drawing both eyes {:.3} ms (p95 {:.3}), {:.4} ms a sheet, of which encoding {:.3} ms (p95 {:.3}) and submitting {:.3} ms (p95 {:.3}); waiting for the GPU {:.3} ms (p95 {:.3})",
+        views.name(),
         projection.panels.len(),
         projection.walls.len(),
         scene.0,
@@ -286,4 +323,7 @@ fn main() {
         gpu_wait.0,
         gpu_wait.1,
     );
+    if let Some(gpu) = renderer.gpu_summary() {
+        println!("{gpu}");
+    }
 }

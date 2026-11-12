@@ -6,12 +6,14 @@
 //! viewpoints, by the GPU's timestamps: culled against both eyes as the renderer culls it, each piece lit by the lamps
 //! the world lists for it, and, to compare, without culling, with closed models' back faces drawn, with neither, culled
 //! with every piece lit by every lamp, with 28 more lanterns about the yard, by each piece's lamps and by every lamp,
-//! culled with four burning marshmallows' trails glowing before the eyes, as many as the ring holds, and with its
-//! models whole rather than in chunks, with its own lamps and with 32, the ten taken in turn frame by frame after a few
-//! seconds' warming up, so that the GPU's clock changing affects each alike, each the median of 600 frames. Pass a number for another count, and then a
-//! configuration's name, such as `culled`, to time it alone, or several separated by `|`, as a frame that culls what
-//! the last culled writes nothing. It times the CPU too: culling, through a render world as the renderer culls, and
-//! culling and encoding both eyes. Run by hand on a desktop GPU, not on CI's lavapipe; see `design/rendering.md`.
+//! culled with four burning marshmallows' trails glowing before the eyes, as many as the ring holds; with its models
+//! whole rather than in chunks, with its own lamps and with 32; culled with the right eye's pass first; and culled, both
+//! eyes drawn in one pass by multiview, as the headset draws them where it can; the twelve taken in turn frame by frame
+//! after a few seconds' warming up, so that the GPU's clock changing affects each alike, each the median of 600 frames,
+//! with each pass's own where each eye has one. Pass a number for another count, and then a configuration's name, such
+//! as `culled`, to time it alone, or several separated by `|`, as a frame that culls what the last culled writes
+//! nothing. It times the CPU too: culling, through a render world as the renderer culls, and culling and encoding both
+//! eyes. Run by hand on a desktop GPU, not on CI's lavapipe; see `design/rendering.md`.
 //!
 //! ```sh
 //! cargo run --release -p tomori-environment-farmyard-client --example scenery_frames
@@ -25,6 +27,7 @@ use tomori_environment_farmyard_client::embers::{self, Embers};
 use tomori_environment_farmyard_client::layout;
 use tomori_environment_farmyard_client::scenery::{CHUNK, Clock, Farmyard};
 use tomori_environment_farmyard_client::trail;
+use tomori_render::multiview::Views as Drawn;
 use tomori_render::scenery::{Scenery, Target, Views};
 use tomori_render::world::{Light, World};
 use tomori_scene::scene::headset::{Fov, View, view_projection};
@@ -58,6 +61,14 @@ fn eyes(middle: Vec3, heading: f32) -> [Mat4; 2] {
             fov,
         })
     })
+}
+
+/// How the eyes are drawn: each in a pass of its own, the left's first or the right's, or both in one, by multiview.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Eyes {
+    LeftFirst,
+    RightFirst,
+    Both,
 }
 
 fn heading(from: Vec3, to: Vec3) -> f32 {
@@ -133,15 +144,70 @@ fn main() {
         .unwrap_or(600);
     // Each configuration: whether it culls against the eyes, whether closed parts' back faces are culled, whether four
     // burning marshmallows' trails, as long as the ring holds, glow before the eyes, whether each piece is lit by the
-    // lamps listed for it, whether 28 more lanterns light the yard, and whether its models are whole.
+    // lamps listed for it, whether 28 more lanterns light the yard, whether its models are whole, and how the eyes are
+    // drawn: each in its own pass, the left's first or the right's, or both in one.
     let only = std::env::args().nth(2);
     let configurations: Vec<_> = [
-        ("culled", true, true, false, true, false, false),
-        ("frustum only", true, false, false, true, false, false),
-        ("back faces only", false, true, false, true, false, false),
-        ("neither", false, false, false, true, false, false),
-        ("culled, every lamp", true, true, false, false, false, false),
-        ("culled, 32 lamps", true, true, false, true, true, false),
+        (
+            "culled",
+            true,
+            true,
+            false,
+            true,
+            false,
+            false,
+            Eyes::LeftFirst,
+        ),
+        (
+            "frustum only",
+            true,
+            false,
+            false,
+            true,
+            false,
+            false,
+            Eyes::LeftFirst,
+        ),
+        (
+            "back faces only",
+            false,
+            true,
+            false,
+            true,
+            false,
+            false,
+            Eyes::LeftFirst,
+        ),
+        (
+            "neither",
+            false,
+            false,
+            false,
+            true,
+            false,
+            false,
+            Eyes::LeftFirst,
+        ),
+        (
+            "culled, every lamp",
+            true,
+            true,
+            false,
+            false,
+            false,
+            false,
+            Eyes::LeftFirst,
+        ),
+        (
+            "culled, 32 lamps",
+            true,
+            true,
+            false,
+            true,
+            true,
+            false,
+            Eyes::LeftFirst,
+        ),
         (
             "culled, 32 lamps, every lamp",
             true,
@@ -150,9 +216,28 @@ fn main() {
             false,
             true,
             false,
+            Eyes::LeftFirst,
         ),
-        ("culled, with trails", true, true, true, true, false, false),
-        ("culled, whole", true, true, false, true, false, true),
+        (
+            "culled, with trails",
+            true,
+            true,
+            true,
+            true,
+            false,
+            false,
+            Eyes::LeftFirst,
+        ),
+        (
+            "culled, whole",
+            true,
+            true,
+            false,
+            true,
+            false,
+            true,
+            Eyes::LeftFirst,
+        ),
         (
             "culled, 32 lamps, whole",
             true,
@@ -161,6 +246,27 @@ fn main() {
             true,
             true,
             true,
+            Eyes::LeftFirst,
+        ),
+        (
+            "culled, right first",
+            true,
+            true,
+            false,
+            true,
+            false,
+            false,
+            Eyes::RightFirst,
+        ),
+        (
+            "culled, multiview",
+            true,
+            true,
+            false,
+            true,
+            false,
+            false,
+            Eyes::Both,
         ),
     ]
     .into_iter()
@@ -179,20 +285,27 @@ fn main() {
     }))
     .expect("an adapter");
     let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-        required_features: wgpu::Features::TIMESTAMP_QUERY,
+        required_features: wgpu::Features::TIMESTAMP_QUERY
+            | (adapter.features() & tomori_render::multiview::FEATURES),
+        required_limits: tomori_render::multiview::limits(&adapter, wgpu::Limits::default()),
         ..Default::default()
     }))
     .expect("a device with timestamps");
+    let multiview = tomori_render::multiview::supported(&device, 4);
+    let configurations: Vec<_> = configurations
+        .into_iter()
+        .filter(|(.., eyes)| multiview || *eyes != Eyes::Both)
+        .collect();
     eprintln!("{}", adapter.get_info().name);
     let format = wgpu::TextureFormat::Rgba8UnormSrgb;
-    let texture = |format, samples, usage| {
+    let layered = |format, samples, usage, layers: u32| {
         device
             .create_texture(&wgpu::TextureDescriptor {
                 label: Some("Scenery frames target"),
                 size: wgpu::Extent3d {
                     width: SIZE.0,
                     height: SIZE.1,
-                    depth_or_array_layers: 1,
+                    depth_or_array_layers: layers,
                 },
                 mip_level_count: 1,
                 sample_count: samples,
@@ -201,8 +314,16 @@ fn main() {
                 usage,
                 view_formats: &[],
             })
-            .create_view(&Default::default())
+            .create_view(&wgpu::TextureViewDescriptor {
+                dimension: Some(if layers == 1 {
+                    wgpu::TextureViewDimension::D2
+                } else {
+                    wgpu::TextureViewDimension::D2Array
+                }),
+                ..Default::default()
+            })
     };
+    let texture = |format, samples, usage| layered(format, samples, usage, 1);
     let resolved: [_; 2] =
         std::array::from_fn(|_| texture(format, 1, wgpu::TextureUsages::RENDER_ATTACHMENT));
     let multisampled = texture(format, 4, wgpu::TextureUsages::RENDER_ATTACHMENT);
@@ -211,17 +332,26 @@ fn main() {
         4,
         wgpu::TextureUsages::RENDER_ATTACHMENT,
     );
-    let target = Target::new(
-        &device,
-        &queue,
-        format,
-        SIZE.0,
-        SIZE.1,
-        4,
-        tomori_render::glyphs::SharedGlyphs::new(&device),
-    );
-    // The farmyard in chunks, as it is drawn, and whole, as it was, each with its own render world.
-    let mut farmyards = [Some(CHUNK), None].map(|chunk| {
+    // Both eyes' targets, a layer each, for both drawn in one pass.
+    let both = multiview.then(|| {
+        let usage = wgpu::TextureUsages::RENDER_ATTACHMENT;
+        (
+            layered(format, 1, usage, 2),
+            layered(format, 4, usage, 2),
+            layered(wgpu::TextureFormat::Depth32Float, 4, usage, 2),
+        )
+    });
+    let made = |views, chunk| {
+        let target = Target::new(
+            &device,
+            &queue,
+            format,
+            SIZE.0,
+            SIZE.1,
+            4,
+            tomori_render::glyphs::SharedGlyphs::new(&device),
+        )
+        .with_views(views);
         Farmyard::with_chunks(
             &target,
             &Coop::Built,
@@ -229,7 +359,14 @@ fn main() {
             Clock::Held(CLOCK),
             chunk,
         )
-    });
+    };
+    // The farmyard in chunks, as it is drawn, an eye a pass; whole, as it was; and in chunks, both eyes drawn by
+    // multiview.
+    let mut farmyards = [
+        made(Drawn::One, Some(CHUNK)),
+        made(Drawn::One, None),
+        made(Drawn::Both, Some(CHUNK)),
+    ];
     // The flock out, as its client side shows it a little after it is made.
     let drawn = {
         use tomori_scene::client_side::{ClientSide, Input};
@@ -273,9 +410,9 @@ fn main() {
         mapped_at_creation: false,
     });
     let period = f64::from(queue.get_timestamp_period());
-    // The render world, as the renderer's, with 28 more lanterns in rows across the yard and beyond it, 5 m apart and
-    // reaching 4 m, dark unless a configuration lights them.
-    let mut worlds = [(); 2].map(|_| {
+    // A render world for each farmyard, as the renderer's, each with 28 more lanterns in rows across the yard and beyond
+    // it, 5 m apart and reaching 4 m, dark unless a configuration lights them.
+    let mut worlds: [_; 3] = std::array::from_fn(|_| {
         let mut world = World::new();
         let root = world.add_root();
         let lanterns: Vec<_> = (0..28)
@@ -293,6 +430,9 @@ fn main() {
     for (name, middle, facing) in viewpoints() {
         let clips = eyes(middle, facing);
         let mut gpu = vec![Vec::with_capacity(frames); configurations.len()];
+        // Each pass's time, the first's and the second's, where each eye has its own.
+        let mut passes =
+            vec![[Vec::with_capacity(frames), Vec::with_capacity(frames)]; configurations.len()];
         let mut cpu = vec![Vec::with_capacity(frames); configurations.len()];
         let mut culls = vec![Vec::with_capacity(frames); configurations.len()];
         let mut tallies = vec![tomori_assets::bounds::Tally::default(); configurations.len()];
@@ -301,10 +441,14 @@ fn main() {
         while gpu.iter().any(|times| times.len() < frames) {
             let which = frame % configurations.len();
             frame += 1;
-            let (_, culled, back_faces, trails, listed, lit, whole) = configurations[which];
-            let farmyard = &mut farmyards[usize::from(whole)];
-            let (world, root, lanterns) = &mut worlds[usize::from(whole)];
-            let root = *root;
+            let (_, culled, back_faces, trails, listed, lit, whole, order) = configurations[which];
+            // The farmyard, and its render world, drawn so: in chunks or whole, an eye a pass or both in one.
+            let drawn_by = match (whole, order) {
+                (true, _) => 1,
+                (false, Eyes::Both) => 2,
+                (false, _) => 0,
+            };
+            let farmyard = &mut farmyards[drawn_by];
             if trails {
                 paint(farmyard.embers_mut(), middle, facing);
             } else {
@@ -315,6 +459,7 @@ fn main() {
             farmyard.set_back_faces_culled(back_faces);
             farmyard.set_lamps_listed(listed);
             // What it submits to the render world, culled there, then drawn as the world saw it, as the renderer does.
+            let (world, root, lanterns) = &mut worlds[drawn_by];
             for lantern in lanterns.iter() {
                 world.light_mut(*lantern).expect("a lantern").color = if lit {
                     Vec3::new(1.0, 0.7, 0.35)
@@ -324,18 +469,31 @@ fn main() {
             }
             world.set_views(&clips);
             world.set_culling(culled);
-            farmyard.submit(world, root);
+            farmyard.submit(world, *root);
             world.cull();
-            tallies[which] = farmyard.cull(&queue, &Views::of(world, root));
+            tallies[which] = farmyard.cull(&queue, &Views::of(world, *root));
             let culling = started.elapsed();
             let mut encoder = device.create_command_encoder(&Default::default());
             for (eye, clip) in clips.iter().enumerate() {
                 farmyard.prepare_eye(&queue, eye, *clip, tomori_render::scenery::eye(*clip));
+            }
+            let eyes: &[usize] = match order {
+                Eyes::LeftFirst => &[0, 1],
+                Eyes::RightFirst => &[1, 0],
+                Eyes::Both => &[0],
+            };
+            for (pass, &eye) in eyes.iter().enumerate() {
+                let (resolved, multisampled, depth) = match (&both, order) {
+                    (Some((resolved, multisampled, depth)), Eyes::Both) => {
+                        (resolved, multisampled, depth)
+                    }
+                    _ => (&resolved[eye], &multisampled, &depth),
+                };
                 let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("Scenery frames eye"),
                     color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &multisampled,
-                        resolve_target: Some(&resolved[eye]),
+                        view: multisampled,
+                        resolve_target: Some(resolved),
                         depth_slice: None,
                         ops: wgpu::Operations {
                             load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
@@ -343,7 +501,7 @@ fn main() {
                         },
                     })],
                     depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                        view: &depth,
+                        view: depth,
                         depth_ops: Some(wgpu::Operations {
                             load: wgpu::LoadOp::Clear(1.0),
                             store: wgpu::StoreOp::Discard,
@@ -352,16 +510,22 @@ fn main() {
                     }),
                     timestamp_writes: Some(wgpu::RenderPassTimestampWrites {
                         query_set: &queries,
-                        beginning_of_pass_write_index: Some(eye as u32 * 2),
-                        end_of_pass_write_index: Some(eye as u32 * 2 + 1),
+                        beginning_of_pass_write_index: Some(pass as u32 * 2),
+                        end_of_pass_write_index: Some(pass as u32 * 2 + 1),
                     }),
                     occlusion_query_set: None,
-                    multiview_mask: None,
+                    multiview_mask: if order == Eyes::Both {
+                        Drawn::Both.mask()
+                    } else {
+                        None
+                    },
                 });
-                farmyard.draw(&mut pass, eye);
-                farmyard.draw_translucent(&mut pass, eye);
+                let drawn_as = if order == Eyes::Both { 0 } else { eye };
+                farmyard.draw(&mut pass, drawn_as);
+                farmyard.draw_translucent(&mut pass, drawn_as);
             }
-            encoder.resolve_query_set(&queries, 0..4, &resolve, 0);
+            let written = eyes.len() as u32 * 2;
+            encoder.resolve_query_set(&queries, 0..written, &resolve, 0);
             encoder.copy_buffer_to_buffer(&resolve, 0, &readback, 0, 32);
             queue.submit([encoder.finish()]);
             let encoded = started.elapsed();
@@ -371,8 +535,13 @@ fn main() {
                 bytemuck::cast_slice(&readback.slice(..).get_mapped_range().unwrap()).to_vec();
             readback.unmap();
             if warming.elapsed() >= WARM && gpu[which].len() < frames {
-                gpu[which]
-                    .push(((ticks[1] - ticks[0]) + (ticks[3] - ticks[2])) as f64 * period / 1e6);
+                let each: Vec<f64> = (0..eyes.len())
+                    .map(|pass| (ticks[pass * 2 + 1] - ticks[pass * 2]) as f64 * period / 1e6)
+                    .collect();
+                gpu[which].push(each.iter().sum());
+                for (pass, time) in each.into_iter().enumerate() {
+                    passes[which][pass].push(time);
+                }
                 cpu[which].push(encoded.as_secs_f64() * 1e3);
                 culls[which].push(culling.as_secs_f64() * 1e3);
             }
@@ -383,8 +552,18 @@ fn main() {
         };
         for (which, (configuration, ..)) in configurations.iter().enumerate() {
             let tally = tallies[which];
+            let [first, second] = &mut passes[which];
+            let each = if second.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    " (first pass {:.4}, second {:.4})",
+                    median(first),
+                    median(second)
+                )
+            };
             println!(
-                "{name}, {configuration}: GPU {:.4} ms for both eyes, CPU {:.4} ms to cull and {:.4} ms to cull and encode; an eye: {} drawn, {} culled, {} draws, {} triangles",
+                "{name}, {configuration}: GPU {:.4} ms for both eyes{each}, CPU {:.4} ms to cull and {:.4} ms to cull and encode; an eye: {} drawn, {} culled, {} draws, {} triangles",
                 median(&mut gpu[which]),
                 median(&mut culls[which]),
                 median(&mut cpu[which]),

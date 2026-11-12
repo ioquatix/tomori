@@ -8,7 +8,8 @@ struct Camera {
     // Where the eye is.
     eye: vec3<f32>,
 }
-@group(0) @binding(0) var<uniform> camera: Camera;
+// Each eye's camera, indexed by the view drawn: see `tomori_render::multiview`.
+@group(0) @binding(0) var<uniform> cameras: array<Camera, 1 /* views */>;
 @group(1) @binding(0) var atlas: texture_2d<f32>;
 @group(1) @binding(1) var atlas_sampler: sampler;
 struct Output {
@@ -21,11 +22,13 @@ struct Output {
 }
 @vertex
 fn vs_main(
+    /* view_index */
     @location(0) position: vec2<f32>,
     @location(1) color: vec4<f32>,
     @location(2) uv: vec2<f32>,
     @location(3) weight: f32,
 ) -> Output {
+    let camera = cameras[0u /* view */];
     var out: Output;
     out.position = camera.transform * vec4<f32>(position, 0.0, 1.0);
     out.world = (camera.model * vec4<f32>(position, 0.0, 1.0)).xyz;
@@ -72,7 +75,8 @@ fn opacity(covered: f32, color: vec3<f32>) -> f32 {
     return mix(1.0 - pow(1.0 - covered, GAMMA), pow(covered, GAMMA), light);
 }
 @fragment
-fn fs_main(in: Output) -> @location(0) vec4<f32> {
+fn fs_main(/* view_index */ in: Output) -> @location(0) vec4<f32> {
+    let camera = cameras[0u /* view */];
     // Hazed as everything in the scene is; its coverage is made opacity by its own colour, so that text keeps its weight.
     let color = hazed(in.color.rgb, camera.haze, distance(in.world, camera.eye));
     return vec4<f32>(color, in.color.a * opacity(coverage(in.uv, in.weight), in.color.rgb));
@@ -84,11 +88,13 @@ override OCCLUDING: f32 = 0.6;
 // A backing drawn into depth alone, once its surface is drawn, so that what is behind it and drawn later is hidden; its colour is not written, and only where it is opaque enough. See `occlusion.rs`.
 @vertex
 fn vs_occlude(
+    /* view_index */
     @location(0) position: vec2<f32>,
     @location(1) color: vec4<f32>,
     @location(2) uv: vec2<f32>,
     @location(3) weight: f32,
 ) -> Output {
+    let camera = cameras[0u /* view */];
     var out: Output;
     let at = camera.transform * vec4<f32>(position, 0.0, 1.0);
     out.position = vec4<f32>(at.xy, min(at.z + TIE * at.w, at.w), at.w);

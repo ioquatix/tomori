@@ -83,14 +83,52 @@ pub(super) fn with_hens(
     width: u32,
     height: u32,
 ) -> Farmyard {
-    chunked_with_hens(device, queue, (width, height), Some(CHUNK))
+    farmyard_with_hens(
+        device,
+        queue,
+        (width, height),
+        tomori_render::multiview::Views::One,
+        false,
+        Some(CHUNK),
+    )
 }
 
 /// As [`with_hens`], its models in chunks at most `chunk` across, or whole.
 pub(super) fn chunked_with_hens(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
+    size: (u32, u32),
+    chunk: Option<f32>,
+) -> Farmyard {
+    farmyard_with_hens(
+        device,
+        queue,
+        size,
+        tomori_render::multiview::Views::One,
+        false,
+        chunk,
+    )
+}
+
+/// As [`with_hens`], drawing `views` a pass, a trail of light painted before the arrival's eyes.
+pub(super) fn with_hens_drawing(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    width: u32,
+    height: u32,
+    views: tomori_render::multiview::Views,
+) -> Farmyard {
+    farmyard_with_hens(device, queue, (width, height), views, true, Some(CHUNK))
+}
+
+/// The farmyard, its flock out, drawing `views` a pass, with a trail of light if `painted`, its models in chunks at
+/// most `chunk` across, or whole.
+fn farmyard_with_hens(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
     (width, height): (u32, u32),
+    views: tomori_render::multiview::Views,
+    painted: bool,
     chunk: Option<f32>,
 ) -> Farmyard {
     use tomori_scene::client_side::{ClientSide, Input};
@@ -102,7 +140,8 @@ pub(super) fn chunked_with_hens(
         height,
         4,
         tomori_render::glyphs::SharedGlyphs::new(device),
-    );
+    )
+    .with_views(views);
     let mut farmyard = Farmyard::with_chunks(
         &target,
         &Coop::Built,
@@ -110,6 +149,13 @@ pub(super) fn chunked_with_hens(
         Clock::Held(2.0),
         chunk,
     );
+    if painted {
+        let before = layout::ARRIVAL + Vec3::new(0.0, 1.4, -1.2);
+        let path: Vec<Vec3> = (0..20)
+            .map(|step| before + Vec3::X * (0.04 * step as f32 - 0.4))
+            .collect();
+        farmyard.embers_mut().paint(0, &path, 0.02, 1.8);
+    }
     let chicken = tomori_environment_farmyard::chicken::Chicken::shared().unwrap();
     let flock = tomori_environment_farmyard::flock::Flock::new(
         tomori_environment_farmyard::flock::seed("space-1"),

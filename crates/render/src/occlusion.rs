@@ -48,8 +48,32 @@ pub fn occluder(
     format: wgpu::TextureFormat,
     samples: u32,
 ) -> wgpu::RenderPipeline {
+    occluder_with_views(
+        device,
+        label,
+        layout,
+        shader,
+        vertex,
+        format,
+        samples,
+        crate::multiview::Views::One,
+    )
+}
+
+/// As [`occluder`], within a pass of `views`, `shader` made for them; see [`crate::multiview`].
+#[allow(clippy::too_many_arguments)]
+pub fn occluder_with_views(
+    device: &wgpu::Device,
+    label: &str,
+    layout: &wgpu::PipelineLayout,
+    shader: &wgpu::ShaderModule,
+    vertex: wgpu::VertexBufferLayout<'_>,
+    format: wgpu::TextureFormat,
+    samples: u32,
+    views: crate::multiview::Views,
+) -> wgpu::RenderPipeline {
     occluder_at(
-        device, label, layout, shader, vertex, format, samples, OCCLUDING,
+        device, label, layout, shader, vertex, format, samples, OCCLUDING, views,
     )
 }
 
@@ -65,6 +89,7 @@ pub(crate) fn occluder_at(
     format: wgpu::TextureFormat,
     samples: u32,
     occluding: f32,
+    views: crate::multiview::Views,
 ) -> wgpu::RenderPipeline {
     // The fragment stage's overrides: the threshold, and, where the target is sRGB, the glyphs' `GAMMA`, as the
     // surface's own pipeline draws it.
@@ -112,7 +137,7 @@ pub(crate) fn occluder_at(
             count: samples,
             ..Default::default()
         },
-        multiview_mask: None,
+        multiview_mask: views.mask(),
         cache: None,
     })
 }
@@ -120,6 +145,37 @@ pub(crate) fn occluder_at(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_occluder_is_made_from_a_surface_s_shader_for_a_pass_of_one_view() {
+        crate::test_gpu::with(|crate::test_gpu::Gpu { device, .. }| {
+            let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+            let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+            let glyphs = crate::glyphs::Glyphs::new(&device);
+            let transforms =
+                crate::ui_panel::transforms_layout(&device, crate::multiview::Views::One);
+            let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: None,
+                bind_group_layouts: &[Some(&transforms), Some(glyphs.layout())],
+                immediate_size: 0,
+            });
+            let shader = device.create_shader_module(hazed_wgsl!("ui_panel.wgsl"));
+            occluder(
+                &device,
+                "test occluder",
+                &layout,
+                &shader,
+                wgpu::VertexBufferLayout {
+                    array_stride: 36,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x4, 2 => Float32x2, 3 => Float32],
+                },
+                format,
+                4,
+            );
+            assert!(pollster::block_on(scope.pop()).is_none());
+        });
+    }
 
     #[test]
     fn backings_hide_what_is_behind_them_only_when_opaque_enough() {

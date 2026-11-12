@@ -5,7 +5,9 @@
 //!
 //! It holds no window, device or platform code: each client creates its own device and targets, and hands them to the renderer. Its interfaces change with the environment framework ([#75](https://github.com/base-rs/tomori/issues/75), [#77](https://github.com/base-rs/tomori/issues/77)).
 /// A shader module of `$file`, one of this crate's, after the shared haze functions, `tomori_assets::haze`, which it
-/// fades what it draws by. See `design/rendering.md`.
+/// fades what it draws by, for the tests' own pipelines of one view; the renderer's are made by [`multiview::shader`]
+/// for its views. See `design/rendering.md`.
+#[cfg(test)]
 macro_rules! hazed_wgsl {
     ($file:literal) => {
         wgpu::ShaderModuleDescriptor {
@@ -25,6 +27,7 @@ pub mod controller;
 pub mod controller_graphics;
 pub mod glyphs;
 pub mod graphics;
+pub mod multiview;
 pub mod occlusion;
 pub mod panel_images;
 pub mod profiler;

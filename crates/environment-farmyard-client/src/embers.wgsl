@@ -18,7 +18,8 @@ struct Camera {
     // are the bonfire's.
     time: vec4<f32>,
 }
-@group(0) @binding(0) var<uniform> camera: Camera;
+// Each eye's camera, indexed by the view drawn: see `tomori_render::multiview`.
+@group(0) @binding(0) var<uniform> cameras: array<Camera, 1 /* views */>;
 
 const LIFE: f32 = 3.0;
 const FRESH_WIDTH: f32 = 0.014;
@@ -44,11 +45,12 @@ struct Shaded {
     @location(2) across: vec2<f32>,
 }
 
-// How long ago `made` was, on the wrapping clock.
-fn age_of(made: f32) -> f32 {
-    var age = camera.time.x - made;
+// How long ago `made` was, on the wrapping clock, the camera's `time`. Given the time rather than the camera: see
+// `tomori_render::multiview` on a vertex shader passing an eye's uniform by value.
+fn age_of(time: vec4<f32>, made: f32) -> f32 {
+    var age = time.x - made;
     if age < 0.0 {
-        age = age + camera.time.w;
+        age = age + time.w;
     }
     return age;
 }
@@ -78,8 +80,9 @@ fn square(way: vec3<f32>, towards: vec3<f32>) -> vec3<f32> {
 }
 
 @vertex
-fn ember_vertex(corner: Corner) -> Shaded {
-    let age = age_of(corner.shape.z);
+fn ember_vertex(/* view_index */ corner: Corner) -> Shaded {
+    let camera = cameras[0u /* view */];
+    let age = age_of(camera.time, corner.shape.z);
     var world: vec3<f32>;
     var color: vec3<f32>;
     if corner.shape.w < 0.5 {
@@ -122,7 +125,8 @@ fn ember_vertex(corner: Corner) -> Shaded {
 }
 
 @fragment
-fn ember_fragment(in: Shaded) -> @location(0) vec4<f32> {
+fn ember_fragment(/* view_index */ in: Shaded) -> @location(0) vec4<f32> {
+    let camera = cameras[0u /* view */];
     if camera.reveal.w >= 0.0 && distance(in.world, camera.reveal.xyz) > camera.reveal.w {
         discard;
     }

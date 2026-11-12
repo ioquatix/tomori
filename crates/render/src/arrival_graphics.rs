@@ -562,7 +562,31 @@ impl ArrivalLabels {
         glyphs: &crate::glyphs::Glyphs,
         samples: u32,
     ) -> Self {
-        let shader = device.create_shader_module(hazed_wgsl!("workspace.wgsl"));
+        Self::with_views(
+            device,
+            format,
+            camera_layout,
+            glyphs,
+            samples,
+            crate::multiview::Views::One,
+        )
+    }
+
+    /// As [`Self::new`], drawn in passes of `views`; see [`crate::multiview`].
+    pub fn with_views(
+        device: &wgpu::Device,
+        format: wgpu::TextureFormat,
+        camera_layout: &wgpu::BindGroupLayout,
+        glyphs: &crate::glyphs::Glyphs,
+        samples: u32,
+        views: crate::multiview::Views,
+    ) -> Self {
+        let shader = crate::multiview::shader(
+            device,
+            "workspace.wgsl",
+            include_str!("workspace.wgsl"),
+            views,
+        );
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("arrival labels layout"),
             bind_group_layouts: &[Some(camera_layout), Some(glyphs.layout())],
@@ -607,7 +631,7 @@ impl ArrivalLabels {
                 count: samples,
                 ..Default::default()
             },
-            multiview_mask: None,
+            multiview_mask: views.mask(),
             cache: None,
         });
         let vertices = Self::buffer(device, INITIAL_VERTICES);
@@ -1647,7 +1671,8 @@ mod tests {
             ..Default::default()
         };
         crate::test_gpu::with(|gpu| {
-            let camera_layout = crate::graphics::camera_layout(&gpu.device);
+            let camera_layout =
+                crate::graphics::camera_layout(&gpu.device, crate::multiview::Views::One);
             let glyphs = crate::glyphs::Glyphs::new(&gpu.device);
             let mut labels = ArrivalLabels::new(
                 &gpu.device,

@@ -31,6 +31,7 @@ mod library;
 mod model;
 mod pose;
 mod reference;
+pub mod views;
 
 #[cfg(feature = "gpu")]
 pub mod gpu;
@@ -46,6 +47,7 @@ pub use model::{
 };
 pub use pose::{Pose, deformed, joint_matrices};
 pub use reference::{AssetRef, Digest};
+pub use views::Views;
 
 /// What kind of failure an [`Error`] is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

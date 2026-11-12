@@ -124,7 +124,7 @@ fn a_transparent_corner_margin_or_outside_never_hides_a_translucent_wall_drawn_a
     test_gpu::with(|test_gpu::Gpu { device, queue, .. }| {
         let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
         let format = wgpu::TextureFormat::Rgba8Unorm;
-        let camera_layout = crate::graphics::camera_layout(&device);
+        let camera_layout = crate::graphics::camera_layout(&device, crate::multiview::Views::One);
         use wgpu::util::DeviceExt;
         let camera = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: None,
@@ -161,6 +161,7 @@ fn a_transparent_corner_margin_or_outside_never_hides_a_translucent_wall_drawn_a
             format,
             1,
             0.0,
+            crate::multiview::Views::One,
         );
         let items = items();
         let extent = wgpu::Extent3d {

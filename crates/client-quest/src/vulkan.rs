@@ -38,8 +38,14 @@ struct Raw {
 }
 
 impl Gpu {
-    /// The runtime's Vulkan device, with `VK_EXT_fragment_density_map` enabled where `foveate` and the GPU can draw at it.
-    pub fn new(xr: &xr::Instance, system: xr::SystemId, foveate: bool) -> Result<Self> {
+    /// The runtime's Vulkan device, with `VK_EXT_fragment_density_map` enabled where `foveate` and the GPU can draw at it,
+    /// and multiview, for both eyes in one pass, where `multiview` and the GPU has it.
+    pub fn new(
+        xr: &xr::Instance,
+        system: xr::SystemId,
+        foveate: bool,
+        multiview: bool,
+    ) -> Result<Self> {
         const API: u32 = vk::API_VERSION_1_1;
         let requirements = xr.graphics_requirements::<xr::Vulkan>(system)?;
         ensure!(
@@ -113,9 +119,22 @@ impl Gpu {
         let adapter = hal_instance
             .expose_adapter(physical)
             .context("exposing XR Vulkan adapter")?;
-        // The GPU's timestamps, where it has them, for the frame log; see `design/rendering.md`.
-        let features = adapter.features & tomori_render::profiler::FEATURES;
-        let limits = wgpu::Limits::default();
+        // The GPU's timestamps, where it has them, for the frame log, and multiview where asked for; see
+        // `design/rendering.md`.
+        let wanted = if multiview {
+            tomori_render::profiler::FEATURES | tomori_render::multiview::FEATURES
+        } else {
+            tomori_render::profiler::FEATURES
+        };
+        let features = adapter.features & wanted;
+        let limits = wgpu::Limits {
+            max_multiview_view_count: if features.contains(wgpu::Features::MULTIVIEW) {
+                adapter.capabilities.limits.max_multiview_view_count.min(2)
+            } else {
+                0
+            },
+            ..wgpu::Limits::default()
+        };
         let device_extensions = adapter.adapter.required_device_extensions(features);
         let mut device_ptrs: Vec<_> = device_extensions.iter().map(|e| e.as_ptr()).collect();
         let (density, texels) = if foveate {
@@ -289,14 +308,25 @@ impl Gpu {
                         ..Default::default()
                     })
                 });
-                // The Vulkan view each eye is drawn into, by which its framebuffer is given that eye's density map.
-                let targets = views.each_ref().map(|view| unsafe {
+                // Both eyes' layers, which one pass draws both into by multiview.
+                let layers = texture.create_view(&wgpu::TextureViewDescriptor {
+                    label: Some("XR eyes"),
+                    dimension: Some(wgpu::TextureViewDimension::D2Array),
+                    ..Default::default()
+                });
+                // The Vulkan view each eye is drawn into, and both, by which its framebuffer is given that eye's density
+                // map, or both eyes'.
+                let raw = |view: &wgpu::TextureView| unsafe {
                     view.as_hal::<wgpu_hal::api::Vulkan>()
                         .map_or(vk::ImageView::null(), |view| view.raw_handle())
-                });
+                };
+                let targets = views.each_ref().map(raw);
+                let layers_target = raw(&layers);
                 Ok(ImportedImage {
                     views,
+                    layers: vec![layers],
                     targets,
+                    layers_target,
                     _texture: texture,
                 })
             })
@@ -306,8 +336,21 @@ impl Gpu {
 
 pub struct ImportedImage {
     pub views: [wgpu::TextureView; 2],
+    /// Both eyes' layers, as one pass drawing both by multiview is given them.
+    pub layers: Vec<wgpu::TextureView>,
     targets: [vk::ImageView; 2],
+    layers_target: vk::ImageView,
     _texture: wgpu::Texture,
+}
+
+impl ImportedImage {
+    /// The targets of a frame's passes drawing `views`: each eye's layer, or both.
+    pub fn targets(&self, views: tomori_render::multiview::Views) -> &[wgpu::TextureView] {
+        match views {
+            tomori_render::multiview::Views::One => &self.views,
+            tomori_render::multiview::Views::Both => &self.layers,
+        }
+    }
 }
 
 /// The density maps the runtime gave for a swapchain's images, `XR_FB_foveation_vulkan`'s, one for each image, in order, with their size in texels.
@@ -361,6 +404,10 @@ impl Gpu {
                         foveation.views.push(view);
                         passes.target(target, view);
                     }
+                    // Both eyes drawn in one pass by multiview are each drawn at its own layer of the map.
+                    let both = unsafe { layers_view(device, *density) }?;
+                    foveation.views.push(both);
+                    passes.target(image.layers_target, both);
                 }
             }
             _ => {
@@ -368,6 +415,7 @@ impl Gpu {
                     for eye in 0..2 {
                         passes.target(image.targets[eye], foveation.own.views[eye]);
                     }
+                    passes.target(image.layers_target, foveation.own.both);
                 }
             }
         }
@@ -393,12 +441,13 @@ pub struct Foveation {
     shaped: bool,
 }
 
-/// Tomori's own density map: one image of three layers, the left eye's, the right eye's and one full everywhere, for a framebuffer of the eyes' shape drawing anything else.
+/// Tomori's own density map: one image of three layers, the left eye's, the right eye's and one full everywhere, for a framebuffer of the eyes' shape drawing anything else; and the first two together, for both eyes drawn in one pass by multiview.
 #[derive(Default)]
 struct OwnMap {
     image: vk::Image,
     memory: vk::DeviceMemory,
     views: [vk::ImageView; 3],
+    both: vk::ImageView,
 }
 
 impl Foveation {
@@ -465,6 +514,7 @@ impl Foveation {
             for layer in 0..3 {
                 own.views[layer] = layer_view(device, own.image, layer as u32)?;
             }
+            own.both = layers_view(device, own.image)?;
             let full = foveation::own_map(Level::None, self.size, None);
             self.upload(
                 own.image,
@@ -635,7 +685,12 @@ impl Drop for Foveation {
         passes().stop();
         let device = &self.raw.device;
         unsafe {
-            for view in self.views.drain(..).chain(self.own.views) {
+            for view in self
+                .views
+                .drain(..)
+                .chain(self.own.views)
+                .chain([self.own.both])
+            {
                 if view != vk::ImageView::null() {
                     device.destroy_image_view(view, None);
                 }
@@ -662,6 +717,22 @@ unsafe fn layer_view(device: &ash::Device, image: vk::Image, layer: u32) -> Resu
             level_count: 1,
             base_array_layer: layer,
             layer_count: 1,
+        });
+    Ok(unsafe { device.create_image_view(&info, None) }?)
+}
+
+/// A view of a density map's first two layers, the eyes', for both drawn in one pass by multiview, each at its own.
+unsafe fn layers_view(device: &ash::Device, image: vk::Image) -> Result<vk::ImageView> {
+    let info = vk::ImageViewCreateInfo::default()
+        .image(image)
+        .view_type(vk::ImageViewType::TYPE_2D_ARRAY)
+        .format(vk::Format::R8G8_UNORM)
+        .subresource_range(vk::ImageSubresourceRange {
+            aspect_mask: vk::ImageAspectFlags::COLOR,
+            base_mip_level: 0,
+            level_count: 1,
+            base_array_layer: 0,
+            layer_count: 2,
         });
     Ok(unsafe { device.create_image_view(&info, None) }?)
 }

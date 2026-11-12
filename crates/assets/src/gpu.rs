@@ -335,9 +335,12 @@ pub struct Renderer {
     back_faces_culled: bool,
     material_layout: wgpu::BindGroupLayout,
     placed_layout: wgpu::BindGroupLayout,
-    cameras: [wgpu::Buffer; 2],
+    /// Each eye's camera: a buffer for each where each eye has a pass of its own, or one holding both.
+    cameras: Vec<wgpu::Buffer>,
     lighting: wgpu::Buffer,
-    frames: [wgpu::BindGroup; 2],
+    /// The cameras' binding for each pass, with the lighting.
+    frames: Vec<wgpu::BindGroup>,
+    views: crate::Views,
     sampler: wgpu::Sampler,
     white: wgpu::TextureView,
     reveal: Option<(Vec3, f32)>,
@@ -467,12 +470,24 @@ fn upload_texture(
 }
 
 impl Renderer {
-    /// A renderer for targets of `format` with `samples` samples a pixel.
+    /// A renderer for targets of `format` with `samples` samples a pixel, each eye drawn in a pass of its own.
     pub fn new(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         format: wgpu::TextureFormat,
         samples: u32,
+    ) -> Self {
+        Self::with_views(device, queue, format, samples, crate::Views::One)
+    }
+
+    /// As [`Self::new`], drawing `views` a pass: with [`Views::Both`](crate::Views::Both), both eyes at once by
+    /// multiview. See `design/rendering.md`.
+    pub fn with_views(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        format: wgpu::TextureFormat,
+        samples: u32,
+        views: crate::Views,
     ) -> Self {
         let both = wgpu::ShaderStages::VERTEX_FRAGMENT;
         let frame_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -508,39 +523,45 @@ impl Renderer {
             label: Some("Model placement layout"),
             entries: &[storage_entry(0), storage_entry(1)],
         });
-        let cameras = std::array::from_fn(|_| {
-            device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("Model eye camera"),
-                size: size_of::<CameraUniform>() as u64,
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
+        let cameras: Vec<_> = (0..views.passes(2))
+            .map(|_| {
+                device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("Model eye camera"),
+                    size: (size_of::<CameraUniform>() * views.count()) as u64,
+                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                })
             })
-        });
+            .collect();
         let lighting = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Model lighting"),
             contents: bytemuck::bytes_of(&LightingUniform::from(&Lighting::default())),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
-        let frames = std::array::from_fn(|eye: usize| {
-            device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("Model frame"),
-                layout: &frame_layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: cameras[eye].as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: lighting.as_entire_binding(),
-                    },
-                ],
+        let frames = (0..cameras.len())
+            .map(|eye| {
+                device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("Model frame"),
+                    layout: &frame_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: cameras[eye].as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: lighting.as_entire_binding(),
+                        },
+                    ],
+                })
             })
-        });
+            .collect();
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("model.wgsl"),
             source: wgpu::ShaderSource::Wgsl(
-                crate::haze::shader(include_str!("model.wgsl")).into(),
+                views
+                    .shader(&crate::haze::shader(include_str!("model.wgsl")))
+                    .into(),
             ),
         });
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -595,7 +616,7 @@ impl Renderer {
                     count: samples,
                     ..Default::default()
                 },
-                multiview_mask: None,
+                multiview_mask: views.mask(),
                 cache: None,
             })
         };
@@ -619,6 +640,7 @@ impl Renderer {
             cameras,
             lighting,
             frames,
+            views,
             sampler: device.create_sampler(&wgpu::SamplerDescriptor {
                 label: Some("Model sampler"),
                 address_mode_u: wgpu::AddressMode::Repeat,
@@ -1046,7 +1068,7 @@ impl Renderer {
         self.reveal = reveal.filter(|(centre, radius)| centre.is_finite() && radius.is_finite());
     }
 
-    /// Before eye `eye`'s pass: its view and projection, and where the eye is.
+    /// Before eye `eye`'s pass, or the pass that draws both: its view and projection, and where the eye is.
     pub fn prepare(&self, queue: &wgpu::Queue, eye: usize, view_projection: Mat4, position: Vec3) {
         let camera = CameraUniform {
             view_projection: view_projection.to_cols_array(),
@@ -1056,10 +1078,15 @@ impl Renderer {
                 None => [0.0, 0.0, 0.0, -1.0],
             },
         };
-        queue.write_buffer(&self.cameras[eye], 0, bytemuck::bytes_of(&camera));
+        let (buffer, offset) = match self.views {
+            crate::Views::One => (eye, 0),
+            crate::Views::Both => (0, (eye * size_of::<CameraUniform>()) as u64),
+        };
+        queue.write_buffer(&self.cameras[buffer], offset, bytemuck::bytes_of(&camera));
     }
 
-    /// In eye `eye`'s pass: draw `batch`'s instances of `model`.
+    /// In eye `eye`'s pass, or with [`Views::Both`](crate::Views::Both) the pass that draws both, as `eye` 0: draw
+    /// `batch`'s instances of `model`.
     pub fn draw(
         &self,
         pass: &mut wgpu::RenderPass<'_>,

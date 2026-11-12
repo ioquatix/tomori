@@ -14,7 +14,8 @@ struct Camera {
     // The time in seconds that moves the water, in its first component.
     time: vec4<f32>,
 }
-@group(0) @binding(0) var<uniform> camera: Camera;
+// Each eye's camera, indexed by the view drawn: see `tomori_render::multiview`.
+@group(0) @binding(0) var<uniform> cameras: array<Camera, 1 /* views */>;
 
 // A point of the water: where it is, its colour, with what it is in the fourth component, the surface 0, the fall 1,
 // foam 2 and mist 3, and where it is in its flow, metres across and along it.
@@ -32,7 +33,8 @@ struct Shaded {
 }
 
 @vertex
-fn water_vertex(point: Point) -> Shaded {
+fn water_vertex(/* view_index */ point: Point) -> Shaded {
+    let camera = cameras[0u /* view */];
     var out: Shaded;
     out.position = camera.view_projection * vec4<f32>(point.position, 1.0);
     out.world = point.position;
@@ -49,7 +51,8 @@ fn hash(value: f32) -> f32 {
 }
 
 @fragment
-fn water_fragment(in: Shaded) -> @location(0) vec4<f32> {
+fn water_fragment(/* view_index */ in: Shaded) -> @location(0) vec4<f32> {
+    let camera = cameras[0u /* view */];
     if camera.reveal.w >= 0.0 && distance(in.world, camera.reveal.xyz) > camera.reveal.w {
         discard;
     }
