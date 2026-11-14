@@ -220,7 +220,30 @@ impl PanelImages {
         samples: u32,
         transforms: &wgpu::BindGroupLayout,
     ) -> Self {
-        let shader = device.create_shader_module(hazed_wgsl!("panel_image.wgsl"));
+        Self::with_views(
+            device,
+            format,
+            samples,
+            transforms,
+            crate::multiview::Views::One,
+        )
+    }
+
+    /// As [`Self::new`], drawn in passes of `views`, as the panels its transforms are bound for are; see
+    /// [`crate::multiview`].
+    pub fn with_views(
+        device: &wgpu::Device,
+        format: wgpu::TextureFormat,
+        samples: u32,
+        transforms: &wgpu::BindGroupLayout,
+        views: crate::multiview::Views,
+    ) -> Self {
+        let shader = crate::multiview::shader(
+            device,
+            "panel_image.wgsl",
+            include_str!("panel_image.wgsl"),
+            views,
+        );
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("panel image layout"),
             entries: &[
@@ -283,7 +306,7 @@ impl PanelImages {
                 count: samples,
                 ..Default::default()
             },
-            multiview_mask: None,
+            multiview_mask: views.mask(),
             cache: None,
         });
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {

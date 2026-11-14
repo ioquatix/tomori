@@ -429,7 +429,31 @@ impl WorkspaceGraphics {
         glyphs: &crate::glyphs::Glyphs,
         samples: u32,
     ) -> Self {
-        let shader = device.create_shader_module(hazed_wgsl!("workspace.wgsl"));
+        Self::with_views(
+            device,
+            format,
+            camera_layout,
+            glyphs,
+            samples,
+            crate::multiview::Views::One,
+        )
+    }
+
+    /// As [`Self::new`], drawn in passes of `views`; see [`crate::multiview`].
+    pub fn with_views(
+        device: &wgpu::Device,
+        format: wgpu::TextureFormat,
+        camera_layout: &wgpu::BindGroupLayout,
+        glyphs: &crate::glyphs::Glyphs,
+        samples: u32,
+        views: crate::multiview::Views,
+    ) -> Self {
+        let shader = crate::multiview::shader(
+            device,
+            "workspace.wgsl",
+            include_str!("workspace.wgsl"),
+            views,
+        );
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("world workspace layout"),
             bind_group_layouts: &[Some(camera_layout), Some(glyphs.layout())],
@@ -471,10 +495,10 @@ impl WorkspaceGraphics {
                 count: samples,
                 ..Default::default()
             },
-            multiview_mask: None,
+            multiview_mask: views.mask(),
             cache: None,
         });
-        let occluder = crate::occlusion::occluder(
+        let occluder = crate::occlusion::occluder_with_views(
             device,
             "world workspace occluder",
             &layout,
@@ -482,6 +506,7 @@ impl WorkspaceGraphics {
             VERTICES,
             format,
             samples,
+            views,
         );
         let vertices = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("bounded workspace quads"),
@@ -3393,7 +3418,8 @@ mod tests {
         test_gpu::with(|test_gpu::Gpu { device, queue, .. }| {
             pollster::block_on(async move {
                 let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
-                let camera_layout = crate::graphics::camera_layout(&device);
+                let camera_layout =
+                    crate::graphics::camera_layout(&device, crate::multiview::Views::One);
                 let camera = crate::graphics::camera_buffer(&device);
                 let binding = device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: None,

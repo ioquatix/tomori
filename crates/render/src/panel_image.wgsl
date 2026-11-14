@@ -10,7 +10,8 @@ struct Camera {
     // Where the eye is.
     eye: vec3<f32>,
 }
-@group(0) @binding(0) var<uniform> camera: Camera;
+// Each eye's camera, indexed by the view drawn: see `tomori_render::multiview`.
+@group(0) @binding(0) var<uniform> cameras: array<Camera, 1 /* views */>;
 @group(1) @binding(0) var image: texture_2d<f32>;
 @group(1) @binding(1) var image_sampler: sampler;
 struct Output {
@@ -19,7 +20,8 @@ struct Output {
     @location(1) world: vec3<f32>,
 }
 @vertex
-fn vs_main(@location(0) position: vec2<f32>, @location(1) uv: vec2<f32>) -> Output {
+fn vs_main(/* view_index */ @location(0) position: vec2<f32>, @location(1) uv: vec2<f32>) -> Output {
+    let camera = cameras[0u /* view */];
     var out: Output;
     out.position = camera.transform * vec4<f32>(position, 0.0, 1.0);
     out.world = (camera.model * vec4<f32>(position, 0.0, 1.0)).xyz;
@@ -27,7 +29,8 @@ fn vs_main(@location(0) position: vec2<f32>, @location(1) uv: vec2<f32>) -> Outp
     return out;
 }
 @fragment
-fn fs_main(in: Output) -> @location(0) vec4<f32> {
+fn fs_main(/* view_index */ in: Output) -> @location(0) vec4<f32> {
+    let camera = cameras[0u /* view */];
     let color = textureSample(image, image_sampler, in.uv).rgb;
     return vec4<f32>(hazed(color, camera.haze, distance(in.world, camera.eye)), 1.0);
 }

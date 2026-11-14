@@ -8,9 +8,12 @@ const NOISE_SIZE: u32 = 64;
 const NOISE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/cloud-noise.rgba"));
 const _: () = assert!(NOISE.len() == (NOISE_SIZE * NOISE_SIZE * NOISE_SIZE * 4) as usize);
 
+/// An eye's clouds, or, drawing both in one pass, both eyes' in a layer each.
 struct Target {
     _texture: wgpu::Texture,
+    /// What the density integration draws into: the eye's layer, or both.
     view: wgpu::TextureView,
+    /// The layers the composite samples, by its view.
     binding: wgpu::BindGroup,
 }
 
@@ -28,10 +31,12 @@ pub(super) struct Clouds {
     noise: wgpu::BindGroup,
     image_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
-    targets: [Target; 2],
+    targets: Vec<Target>,
+    views: tomori_render::multiview::Views,
 }
 
 impl Clouds {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
@@ -40,6 +45,7 @@ impl Clouds {
         width: u32,
         height: u32,
         samples: u32,
+        views: tomori_render::multiview::Views,
     ) -> Self {
         let texture_layout = |dimension| {
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -65,7 +71,7 @@ impl Clouds {
             })
         };
         let noise_layout = texture_layout(wgpu::TextureViewDimension::D3);
-        let image_layout = texture_layout(wgpu::TextureViewDimension::D2);
+        let image_layout = texture_layout(wgpu::TextureViewDimension::D2Array);
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("Cloud linear upsampling"),
             mag_filter: wgpu::FilterMode::Linear,
@@ -118,7 +124,7 @@ impl Clouds {
         });
         let pipeline =
             |fragment: &str, source: &str, textures: &wgpu::BindGroupLayout, composite: bool| {
-                let source = shader_source(source);
+                let source = views.shader(&shader_source(source));
                 let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
                     label: Some(fragment),
                     source: wgpu::ShaderSource::Wgsl(source.into()),
@@ -165,7 +171,7 @@ impl Clouds {
                         count: if composite { samples } else { 1 },
                         ..Default::default()
                     },
-                    multiview_mask: None,
+                    multiview_mask: views.mask(),
                     cache: None,
                 })
             };
@@ -182,10 +188,11 @@ impl Clouds {
                 &image_layout,
                 true,
             ),
-            targets: Self::targets(device, &image_layout, &sampler, width, height),
+            targets: Self::targets(device, &image_layout, &sampler, width, height, views),
             noise,
             image_layout,
             sampler,
+            views,
         }
     }
 
@@ -195,58 +202,84 @@ impl Clouds {
         sampler: &wgpu::Sampler,
         width: u32,
         height: u32,
-    ) -> [Target; 2] {
+        views: tomori_render::multiview::Views,
+    ) -> Vec<Target> {
+        use tomori_render::multiview::Views;
         // Half resolution normally, capped at 960 pixels per axis for 4K spectators.
         let (width, height) = resolution(width, height);
-        std::array::from_fn(|_| {
-            let texture = device.create_texture(&wgpu::TextureDescriptor {
-                label: Some("Cloud low-resolution eye"),
-                size: wgpu::Extent3d {
-                    width,
-                    height,
-                    depth_or_array_layers: 1,
-                },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::Rgba8Unorm,
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-                    | wgpu::TextureUsages::TEXTURE_BINDING
-                    | wgpu::TextureUsages::COPY_SRC,
-                view_formats: &[],
-            });
-            let view = texture.create_view(&Default::default());
-            let binding = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("Cloud image binding"),
-                layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(&view),
+        (0..views.passes(2))
+            .map(|_| {
+                let texture = device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some("Cloud low-resolution eye"),
+                    size: wgpu::Extent3d {
+                        width,
+                        height,
+                        depth_or_array_layers: views.count() as u32,
                     },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::Sampler(sampler),
-                    },
-                ],
-            });
-            Target {
-                _texture: texture,
-                view,
-                binding,
-            }
-        })
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: wgpu::TextureFormat::Rgba8Unorm,
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                        | wgpu::TextureUsages::TEXTURE_BINDING
+                        | wgpu::TextureUsages::COPY_SRC,
+                    view_formats: &[],
+                });
+                let dimension = |dimension| wgpu::TextureViewDescriptor {
+                    dimension: Some(dimension),
+                    ..Default::default()
+                };
+                let view = texture.create_view(&dimension(match views {
+                    Views::One => wgpu::TextureViewDimension::D2,
+                    Views::Both => wgpu::TextureViewDimension::D2Array,
+                }));
+                let layers = texture.create_view(&dimension(wgpu::TextureViewDimension::D2Array));
+                let binding = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("Cloud image binding"),
+                    layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(&layers),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::Sampler(sampler),
+                        },
+                    ],
+                });
+                Target {
+                    _texture: texture,
+                    view,
+                    binding,
+                }
+            })
+            .collect()
     }
 
     pub fn resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
-        self.targets = Self::targets(device, &self.image_layout, &self.sampler, width, height);
+        self.targets = Self::targets(
+            device,
+            &self.image_layout,
+            &self.sampler,
+            width,
+            height,
+            self.views,
+        );
     }
 
-    pub fn encode(&self, encoder: &mut wgpu::CommandEncoder, camera: &wgpu::BindGroup, eye: usize) {
+    /// Integrate the clouds of `pass`, an eye's, or, drawing both eyes at once, both, in a pass of their own.
+    pub fn encode(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        camera: &wgpu::BindGroup,
+        pass: usize,
+    ) {
+        let target = &self.targets[pass];
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("Cloud density integration"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: &self.targets[eye].view,
+                view: &target.view,
                 resolve_target: None,
                 depth_slice: None,
                 ops: wgpu::Operations {
@@ -254,6 +287,7 @@ impl Clouds {
                     store: wgpu::StoreOp::Store,
                 },
             })],
+            multiview_mask: self.views.mask(),
             ..Default::default()
         });
         pass.set_pipeline(&self.volume);

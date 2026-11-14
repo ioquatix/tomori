@@ -22,16 +22,21 @@ struct Camera {
     haze: vec4<f32>,
     // The time in seconds that sways the ferns, in its first component.
     time: vec4<f32>,
-    // The way towards the moon, its light, and the sky's and the ground's.
+}
+// Each eye's camera, indexed by the view drawn: see `tomori_render::multiview`.
+@group(0) @binding(0) var<uniform> cameras: array<Camera, 1 /* views */>;
+
+// How the ferns are lit, the same for both eyes: the way towards the moon, its light, and the sky's and the ground's;
+// and the lamps, an unlit one black, and how many there are.
+struct Lighting {
     moon: vec4<f32>,
     moonlight: vec4<f32>,
     sky: vec4<f32>,
     ground: vec4<f32>,
-    // The lamps, an unlit one black, and how many there are.
     lamps: array<Lamp, 64>,
     counts: vec4<u32>,
 }
-@group(0) @binding(0) var<uniform> camera: Camera;
+@group(0) @binding(1) var<uniform> lighting: Lighting;
 
 // How much of a lamp's light it gives a fern: the `index`th byte of its weights, 255 for all of it.
 fn weight(lamps: vec4<u32>, index: u32) -> f32 {
@@ -76,7 +81,8 @@ fn turned(value: vec3<f32>, turn: f32) -> vec3<f32> {
 }
 
 @vertex
-fn fern_vertex(point: Point) -> Shaded {
+fn fern_vertex(/* view_index */ point: Point) -> Shaded {
+    let camera = cameras[0u /* view */];
     let scale = point.size.x;
     let phase = point.size.y;
     let t = camera.time.x;
@@ -108,7 +114,8 @@ fn lamp_light(lamp: Lamp, weight: f32, world: vec3<f32>, normal: vec3<f32>) -> v
 }
 
 @fragment
-fn fern_fragment(in: Shaded, @builtin(front_facing) facing: bool) -> @location(0) vec4<f32> {
+fn fern_fragment(/* view_index */ in: Shaded, @builtin(front_facing) facing: bool) -> @location(0) vec4<f32> {
+    let camera = cameras[0u /* view */];
     if camera.reveal.w >= 0.0 && distance(in.world, camera.reveal.xyz) > camera.reveal.w {
         discard;
     }
@@ -119,13 +126,13 @@ fn fern_fragment(in: Shaded, @builtin(front_facing) facing: bool) -> @location(0
         normal = -normal;
         albedo = in.underside;
     }
-    let moon = dot(normal, camera.moon.xyz);
-    var light = mix(camera.ground.rgb, camera.sky.rgb, normal.y * 0.5 + 0.5)
-        + camera.moonlight.rgb * (max(moon, 0.0) + max(-moon, 0.0) * 0.25);
+    let moon = dot(normal, lighting.moon.xyz);
+    var light = mix(lighting.ground.rgb, lighting.sky.rgb, normal.y * 0.5 + 0.5)
+        + lighting.moonlight.rgb * (max(moon, 0.0) + max(-moon, 0.0) * 0.25);
     // Its own lamps, in the lamps' order, or every lamp.
     if all(in.lamps.xy == vec2<u32>(0xffffffffu)) {
-        for (var index = 0u; index < min(camera.counts.x, 64u); index += 1u) {
-            light += lamp_light(camera.lamps[index], 1.0, in.world, normal);
+        for (var index = 0u; index < min(lighting.counts.x, 64u); index += 1u) {
+            light += lamp_light(lighting.lamps[index], 1.0, in.world, normal);
         }
     } else if all(in.lamps.zw == vec2<u32>(0xffffffffu)) {
         // Each giving all its light.
@@ -133,13 +140,13 @@ fn fern_fragment(in: Shaded, @builtin(front_facing) facing: bool) -> @location(0
         while low != 0u {
             let index = firstTrailingBit(low);
             low &= low - 1u;
-            light += lamp_light(camera.lamps[index], 1.0, in.world, normal);
+            light += lamp_light(lighting.lamps[index], 1.0, in.world, normal);
         }
         var high = in.lamps.y;
         while high != 0u {
             let index = firstTrailingBit(high);
             high &= high - 1u;
-            light += lamp_light(camera.lamps[32u + index], 1.0, in.world, normal);
+            light += lamp_light(lighting.lamps[32u + index], 1.0, in.world, normal);
         }
     } else {
         // Some fading, each by its byte.
@@ -148,14 +155,14 @@ fn fern_fragment(in: Shaded, @builtin(front_facing) facing: bool) -> @location(0
         while low != 0u {
             let index = firstTrailingBit(low);
             low &= low - 1u;
-            light += lamp_light(camera.lamps[index], weight(in.lamps, lit), in.world, normal);
+            light += lamp_light(lighting.lamps[index], weight(in.lamps, lit), in.world, normal);
             lit += 1u;
         }
         var high = in.lamps.y;
         while high != 0u {
             let index = firstTrailingBit(high);
             high &= high - 1u;
-            light += lamp_light(camera.lamps[32u + index], weight(in.lamps, lit), in.world, normal);
+            light += lamp_light(lighting.lamps[32u + index], weight(in.lamps, lit), in.world, normal);
             lit += 1u;
         }
     }

@@ -39,20 +39,9 @@ use tomori_environment_farmyard::layout;
 use tomori_environment_farmyard::props::{self, evening, palette};
 use tomori_environment_farmyard::terrace;
 use tomori_environment_farmyard::trail;
+use tomori_render::multiview::Uniforms;
 use tomori_render::ui_panel::{Canvas, Panel, Pipeline};
 use tomori_scene::ui_text::{Row, Style};
-
-/// A shader module of `$file`, one of the farmyard's, after the shared haze functions it fades what it draws by.
-macro_rules! shader {
-    ($file:literal) => {
-        wgpu::ShaderModuleDescriptor {
-            label: Some($file),
-            source: wgpu::ShaderSource::Wgsl(
-                tomori_assets::haze::shader(include_str!($file)).into(),
-            ),
-        }
-    };
-}
 
 // The farmyard's models are lit by as many lamps as the render world lights a root by, and each piece by as many as it
 // lights an instance by.
@@ -67,8 +56,7 @@ const _: () = assert!(
 /// reached one of 8 m. See `design/rendering.md`.
 pub const CHUNK: f32 = 7.0;
 
-/// What the sky's, the ranges', the water's, the fire's and the ferns' shaders are told for each eye: the ferns' alone
-/// read how the farmyard is lit, at its end, as its models are.
+/// What the sky's, the ranges', the water's, the fire's and the ferns' shaders are told for each eye.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct SkyCamera {
@@ -78,6 +66,13 @@ struct SkyCamera {
     eye: [f32; 4],
     haze: [f32; 4],
     time: [f32; 4],
+}
+
+/// How the ferns are lit, as the farmyard's models are, as their shader reads it beside each eye's [`SkyCamera`]: the
+/// same for both eyes, so written once a frame, as the first eye is prepared, and bound in every eye's pass.
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct FernLighting {
     moon: [f32; 4],
     moonlight: [f32; 4],
     sky: [f32; 4],
@@ -509,7 +504,7 @@ fn blended(
                 count: target.samples,
                 ..Default::default()
             },
-            multiview_mask: None,
+            multiview_mask: target.views.mask(),
             cache: None,
         })
 }
@@ -553,7 +548,12 @@ struct Fire {
 impl Fire {
     fn new(target: &Target, layout: &wgpu::PipelineLayout) -> Self {
         let device = target.device;
-        let shader = device.create_shader_module(shader!("fire.wgsl"));
+        let shader = tomori_render::multiview::shader(
+            device,
+            "fire.wgsl",
+            include_str!("fire.wgsl"),
+            target.views,
+        );
         let pipeline = blended(
             target,
             layout,
@@ -630,7 +630,12 @@ struct Trails {
 impl Trails {
     fn new(target: &Target, layout: &wgpu::PipelineLayout) -> Self {
         let device = target.device;
-        let shader = device.create_shader_module(shader!("embers.wgsl"));
+        let shader = tomori_render::multiview::shader(
+            device,
+            "embers.wgsl",
+            include_str!("embers.wgsl"),
+            target.views,
+        );
         let pipeline = blended(
             target,
             layout,
@@ -754,7 +759,12 @@ pub(crate) fn fern_bounds(fern: &Fern) -> Aabb {
 impl Ferns {
     fn new(target: &Target, layout: &wgpu::PipelineLayout) -> Self {
         let device = target.device;
-        let shader = device.create_shader_module(shader!("fern.wgsl"));
+        let shader = tomori_render::multiview::shader(
+            device,
+            "fern.wgsl",
+            include_str!("fern.wgsl"),
+            target.views,
+        );
         let pipeline = pipeline(
             target,
             layout,
@@ -1029,7 +1039,12 @@ impl Backdrop {
             &chunked(&terrace::model()),
             Mat4::IDENTITY,
         );
-        let shader = device.create_shader_module(shader!("water.wgsl"));
+        let shader = tomori_render::multiview::shader(
+            device,
+            "water.wgsl",
+            include_str!("water.wgsl"),
+            target.views,
+        );
         let water: Vec<WaterVertex> = backdrop::water()
             .into_iter()
             .chain(backdrop::upper_water())
@@ -1131,8 +1146,7 @@ struct Plaques {
 
 impl Plaques {
     fn new(target: &Target) -> Self {
-        let pipeline =
-            Pipeline::shared(target.device, target.format, &target.glyphs, target.samples);
+        let pipeline = Pipeline::for_target(target);
         let plaques: Vec<_> = trail::plaques()
             .into_iter()
             .map(|plaque| {
@@ -1251,8 +1265,12 @@ impl Plaques {
 /// The farmyard's scenery.
 pub struct Farmyard {
     sky: wgpu::RenderPipeline,
-    cameras: [wgpu::Buffer; 2],
-    bindings: [wgpu::BindGroup; 2],
+    /// Each eye's [`SkyCamera`], the ferns' lighting, one for both, and their binding for each pass.
+    cameras: Uniforms,
+    fern_lighting: wgpu::Buffer,
+    bindings: Vec<wgpu::BindGroup>,
+    /// How many views each pass it draws in draws, as its target said.
+    views: tomori_render::multiview::Views,
     models: Renderer,
     yard: Drawn,
     coop: Drawn,
@@ -1312,36 +1330,70 @@ impl Farmyard {
         let device = target.device;
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Farmyard sky layout"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            }],
-        });
-        let cameras: [wgpu::Buffer; 2] = std::array::from_fn(|_| {
-            device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("Farmyard sky camera"),
-                size: size_of::<SkyCamera>() as u64,
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            })
-        });
-        let bindings = std::array::from_fn(|eye| {
-            device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("Farmyard sky camera"),
-                layout: &layout,
-                entries: &[wgpu::BindGroupEntry {
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
                     binding: 0,
-                    resource: cameras[eye].as_entire_binding(),
-                }],
-            })
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: Uniforms::binding_size(
+                            size_of::<SkyCamera>() as u64,
+                            target.views,
+                        ),
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: wgpu::BufferSize::new(size_of::<FernLighting>() as u64),
+                    },
+                    count: None,
+                },
+            ],
         });
-        let shader = device.create_shader_module(shader!("sky.wgsl"));
+        let cameras = Uniforms::new(
+            device,
+            "Farmyard sky camera",
+            size_of::<SkyCamera>() as u64,
+            target.views,
+        );
+        let fern_lighting = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Farmyard fern lighting"),
+            size: size_of::<FernLighting>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let bindings = cameras
+            .buffers()
+            .iter()
+            .map(|buffer| {
+                device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("Farmyard sky camera"),
+                    layout: &layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: buffer.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: fern_lighting.as_entire_binding(),
+                        },
+                    ],
+                })
+            })
+            .collect();
+        let shader = tomori_render::multiview::shader(
+            device,
+            "sky.wgsl",
+            include_str!("sky.wgsl"),
+            target.views,
+        );
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Farmyard sky"),
             bind_group_layouts: &[Some(&layout)],
@@ -1356,7 +1408,13 @@ impl Farmyard {
             (false, wgpu::CompareFunction::LessEqual),
             "Farmyard sky",
         );
-        let models = Renderer::new(device, target.queue, target.format, target.samples);
+        let models = Renderer::with_views(
+            device,
+            target.queue,
+            target.format,
+            target.samples,
+            target.views,
+        );
         let lighting = lighting();
         models.set_lighting(target.queue, &lighting);
         let yard = Drawn::new(
@@ -1398,7 +1456,9 @@ impl Farmyard {
         Self {
             sky,
             cameras,
+            fern_lighting,
             bindings,
+            views: target.views,
             models,
             yard,
             coop,
@@ -1511,6 +1571,10 @@ pub(crate) fn stick_instances(shown: &[crate::campsite::Shown]) -> Vec<Instance>
 }
 
 impl Scenery for Farmyard {
+    fn views(&self) -> tomori_render::multiview::Views {
+        self.views
+    }
+
     fn haze(&self) -> tomori_assets::haze::Haze {
         let [red, green, blue, density] = self.haze;
         tomori_assets::haze::Haze::new(Vec3::new(red, green, blue), density)
@@ -1722,6 +1786,28 @@ impl Scenery for Farmyard {
         if eye == 0 {
             self.models.set_lighting(queue, &lit);
             self.ferns.place(queue, self::eye(scene_to_clip));
+            let lighting = FernLighting {
+                moon: lit.sun_direction.normalize_or_zero().extend(0.0).to_array(),
+                moonlight: lit.sun.extend(0.0).to_array(),
+                sky: lit.sky.extend(0.0).to_array(),
+                ground: lit.ground.extend(0.0).to_array(),
+                lamps: std::array::from_fn(|index| {
+                    lit.lamps.get(index / 2).map_or([0.0; 4], |lamp| {
+                        if index % 2 == 0 {
+                            lamp.position.extend(lamp.reach).to_array()
+                        } else {
+                            lamp.color.extend(0.0).to_array()
+                        }
+                    })
+                }),
+                counts: [
+                    lit.lamps.len().min(tomori_assets::gpu::LAMPS) as u32,
+                    0,
+                    0,
+                    0,
+                ],
+            };
+            queue.write_buffer(&self.fern_lighting, 0, bytemuck::bytes_of(&lighting));
         }
         self.models
             .prepare(queue, eye, scene_to_clip, self::eye(scene_to_clip));
@@ -1752,27 +1838,8 @@ impl Scenery for Farmyard {
                 embers(self.fire_size),
                 embers::WRAP as f32,
             ],
-            moon: lit.sun_direction.normalize_or_zero().extend(0.0).to_array(),
-            moonlight: lit.sun.extend(0.0).to_array(),
-            sky: lit.sky.extend(0.0).to_array(),
-            ground: lit.ground.extend(0.0).to_array(),
-            lamps: std::array::from_fn(|index| {
-                lit.lamps.get(index / 2).map_or([0.0; 4], |lamp| {
-                    if index % 2 == 0 {
-                        lamp.position.extend(lamp.reach).to_array()
-                    } else {
-                        lamp.color.extend(0.0).to_array()
-                    }
-                })
-            }),
-            counts: [
-                lit.lamps.len().min(tomori_assets::gpu::LAMPS) as u32,
-                0,
-                0,
-                0,
-            ],
         };
-        queue.write_buffer(&self.cameras[eye], 0, bytemuck::bytes_of(&camera));
+        self.cameras.write(queue, eye, bytemuck::bytes_of(&camera));
     }
 
     fn draw(&self, pass: &mut wgpu::RenderPass<'_>, eye: usize) {

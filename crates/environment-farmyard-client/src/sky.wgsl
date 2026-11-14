@@ -15,7 +15,8 @@ struct Camera {
     // The time in seconds that moves the water, in its first component.
     time: vec4<f32>,
 }
-@group(0) @binding(0) var<uniform> camera: Camera;
+// Each eye's camera, indexed by the view drawn: see `tomori_render::multiview`.
+@group(0) @binding(0) var<uniform> cameras: array<Camera, 1 /* views */>;
 
 struct Background {
     @builtin(position) position: vec4<f32>,
@@ -32,7 +33,7 @@ fn sky_vertex(@builtin(vertex_index) index: u32) -> Background {
 }
 
 // Whether a ray from `origin` along unit `direction` meets the reveal sphere, as the sky is seen through it.
-fn sees_reveal(origin: vec3<f32>, direction: vec3<f32>) -> bool {
+fn sees_reveal(camera: Camera, origin: vec3<f32>, direction: vec3<f32>) -> bool {
     if camera.reveal.w < 0.0 { return true; }
     let offset = origin - camera.reveal.xyz;
     let b = dot(offset, direction);
@@ -59,12 +60,13 @@ fn horizon(direction: vec3<f32>) -> vec3<f32> {
 }
 
 @fragment
-fn sky_fragment(in: Background) -> @location(0) vec4<f32> {
+fn sky_fragment(/* view_index */ in: Background) -> @location(0) vec4<f32> {
+    let camera = cameras[0u /* view */];
     let near_h = camera.inverse_view_projection * vec4<f32>(in.ndc, 0.0, 1.0);
     let far_h = camera.inverse_view_projection * vec4<f32>(in.ndc, 0.99, 1.0);
     let origin = near_h.xyz / near_h.w;
     let direction = normalize(far_h.xyz / far_h.w - origin);
-    if !sees_reveal(origin, direction) { discard; }
+    if !sees_reveal(camera, origin, direction) { discard; }
     let up = direction.y;
     var color = horizon(direction);
     // The moon's disc.
@@ -96,7 +98,8 @@ struct Distant {
 // Infinitely far, so that the ranges stay where they are as the eye moves, at the sky's depth, so that everything
 // nearer is drawn over them.
 @vertex
-fn range_vertex(far: Far) -> Distant {
+fn range_vertex(/* view_index */ far: Far) -> Distant {
+    let camera = cameras[0u /* view */];
     let clip = camera.view_projection * vec4<f32>(far.direction, 0.0);
     var out: Distant;
     out.position = vec4<f32>(clip.xy, clip.w, clip.w);
@@ -106,8 +109,9 @@ fn range_vertex(far: Far) -> Distant {
 }
 
 @fragment
-fn range_fragment(in: Distant) -> @location(0) vec4<f32> {
+fn range_fragment(/* view_index */ in: Distant) -> @location(0) vec4<f32> {
+    let camera = cameras[0u /* view */];
     let direction = normalize(in.direction);
-    if !sees_reveal(camera.eye.xyz, direction) { discard; }
+    if !sees_reveal(camera, camera.eye.xyz, direction) { discard; }
     return vec4<f32>(mix(in.color.rgb, horizon(direction), in.color.a), 1.0);
 }

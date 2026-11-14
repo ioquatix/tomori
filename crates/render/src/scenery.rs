@@ -21,6 +21,10 @@ pub struct Target<'a> {
     pub height: u32,
     pub samples: u32,
     pub glyphs: crate::glyphs::SharedGlyphs,
+    /// How many views each eye's pass draws, which every pipeline a scenery draws in it is made for: one, by default,
+    /// or both eyes at once, by multiview, for a scenery that says it draws them ([`Scenery::views`]). See
+    /// [`crate::multiview`].
+    pub views: crate::multiview::Views,
 }
 
 impl<'a> Target<'a> {
@@ -43,7 +47,14 @@ impl<'a> Target<'a> {
             height,
             samples,
             glyphs,
+            views: crate::multiview::Views::One,
         }
+    }
+
+    /// The same targets, each eye's pass drawing `views`.
+    pub fn with_views(mut self, views: crate::multiview::Views) -> Self {
+        self.views = views;
+        self
     }
 }
 
@@ -161,6 +172,12 @@ impl Stage {
 }
 
 /// Scenery drawn natively in each eye's pass.
+///
+/// Where the renderer draws both eyes in one pass, by multiview, a scenery made for a target of both views
+/// ([`Target::views`]) that says it draws them ([`Scenery::views`]) is prepared for each eye, as always, then drawn once,
+/// as eye 0, in the pass that draws both, its pipelines made for both views and its shaders choosing each eye's uniforms
+/// by their view index (see [`crate::multiview`]). One that draws one view, as every scenery did before, is drawn as
+/// before, each eye in a pass of its own, the renderer drawing them all so.
 pub trait Scenery {
     /// Once a frame, before the eyes: what the environment's client side shows now, the environment's own, which only
     /// its own scenery reads, such as where its animated models stand. See `design/environments.md`.
@@ -193,16 +210,22 @@ pub trait Scenery {
     }
     /// Before the eye's pass: work in its own passes, such as Sky's clouds.
     fn encode(&self, _encoder: &mut wgpu::CommandEncoder, _eye: usize) {}
-    /// In the eye's pass, before the scene: its opaque bodies, nearest first, and then, at the far plane, comparing
+    /// In the eye's pass, or, as eye 0, the pass drawing both, before the scene: its opaque bodies, nearest first, and then, at the far plane, comparing
     /// `LessEqual` without writing depth, anything as far away as the sky, so that it is shaded only where nothing nearer
     /// covers it.
     fn draw(&self, pass: &mut wgpu::RenderPass<'_>, eye: usize);
-    /// In the eye's pass, after the scene and before the panels.
+    /// In the eye's pass, or, as eye 0, the pass drawing both, after the scene and before the panels.
     fn draw_translucent(&self, _pass: &mut wgpu::RenderPass<'_>, _eye: usize) {}
     /// While a space's scenery grows out of it, only inside this sphere (centre, radius).
     fn set_reveal(&mut self, reveal: Option<(Vec3, f32)>);
     /// The eyes' targets changed size.
     fn resize(&mut self, _device: &wgpu::Device, _width: u32, _height: u32) {}
+    /// How many views each pass it draws in draws, as its pipelines were made for: by default one, whatever its target
+    /// said. A scenery made for a target of both views that makes its pipelines for them returns
+    /// [`Target::views`](Target::views). See [`crate::multiview`].
+    fn views(&self) -> crate::multiview::Views {
+        crate::multiview::Views::One
+    }
     /// The haze the scenery fades what is far away into, by which what is `d` metres from the eye fades into its colour by
     /// `1 - exp(-density d²)`, as `tomori-assets`' models are. Everything the renderer draws while it is shown is hazed
     /// alike, by the shared haze: Tomori's cubes, controllers, signs and panels with it. By default none. See

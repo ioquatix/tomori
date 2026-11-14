@@ -132,7 +132,7 @@ fn only_a_png_within_the_largest_side_is_decoded() {
 
 /// The images' pipeline, drawing into `format`, for panels' transforms bound as a panel's are.
 fn images_into(device: &wgpu::Device, format: wgpu::TextureFormat) -> PanelImages {
-    let transforms = crate::ui_panel::transforms_layout(device);
+    let transforms = crate::ui_panel::transforms_layout(device, crate::multiview::Views::One);
     PanelImages::new(device, format, 1, &transforms)
 }
 

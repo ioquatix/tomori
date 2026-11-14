@@ -53,7 +53,8 @@ struct Placed {
     lamps: vec4<u32>,
 }
 
-@group(0) @binding(0) var<uniform> camera: Camera;
+// Each eye's camera, indexed by the view drawn: see `tomori_assets::views`.
+@group(0) @binding(0) var<uniform> cameras: array<Camera, 1 /* views */>;
 @group(0) @binding(1) var<uniform> lighting: Lighting;
 @group(1) @binding(0) var<uniform> material: Material;
 @group(1) @binding(1) var base_texture: texture_2d<f32>;
@@ -83,7 +84,7 @@ struct Shaded {
 }
 
 @vertex
-fn model_vertex(vertex: Vertex, @builtin(instance_index) instance: u32) -> Shaded {
+fn model_vertex(/* view_index */ vertex: Vertex, @builtin(instance_index) instance: u32) -> Shaded {
     let one = placed[instance];
     var transform = one.world;
     if one.joints.y != 0u {
@@ -99,7 +100,7 @@ fn model_vertex(vertex: Vertex, @builtin(instance_index) instance: u32) -> Shade
     }
     let world = transform * vec4<f32>(vertex.position, 1.0);
     var out: Shaded;
-    out.position = camera.view_projection * world;
+    out.position = cameras[0u /* view */].view_projection * world;
     out.world = world.xyz;
     out.normal = (transform * vec4<f32>(vertex.normal, 0.0)).xyz;
     out.uv = vertex.uv;
@@ -118,7 +119,7 @@ fn lamp_light(lamp: Lamp, weight: f32, world: vec3<f32>, normal: vec3<f32>) -> v
     return lamp.color.rgb * weight * falloff * falloff * (0.35 + 0.65 * max(dot(normal, towards), 0.0));
 }
 
-fn shade(in: Shaded, facing: bool) -> vec4<f32> {
+fn shade(in: Shaded, facing: bool, camera: Camera) -> vec4<f32> {
     // Derivatives first, in uniform control flow: a mesh without normals is lit by each triangle's own, from how its
     // position changes across the screen.
     let flat = cross(dpdx(in.world), dpdy(in.world));
@@ -179,14 +180,15 @@ fn shade(in: Shaded, facing: bool) -> vec4<f32> {
 }
 
 @fragment
-fn model_fragment(in: Shaded, @builtin(front_facing) facing: bool) -> @location(0) vec4<f32> {
-    return shade(in, facing);
+fn model_fragment(/* view_index */ in: Shaded, @builtin(front_facing) facing: bool) -> @location(0) vec4<f32> {
+    return shade(in, facing, cameras[0u /* view */]);
 }
 
 // Only inside the reveal sphere, while the scenery grows. Shaded first, as shading takes derivatives.
 @fragment
-fn revealed_model_fragment(in: Shaded, @builtin(front_facing) facing: bool) -> @location(0) vec4<f32> {
-    let color = shade(in, facing);
+fn revealed_model_fragment(/* view_index */ in: Shaded, @builtin(front_facing) facing: bool) -> @location(0) vec4<f32> {
+    let camera = cameras[0u /* view */];
+    let color = shade(in, facing, camera);
     if camera.reveal.w >= 0.0 && distance(in.world, camera.reveal.xyz) > camera.reveal.w {
         discard;
     }

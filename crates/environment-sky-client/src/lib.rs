@@ -46,8 +46,10 @@ pub struct Sky {
     /// The scenery, discarded outside the reveal sphere. Separate, so that the scenery keeps early depth testing whenever Sky fills the world.
     revealed_scenery: wgpu::RenderPipeline,
     reveal: Option<(Vec3, f32)>,
-    cameras: [wgpu::Buffer; 2],
-    bindings: [wgpu::BindGroup; 2],
+    /// Each eye's camera, and their binding for each pass.
+    cameras: tomori_render::multiview::Uniforms,
+    bindings: Vec<wgpu::BindGroup>,
+    views: tomori_render::multiview::Views,
     vertices: wgpu::Buffer,
     vertex_count: u32,
     clouds: clouds::Clouds,
@@ -80,6 +82,29 @@ impl Sky {
         height: u32,
         samples: u32,
     ) -> Self {
+        Self::with_views(
+            device,
+            queue,
+            format,
+            width,
+            height,
+            samples,
+            tomori_render::multiview::Views::One,
+        )
+    }
+
+    /// As [`Sky::with_samples`], for scene passes drawing `views`: with both, both eyes in one pass, by multiview, and
+    /// their clouds in one pass of their own. See `tomori_render::multiview`.
+    pub fn with_views(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        format: wgpu::TextureFormat,
+        width: u32,
+        height: u32,
+        samples: u32,
+        views: tomori_render::multiview::Views,
+    ) -> Self {
+        use tomori_render::multiview::Uniforms;
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Sky camera layout"),
             entries: &[wgpu::BindGroupLayoutEntry {
@@ -88,29 +113,26 @@ impl Sky {
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Uniform,
                     has_dynamic_offset: false,
-                    min_binding_size: wgpu::BufferSize::new(size_of::<Camera>() as u64),
+                    min_binding_size: Uniforms::binding_size(size_of::<Camera>() as u64, views),
                 },
                 count: None,
             }],
         });
-        let cameras = std::array::from_fn(|_| {
-            device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("Sky eye camera"),
-                size: size_of::<Camera>() as u64,
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
+        let cameras = Uniforms::new(device, "Sky eye camera", size_of::<Camera>() as u64, views);
+        let bindings = cameras
+            .buffers()
+            .iter()
+            .map(|buffer| {
+                device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("Sky eye binding"),
+                    layout: &layout,
+                    entries: &[wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: buffer.as_entire_binding(),
+                    }],
+                })
             })
-        });
-        let bindings = std::array::from_fn(|eye| {
-            device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("Sky eye binding"),
-                layout: &layout,
-                entries: &[wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: cameras[eye].as_entire_binding(),
-                }],
-            })
-        });
+            .collect();
         let mesh = mesh::build();
         let bounds = tomori_render::world::Aabb::from_points(
             mesh.iter().map(|vertex| Vec3::from_array(vertex.position)),
@@ -132,12 +154,8 @@ impl Sky {
             bind_group_layouts: &[Some(&layout), Some(&shadows.layout), Some(&lightmap.layout)],
             immediate_size: 0,
         });
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("sky.wgsl"),
-            source: wgpu::ShaderSource::Wgsl(
-                tomori_render::haze::shader(include_str!("sky.wgsl")).into(),
-            ),
-        });
+        let shader =
+            tomori_render::multiview::shader(device, "sky.wgsl", include_str!("sky.wgsl"), views);
         let attributes = wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x3, 3 => Float32, 4 => Float32x2];
         let vertex_layout = [Some(wgpu::VertexBufferLayout {
             array_stride: size_of::<mesh::Vertex>() as u64,
@@ -195,7 +213,7 @@ impl Sky {
                     count: samples,
                     ..Default::default()
                 },
-                multiview_mask: None,
+                multiview_mask: views.mask(),
                 cache: None,
             })
         };
@@ -206,9 +224,12 @@ impl Sky {
             reveal: None,
             cameras,
             bindings,
+            views,
             vertices,
             vertex_count: mesh.len() as u32,
-            clouds: clouds::Clouds::new(device, queue, format, &layout, width, height, samples),
+            clouds: clouds::Clouds::new(
+                device, queue, format, &layout, width, height, samples, views,
+            ),
             shadows,
             lightmap,
             bounds,
@@ -226,10 +247,18 @@ impl Sky {
         self.clouds.resize(device, width, height);
     }
 
+    /// How many views each pass it draws in draws.
+    pub fn views(&self) -> tomori_render::multiview::Views {
+        self.views
+    }
+
     /// Record the low-resolution density integration before beginning the main
-    /// scene pass. Call after preparing this eye's camera.
+    /// scene pass. Call after preparing this eye's camera. Drawing both eyes in one pass, eye 0's integrates both, in
+    /// one pass of its own, and eye 1's nothing.
     pub fn encode_clouds(&self, encoder: &mut wgpu::CommandEncoder, eye: usize) {
-        self.clouds.encode(encoder, &self.bindings[eye], eye);
+        if let Some(camera) = self.bindings.get(eye) {
+            self.clouds.encode(encoder, camera, eye);
+        }
     }
 
     /// Premultiplied-alpha composition after opaque content, before transparent
@@ -259,7 +288,7 @@ impl Sky {
                 .extend(1.0)
                 .to_array(),
         };
-        queue.write_buffer(&self.cameras[eye], 0, bytemuck::bytes_of(&camera));
+        self.cameras.write(queue, eye, bytemuck::bytes_of(&camera));
     }
 
     /// Draw before application content, into a pass with a cleared depth buffer.

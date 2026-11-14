@@ -8,10 +8,11 @@ struct Camera {
     // Where the eye is.
     eye: vec4<f32>,
 }
-@group(0) @binding(0) var<uniform> camera: Camera;
+// Each eye's camera, indexed by the view drawn: see `tomori_render::multiview`.
+@group(0) @binding(0) var<uniform> cameras: array<Camera, 1 /* views */>;
 
 // Whether a ray from `origin` along unit `direction` meets the reveal sphere, as distant sky is seen through it.
-fn sees_reveal(origin: vec3<f32>, direction: vec3<f32>) -> bool {
+fn sees_reveal(camera: Camera, origin: vec3<f32>, direction: vec3<f32>) -> bool {
     if camera.reveal.w < 0.0 { return true; }
     let offset = origin - camera.reveal.xyz;
     let b = dot(offset, direction);
@@ -51,12 +52,13 @@ fn night(direction: vec3<f32>) -> vec3<f32> {
 }
 
 @fragment
-fn sky_fragment(in: SkyVertex) -> @location(0) vec4<f32> {
+fn sky_fragment(/* view_index */ in: SkyVertex) -> @location(0) vec4<f32> {
+    let camera = cameras[0u /* view */];
     let near_h = camera.inverse_view_projection * vec4<f32>(in.ndc, 0.0, 1.0);
     let far_h = camera.inverse_view_projection * vec4<f32>(in.ndc, 0.99, 1.0);
     let origin = near_h.xyz / near_h.w;
     let direction = normalize(far_h.xyz / far_h.w - origin);
-    if !sees_reveal(origin, direction) { discard; }
+    if !sees_reveal(camera, origin, direction) { discard; }
     let moon_direction = normalize(vec3<f32>(0.48, 0.53, -0.8));
     let separation = length(direction - moon_direction);
     let disc = 1.0 - smoothstep(0.039, 0.042, separation);
@@ -97,12 +99,14 @@ struct SceneryVertex {
 
 @vertex
 fn scenery_vertex(
+    /* view_index */
     @location(0) position: vec3<f32>,
     @location(1) normal: vec3<f32>,
     @location(2) color: vec3<f32>,
     @location(3) emission: f32,
     @location(4) light_uv: vec2<f32>,
 ) -> SceneryVertex {
+    let camera = cameras[0u /* view */];
     var out: SceneryVertex;
     out.position = camera.view_projection * vec4<f32>(position, 1.0);
     out.normal = normal;
@@ -144,19 +148,20 @@ fn moon_visibility(position: vec3<f32>, normal: vec3<f32>) -> f32 {
 }
 
 @fragment
-fn scenery_fragment(in: SceneryVertex) -> @location(0) vec4<f32> {
-    return shade(in);
+fn scenery_fragment(/* view_index */ in: SceneryVertex) -> @location(0) vec4<f32> {
+    return shade(cameras[0u /* view */], in);
 }
 
 // The scenery inside the reveal sphere only. Shaded first, since shadows take derivatives.
 @fragment
-fn revealed_scenery_fragment(in: SceneryVertex) -> @location(0) vec4<f32> {
-    let color = shade(in);
+fn revealed_scenery_fragment(/* view_index */ in: SceneryVertex) -> @location(0) vec4<f32> {
+    let camera = cameras[0u /* view */];
+    let color = shade(camera, in);
     if camera.reveal.w >= 0.0 && distance(in.world_position, camera.reveal.xyz) > camera.reveal.w { discard; }
     return color;
 }
 
-fn shade(in: SceneryVertex) -> vec4<f32> {
+fn shade(camera: Camera, in: SceneryVertex) -> vec4<f32> {
     let moon = normalize(vec3<f32>(0.48, 0.53, -0.8));
     let normal = normalize(in.normal);
     let visibility = moon_visibility(in.world_position, normal);

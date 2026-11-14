@@ -18,6 +18,7 @@ pub struct Pipeline {
     pipeline: wgpu::RenderPipeline,
     occluder: wgpu::RenderPipeline,
     layout: wgpu::BindGroupLayout,
+    views: crate::multiview::Views,
 }
 
 impl Pipeline {
@@ -27,7 +28,13 @@ impl Pipeline {
         glyphs: &crate::glyphs::Glyphs,
         samples: u32,
     ) -> Self {
-        Self::with_layout(device, format, glyphs.layout(), samples)
+        Self::with_layout(
+            device,
+            format,
+            glyphs.layout(),
+            samples,
+            crate::multiview::Views::One,
+        )
     }
 
     /// As [`Pipeline::new`], drawing from the atlas a scenery is given in its
@@ -39,7 +46,37 @@ impl Pipeline {
         glyphs: &crate::glyphs::SharedGlyphs,
         samples: u32,
     ) -> Self {
-        Self::with_layout(device, format, glyphs.layout(), samples)
+        Self::with_views(
+            device,
+            format,
+            glyphs,
+            samples,
+            crate::multiview::Views::One,
+        )
+    }
+
+    /// As [`Pipeline::shared`], drawn in passes of `views`, as a renderer drawing both eyes at once draws its own; see
+    /// [`crate::multiview`].
+    pub fn with_views(
+        device: &wgpu::Device,
+        format: wgpu::TextureFormat,
+        glyphs: &crate::glyphs::SharedGlyphs,
+        samples: u32,
+        views: crate::multiview::Views,
+    ) -> Self {
+        Self::with_layout(device, format, glyphs.layout(), samples, views)
+    }
+
+    /// As [`Pipeline::shared`], for a scenery's `target`: its format, samples, atlas and views, so that a scenery draws
+    /// panels and labels of its own in the eyes' passes however many views they draw.
+    pub fn for_target(target: &crate::scenery::Target<'_>) -> Self {
+        Self::with_views(
+            target.device,
+            target.format,
+            &target.glyphs,
+            target.samples,
+            target.views,
+        )
     }
 
     fn with_layout(
@@ -47,9 +84,15 @@ impl Pipeline {
         format: wgpu::TextureFormat,
         glyphs: &wgpu::BindGroupLayout,
         samples: u32,
+        views: crate::multiview::Views,
     ) -> Self {
-        let shader = device.create_shader_module(hazed_wgsl!("ui_panel.wgsl"));
-        let layout = transforms_layout(device);
+        let shader = crate::multiview::shader(
+            device,
+            "ui_panel.wgsl",
+            include_str!("ui_panel.wgsl"),
+            views,
+        );
+        let layout = transforms_layout(device, views);
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("panel pipeline layout"),
             bind_group_layouts: &[Some(&layout), Some(glyphs)],
@@ -89,10 +132,10 @@ impl Pipeline {
                 count: samples,
                 ..Default::default()
             },
-            multiview_mask: None,
+            multiview_mask: views.mask(),
             cache: None,
         });
-        let occluder = crate::occlusion::occluder(
+        let occluder = crate::occlusion::occluder_with_views(
             device,
             "panel backing occluder",
             &pipeline_layout,
@@ -100,11 +143,13 @@ impl Pipeline {
             VERTICES,
             format,
             samples,
+            views,
         );
         Self {
             pipeline,
             occluder,
             layout,
+            views,
         }
     }
 
@@ -151,7 +196,10 @@ impl Seen {
 }
 
 /// The layout of a panel's uniform for an eye, [`Panel::prepare_seen`], which its fragments read too, for the haze.
-pub(crate) fn transforms_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+pub(crate) fn transforms_layout(
+    device: &wgpu::Device,
+    views: crate::multiview::Views,
+) -> wgpu::BindGroupLayout {
     device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("panel transform layout"),
         entries: &[wgpu::BindGroupLayoutEntry {
@@ -160,7 +208,7 @@ pub(crate) fn transforms_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout 
             ty: wgpu::BindingType::Buffer {
                 ty: wgpu::BufferBindingType::Uniform,
                 has_dynamic_offset: false,
-                min_binding_size: wgpu::BufferSize::new(SEEN_SIZE),
+                min_binding_size: crate::multiview::Uniforms::binding_size(SEEN_SIZE, views),
             },
             count: None,
         }],
@@ -176,8 +224,9 @@ pub struct Panel {
     /// panel whose buffer never grows.
     most: usize,
     count: u32,
-    cameras: [wgpu::Buffer; 2],
-    bindings: [wgpu::BindGroup; 2],
+    /// Each eye's transform, and their binding for each pass.
+    cameras: crate::multiview::Uniforms,
+    bindings: Vec<wgpu::BindGroup>,
     canvas: Option<Arc<Canvas>>,
     /// Whether the mesh has every glyph, rather than lacking some that waited for a later frame's budget.
     complete: bool,
@@ -199,24 +248,26 @@ pub struct Panel {
 impl Panel {
     /// A panel holding at most `capacity` vertices; a larger mesh is cut, and is a layout bug the tests catch.
     pub fn new(device: &wgpu::Device, pipeline: &Pipeline, capacity: usize) -> Self {
-        let cameras = std::array::from_fn(|_| {
-            device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("panel eye transform"),
-                size: SEEN_SIZE,
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
+        let cameras = crate::multiview::Uniforms::new(
+            device,
+            "panel eye transform",
+            SEEN_SIZE,
+            pipeline.views,
+        );
+        let bindings = cameras
+            .buffers()
+            .iter()
+            .map(|buffer| {
+                device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("panel eye binding"),
+                    layout: &pipeline.layout,
+                    entries: &[wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: buffer.as_entire_binding(),
+                    }],
+                })
             })
-        });
-        let bindings = std::array::from_fn(|eye| {
-            device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("panel eye binding"),
-                layout: &pipeline.layout,
-                entries: &[wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: cameras[eye].as_entire_binding(),
-                }],
-            })
-        });
+            .collect();
         let vertices = vertices(device, capacity);
         let image_quad = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("panel image quad"),
@@ -416,10 +467,11 @@ impl Panel {
         uniform[16..32].copy_from_slice(&model.to_cols_array());
         uniform[32..36].copy_from_slice(&seen.haze.to_array());
         uniform[36..39].copy_from_slice(&seen.eye.to_array());
-        queue.write_buffer(&self.cameras[eye], 0, bytemuck::cast_slice(&uniform));
+        self.cameras
+            .write(queue, eye, bytemuck::cast_slice(&uniform));
     }
 
-    /// Draw for `eye`, with [`Pipeline::set`] already called on `pass` with `pipeline`, which it is again once drawn: the
+    /// Draw for `eye`, or, in a pass drawing both, as eye 0, with [`Pipeline::set`] already called on `pass` with `pipeline`, which it is again once drawn: the
     /// panel, then its backing into depth alone, if it is opaque enough to hide what is behind it.
     pub fn draw(&self, pass: &mut wgpu::RenderPass<'_>, pipeline: &Pipeline, eye: usize) {
         if self.count == 0 {

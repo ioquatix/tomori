@@ -1,4 +1,5 @@
-@group(1) @binding(0) var clouds: texture_2d<f32>;
+// Each eye's clouds, a layer for each view drawn: see `tomori_render::multiview`.
+@group(1) @binding(0) var clouds: texture_2d_array<f32>;
 @group(1) @binding(1) var cloud_sampler: sampler;
 
 struct Composite {
@@ -7,11 +8,12 @@ struct Composite {
 }
 
 @fragment
-fn composite_fragment(in: RayVertex) -> Composite {
+fn composite_fragment(/* view_index */ in: RayVertex) -> Composite {
+    let camera = cameras[0u /* view */];
     let direction = normalize(in.far - in.near);
     let interval = cloud_interval(in.near, direction);
-    if interval.y <= interval.x || !sees_reveal(in.near, direction) { discard; }
-    let color = textureSampleLevel(clouds, cloud_sampler, in.uv, 0.0);
+    if interval.y <= interval.x || !sees_reveal(camera, in.near, direction) { discard; }
+    let color = textureSampleLevel(clouds, cloud_sampler, in.uv, 0u /* view */, 0.0);
     if color.a < 0.002 { discard; }
     let entry = in.near + direction * interval.x;
     let clip = camera.view_projection * vec4<f32>(entry, 1.0);

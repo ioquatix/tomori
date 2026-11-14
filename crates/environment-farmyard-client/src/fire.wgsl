@@ -18,7 +18,8 @@ struct Camera {
     // time wraps, which the embers' trails read.
     time: vec4<f32>,
 }
-@group(0) @binding(0) var<uniform> camera: Camera;
+// Each eye's camera, indexed by the view drawn: see `tomori_render::multiview`.
+@group(0) @binding(0) var<uniform> cameras: array<Camera, 1 /* views */>;
 
 // A corner of a flame or an ember: the foot of what it belongs to; the corner, across it from -1 to 1 and up it from 0
 // to 1; its colour, with how brightly it glows; and how it moves: its phase, its height, its width, and what it is, a
@@ -37,7 +38,8 @@ struct Shaded {
 }
 
 @vertex
-fn fire_vertex(corner: Corner) -> Shaded {
+fn fire_vertex(/* view_index */ corner: Corner) -> Shaded {
+    let camera = cameras[0u /* view */];
     let t = camera.time.x;
     let phase = corner.motion.x;
     // Turned towards the eye about the upright.
@@ -81,7 +83,8 @@ fn fire_vertex(corner: Corner) -> Shaded {
 }
 
 @fragment
-fn fire_fragment(in: Shaded) -> @location(0) vec4<f32> {
+fn fire_fragment(/* view_index */ in: Shaded) -> @location(0) vec4<f32> {
+    let camera = cameras[0u /* view */];
     if camera.reveal.w >= 0.0 && distance(in.world, camera.reveal.xyz) > camera.reveal.w {
         discard;
     }

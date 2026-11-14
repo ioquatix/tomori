@@ -14,6 +14,7 @@ use crate::{
     hands,
     haptics::{self, Haptics, Vibrator},
     log_cadence::{self, Cadence},
+    multiview,
     scene::headset::{Actions, Controls, Headset, Joint, Lifecycle, Location, View},
     scene_graphics::{self, Panels},
     vulkan::Gpu,
@@ -44,6 +45,8 @@ pub fn run_desktop(
         crate::graphics::SAMPLES,
         // `TOMORI_FOVEATION`, as the headset's `tomori.foveation`; a desktop runtime without Meta's foveation draws as before.
         foveation::Request::parse(std::env::var("TOMORI_FOVEATION").ok().as_deref()),
+        // `TOMORI_MULTIVIEW`, as the headset's `tomori.multiview`.
+        multiview::Request::parse(std::env::var("TOMORI_MULTIVIEW").ok().as_deref()),
         || false,
         conversation,
         connection,
@@ -54,11 +57,13 @@ pub fn run_desktop(
 const STEREO: xr::ViewConfigurationType = xr::ViewConfigurationType::PRIMARY_STEREO;
 const BLEND: xr::EnvironmentBlendMode = xr::EnvironmentBlendMode::OPAQUE;
 
-/// `samples` is the samples per pixel to draw each eye with, such as [`crate::graphics::SAMPLES`] for multisample anti-aliasing; it falls back to 1 where the GPU cannot. `foveation` is the fixed foveation asked for, where the runtime and GPU can; see `design/rendering.md`.
+/// `samples` is the samples per pixel to draw each eye with, such as [`crate::graphics::SAMPLES`] for multisample anti-aliasing; it falls back to 1 where the GPU cannot. `foveation` is the fixed foveation asked for, where the runtime and GPU can, and `multiview` whether both eyes are drawn in one pass, where the GPU and every scenery can; see `design/rendering.md`.
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     platform: &impl xr::PlatformInfo,
     samples: u32,
     foveation: foveation::Request,
+    multiview: multiview::Request,
     mut destroyed: impl FnMut() -> bool,
     mut conversation: crate::conversation::Conversation,
     mut connection: crate::connection::Connection,
@@ -150,7 +155,13 @@ pub fn run(
     // Declaration order matters: all XR session resources are dropped before
     // the wgpu-owned Vulkan device and instance.
     // The density map's device extension is enabled only for a runtime that can foveate, so that others' devices are as before.
-    let gpu = Gpu::new(&instance, system, foveation_extensions.maps())?;
+    // Multiview is enabled only where asked for, so that a device drawing each eye in a pass of its own is as before.
+    let gpu = Gpu::new(
+        &instance,
+        system,
+        foveation_extensions.maps(),
+        multiview.asks(),
+    )?;
     let plan = foveation::Plan::new(foveation, gpu.density, foveation_extensions);
     if let Err(why) = plan {
         log::info!("Fixed foveation off: {why}");
@@ -234,7 +245,9 @@ pub fn run(
                 .unwrap_or_default()
         );
     }
-    let mut renderer = Renderer::with_sceneries(
+    // Both eyes in one pass, by multiview, where asked for and the GPU and every scenery can; the density map, attached
+    // to the eyes' passes whichever they are, is the eyes', each at its own layer.
+    let mut renderer = Renderer::with_views(
         &gpu.device,
         &gpu.queue,
         format,
@@ -242,7 +255,15 @@ pub fn run(
         height,
         samples,
         sceneries,
+        multiview.views(),
     );
+    let eye_passes = renderer.views();
+    let views_summary = multiview::summary(multiview, eye_passes);
+    match renderer.single_view() {
+        Some(why) => log::info!("Drawing {views_summary}: {why}"),
+        None => log::info!("Drawing {views_summary}"),
+    }
+    let order = multiview.order();
     steps.done("renderer");
     log::info!("{steps}");
     if destroyed() {
@@ -444,12 +465,21 @@ pub fn run(
             swapchain.wait_image(xr::Duration::INFINITE)?;
             Ok(image)
         })?;
+        // Each eye's pass in the order asked for, or one pass drawing both.
+        let ordered = [projections[order[0]], projections[order[1]]];
+        let swapped: [wgpu::TextureView; 2];
+        let targets = if order == [0, 1] {
+            images[image].targets(eye_passes)
+        } else {
+            swapped = order.map(|eye| images[image].views[eye].clone());
+            &swapped
+        };
         let encoded = timer.time(Segment::Render, || {
             renderer.encode(
                 &gpu.device,
                 &gpu.queue,
-                &images[image].views,
-                &projections,
+                targets,
+                &ordered,
                 scene_to_space,
                 &panels.list(scene_to_space),
             )
@@ -528,7 +558,7 @@ pub fn run(
                     .map(|foveated| foveated.framebuffers())
                     .map(|(eyes, other)| format!(" ({eyes} framebuffers, {other} others)"))
                     .unwrap_or_default();
-                log::info!("{gpu}; {foveation_summary}{framebuffers}");
+                log::info!("{gpu}; {views_summary}; {foveation_summary}{framebuffers}");
             }
         }
     }

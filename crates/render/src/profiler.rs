@@ -86,6 +86,8 @@ pub struct Profiler {
     queries: Option<Queries>,
     timed: Vec<Timed>,
     tallies: Vec<Tally>,
+    /// How many views each pass draws: where one draws both eyes, there is no time for each.
+    views: crate::multiview::Views,
 }
 
 impl Profiler {
@@ -137,7 +139,13 @@ impl Profiler {
             queries,
             timed: Vec::new(),
             tallies: Vec::new(),
+            views: crate::multiview::Views::One,
         }
+    }
+
+    /// Each pass draws `views`: with both, one pass draws both eyes, and only its time is said, as the eyes'.
+    pub fn set_views(&mut self, views: crate::multiview::Views) {
+        self.views = views;
     }
 
     /// A profiler that keeps only what was drawn, for a device without timestamps.
@@ -146,6 +154,7 @@ impl Profiler {
             queries: None,
             timed: Vec::new(),
             tallies: Vec::new(),
+            views: crate::multiview::Views::One,
         }
     }
 
@@ -310,7 +319,12 @@ impl Profiler {
                         .collect(),
                 ),
             )];
-            for (eye, name) in ["left", "right"].into_iter().enumerate().take(eyes.min(2)) {
+            // A pass drawing both eyes has no time for each.
+            let each = match self.views {
+                crate::multiview::Views::One => eyes.min(2),
+                crate::multiview::Views::Both => 0,
+            };
+            for (eye, name) in ["left", "right"].into_iter().enumerate().take(each) {
                 parts.push((
                     name,
                     spread(

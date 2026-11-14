@@ -119,7 +119,31 @@ impl Controllers {
         camera_layout: &wgpu::BindGroupLayout,
         samples: u32,
     ) -> Self {
-        let shader = device.create_shader_module(hazed_wgsl!("controllers.wgsl"));
+        Self::with_views(
+            device,
+            queue,
+            format,
+            camera_layout,
+            samples,
+            crate::multiview::Views::One,
+        )
+    }
+
+    /// As [`Self::new`], drawn in passes of `views`; see [`crate::multiview`].
+    pub fn with_views(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        format: wgpu::TextureFormat,
+        camera_layout: &wgpu::BindGroupLayout,
+        samples: u32,
+        views: crate::multiview::Views,
+    ) -> Self {
+        let shader = crate::multiview::shader(
+            device,
+            "controllers.wgsl",
+            include_str!("controllers.wgsl"),
+            views,
+        );
         let texture_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("controller texture layout"),
             entries: &[
@@ -199,7 +223,7 @@ impl Controllers {
                 count: samples,
                 ..Default::default()
             },
-            multiview_mask: None,
+            multiview_mask: views.mask(),
             cache: None,
         });
         let instances = device.create_buffer(&wgpu::BufferDescriptor {
@@ -365,6 +389,106 @@ fn append_box(out: &mut Vec<Vertex>, center: Vec3, size: Vec3, color: [f32; 3]) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_controller_held_before_the_eye_is_drawn_in_its_own_pass() {
+        crate::test_gpu::with(|crate::test_gpu::Gpu { device, queue, .. }| {
+            use wgpu::util::DeviceExt;
+            let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+            let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+            let layout = crate::graphics::camera_layout(&device, crate::multiview::Views::One);
+            let eye = glam::camera::rh::proj::directx::perspective(1.0, 1.0, 0.05, 10.0)
+                * glam::camera::rh::view::look_at_mat4(
+                    glam::Vec3::new(0.0, 0.0, 0.3),
+                    glam::Vec3::ZERO,
+                    glam::Vec3::Y,
+                );
+            let camera = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: None,
+                contents: bytemuck::cast_slice(&crate::graphics::camera(
+                    eye,
+                    tomori_assets::haze::Haze::NONE,
+                    64,
+                )),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+            let binding = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: None,
+                layout: &layout,
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: camera.as_entire_binding(),
+                }],
+            });
+            let mut controllers = Controllers::new(&device, &queue, format, &layout, 1);
+            let held = Pose {
+                position: [0.0; 3],
+                orientation: [0.0, 0.0, 0.0, 1.0],
+            };
+            controllers.update(&queue, [Some(held), None], [None, None]);
+            let size = wgpu::Extent3d {
+                width: 64,
+                height: 64,
+                depth_or_array_layers: 1,
+            };
+            let texture = |format, usage| {
+                device.create_texture(&wgpu::TextureDescriptor {
+                    label: None,
+                    size,
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format,
+                    usage,
+                    view_formats: &[],
+                })
+            };
+            let target = texture(
+                format,
+                wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            );
+            let depth = texture(
+                wgpu::TextureFormat::Depth32Float,
+                wgpu::TextureUsages::RENDER_ATTACHMENT,
+            );
+            let mut encoder = device.create_command_encoder(&Default::default());
+            {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: None,
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &target.create_view(&Default::default()),
+                        resolve_target: None,
+                        depth_slice: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: &depth.create_view(&Default::default()),
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(1.0),
+                            store: wgpu::StoreOp::Discard,
+                        }),
+                        stencil_ops: None,
+                    }),
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+                pass.set_bind_group(0, &binding, &[]);
+                controllers.draw(&mut pass);
+            }
+            queue.submit([encoder.finish()]);
+            let image = crate::test_support::read_back(&device, &queue, &target, (64, 64));
+            let drawn = image
+                .pixels()
+                .filter(|pixel| pixel.0[..3] != [0, 0, 0])
+                .count();
+            assert!(drawn > 100, "{drawn} pixels of the controller drawn");
+            assert!(pollster::block_on(scope.pop()).is_none());
+        });
+    }
 
     #[test]
     fn bone_transform_joins_valid_joints_and_rejects_bad_geometry() {

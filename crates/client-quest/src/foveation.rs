@@ -273,7 +273,7 @@ fn map_of(rings: &[(f32, [u8; 2])], size: vk::Extent2D, [cx, cy]: [f32; 2]) -> V
     texels
 }
 
-/// The shape of the eyes' render pass, by which it is told from every other: one subpass, without multiview, of one colour attachment in the eyes' format at their samples, and depth.
+/// The shape of the eyes' render pass, by which it is told from every other: one subpass, of one colour attachment in the eyes' format at their samples, and depth, drawing one view, or both eyes' by multiview, nothing else chained to it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct EyePass {
     pub format: vk::Format,
@@ -287,7 +287,11 @@ impl EyePass {
     ///
     /// `info`'s arrays must be valid for their counts, as `vkCreateRenderPass` requires.
     pub unsafe fn matches(self, info: &vk::RenderPassCreateInfo) -> bool {
-        if !info.p_next.is_null() || info.subpass_count != 1 || info.p_subpasses.is_null() {
+        // SAFETY: the caller's.
+        if !unsafe { eyes_chained(info.p_next) }
+            || info.subpass_count != 1
+            || info.p_subpasses.is_null()
+        {
             return false;
         }
         // SAFETY: the caller's.
@@ -302,6 +306,31 @@ impl EyePass {
             .get(colour as usize)
             .is_some_and(|colour| colour.format == self.format && colour.samples == self.samples)
     }
+}
+
+/// The views both eyes are drawn in by multiview: the first two layers.
+pub const BOTH: u32 = 0b11;
+
+/// Whether `next`, what is chained to a render pass's create info, is nothing, or multiview alone, drawing both eyes in
+/// its one subpass.
+///
+/// # Safety
+///
+/// `next` must be null or a valid chain of Vulkan structures.
+unsafe fn eyes_chained(next: *const std::ffi::c_void) -> bool {
+    if next.is_null() {
+        return true;
+    }
+    // SAFETY: the caller's.
+    let base = unsafe { &*next.cast::<vk::BaseInStructure>() };
+    if base.s_type != vk::StructureType::RENDER_PASS_MULTIVIEW_CREATE_INFO || !base.p_next.is_null()
+    {
+        return false;
+    }
+    // SAFETY: as its type says.
+    let multiview = unsafe { &*next.cast::<vk::RenderPassMultiviewCreateInfo>() };
+    let masks = unsafe { slice(multiview.p_view_masks, multiview.subpass_count) };
+    masks == [BOTH]
 }
 
 /// # Safety
@@ -806,19 +835,39 @@ mod tests {
         ));
         assert!(!eye_pass(&[depth], &[], &[], Some(&reference(0))));
         assert!(!eye_pass(&[], &[], &[], Some(&reference(0))));
-        // Multiview, or anything else chained, and not one subpass.
+        // Both eyes drawn by multiview, as wgpu chains it; but not other views, multiview with anything more chained,
+        // anything else chained, or not one subpass.
         let (colours, depth_reference) = ([reference(0)], reference(1));
         let subpass = vk::SubpassDescription::default()
             .color_attachments(&colours)
             .depth_stencil_attachment(&depth_reference);
         let subpasses = [subpass, subpass];
         let both = [colour, depth];
-        let mut multiview = vk::RenderPassMultiviewCreateInfo::default();
-        let chained = vk::RenderPassCreateInfo::default()
+        let chained = |masks: &[u32], more: bool| {
+            let mut multiview = vk::RenderPassMultiviewCreateInfo::default()
+                .view_masks(masks)
+                .correlation_masks(masks);
+            let mut density = vk::RenderPassFragmentDensityMapCreateInfoEXT::default();
+            let mut info = vk::RenderPassCreateInfo::default()
+                .attachments(&both)
+                .subpasses(&subpasses[..1]);
+            if more {
+                info = info.push_next(&mut density);
+            }
+            let info = info.push_next(&mut multiview);
+            unsafe { EYES.matches(&info) }
+        };
+        assert!(chained(&[BOTH], false));
+        assert!(!chained(&[0b1], false));
+        assert!(!chained(&[BOTH, BOTH], false));
+        assert!(!chained(&[], false));
+        assert!(!chained(&[BOTH], true));
+        let mut density = vk::RenderPassFragmentDensityMapCreateInfoEXT::default();
+        let other = vk::RenderPassCreateInfo::default()
             .attachments(&both)
             .subpasses(&subpasses[..1])
-            .push_next(&mut multiview);
-        assert!(!unsafe { EYES.matches(&chained) });
+            .push_next(&mut density);
+        assert!(!unsafe { EYES.matches(&other) });
         let two = vk::RenderPassCreateInfo::default()
             .attachments(&both)
             .subpasses(&subpasses);
@@ -870,6 +919,22 @@ mod tests {
         assert!(chained.p_next.is_null());
         // A pass made with a density map is no longer shaped as the eyes'.
         assert!(!unsafe { EYES.matches(made) });
+        // One drawing both eyes by multiview keeps multiview, chained after its density map.
+        let masks = [BOTH];
+        let mut multiview = vk::RenderPassMultiviewCreateInfo::default()
+            .view_masks(&masks)
+            .correlation_masks(&masks);
+        let both = info.push_next(&mut multiview);
+        assert!(unsafe { EYES.matches(&both) });
+        let pass = unsafe { DensityPass::new(&both) };
+        let chained = unsafe {
+            &*pass
+                .info()
+                .p_next
+                .cast::<vk::RenderPassFragmentDensityMapCreateInfoEXT>()
+        };
+        assert_eq!(chained.p_next, both.p_next);
+        assert!(!unsafe { EYES.matches(pass.info()) });
         assert!(unsafe { slice::<u8>(std::ptr::null(), 0) }.is_empty());
         // An imageless framebuffer's attachments are null, whatever their count.
         assert!(unsafe { slice::<u8>(std::ptr::null(), 3) }.is_empty());

@@ -4,8 +4,11 @@ struct Camera {
     eye: vec4<f32>,
     // The scene's haze, the environment's: its colour, and its density in `w`, for `hazed`.
     haze: vec4<f32>,
+    // The rest of the renderer's camera, which Tomori's cubes read, so that each eye's is as far from the next as there.
+    pixels: f32,
 }
-@group(0) @binding(0) var<uniform> camera: Camera;
+// Each eye's camera, indexed by the view drawn: see `tomori_render::multiview`.
+@group(0) @binding(0) var<uniform> cameras: array<Camera, 1 /* views */>;
 @group(1) @binding(0) var atlas: texture_2d<f32>;
 @group(1) @binding(1) var atlas_sampler: sampler;
 struct VertexOut {
@@ -17,11 +20,13 @@ struct VertexOut {
     @location(3) world: vec3<f32>,
 }
 @vertex fn vs_main(
+    /* view_index */
     @location(0) position: vec3<f32>,
     @location(1) color: vec4<f32>,
     @location(2) uv: vec2<f32>,
     @location(3) weight: f32,
 ) -> VertexOut {
+    let camera = cameras[0u /* view */];
     var out: VertexOut;
     out.position = camera.matrix * vec4<f32>(position, 1.0);
     out.color = color;
@@ -67,7 +72,8 @@ fn opacity(covered: f32, color: vec3<f32>) -> f32 {
     return mix(1.0 - pow(1.0 - covered, GAMMA), pow(covered, GAMMA), light);
 }
 // Hazed as everything in the scene is; its coverage is made opacity by its own colour, so that text keeps its weight.
-@fragment fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
+@fragment fn fs_main(/* view_index */ input: VertexOut) -> @location(0) vec4<f32> {
+    let camera = cameras[0u /* view */];
     let color = hazed(input.color.rgb, camera.haze, distance(input.world, camera.eye.xyz));
     return vec4<f32>(color, input.color.a * opacity(coverage(input.uv, input.weight), input.color.rgb));
 }
@@ -78,11 +84,13 @@ override OCCLUDING: f32 = 0.6;
 // A backing drawn into depth alone, once its surface is drawn, so that what is behind it and drawn later is hidden; its colour is not written, and only where it is opaque enough. See `occlusion.rs`.
 @vertex
 fn vs_occlude(
+    /* view_index */
     @location(0) position: vec3<f32>,
     @location(1) color: vec4<f32>,
     @location(2) uv: vec2<f32>,
     @location(3) weight: f32,
 ) -> VertexOut {
+    let camera = cameras[0u /* view */];
     var out: VertexOut;
     let at = camera.matrix * vec4<f32>(position, 1.0);
     out.position = vec4<f32>(at.xy, min(at.z + TIE * at.w, at.w), at.w);
