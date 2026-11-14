@@ -4,7 +4,7 @@ This describes the test coverage Tomori's workspace must keep.
 
 ## Requirement
 
-Every measured source region in the workspace runs under its tests: `cargo bake test:coverage --all-targets true` passes on current stable Rust, on CI's Linux runner with lavapipe and the speech models. The Test workflow's `test-result` job requires it for every pull request and push to main, and the main branch requires `test-result`. The merge queue, which tests each pull request again merged with those ahead of it, runs the tests without coverage instrumentation, as the pull request has passed the gate on its own. The target is 100%, never a lower floor.
+Every measured source region in the workspace runs under its tests: `cargo bake test:coverage --all-targets true --nextest true` passes on current stable Rust, each test in a process of its own under cargo-nextest, on CI's Linux runner with lavapipe and the speech models. The Test workflow's `test-result` job requires it for every pull request and push to main, and the main branch requires `test-result`. The merge queue, which tests each pull request again merged with those ahead of it, runs the tests without coverage instrumentation, as the pull request has passed the gate on its own. The target is 100%, never a lower floor.
 
 Uncovered code gets a test, or is removed if nothing needs it. A branch that only a race could take is restructured, so that whether it runs does not depend on timing. Nor does coverage depend on which tests share a process or which runs first: a log line's arguments are evaluated only when the log level allows them, so each test that reaches one raises the level itself, with `test_support::log_everything` in the client and the scene, `log::set_max_level` elsewhere, or `test_log::record` in the server, where a test that causes a warning an operator relies on also checks it with `test_log::logged`. Bake does not count regions inside `unreachable!`, which is left only where the types or an immediately preceding check rule the branch out, with a comment saying why.
 
@@ -40,7 +40,7 @@ Every workspace member's code, including its inline tests and the `bake/` packag
 
 ## Validation
 
-- `cargo bake test:coverage --all-targets true` passes in CI, for every pull request and push to main. Its report lists each excluded file with its reason and its size, in regions and lines.
+- `cargo bake test:coverage --all-targets true --nextest true` passes in CI, for every pull request and push to main. Its report lists each excluded file with its reason and its size, in regions and lines.
 - A change that adds or widens an exclusion is reviewed as lowering the target would be. Its file must hold only device or platform calls, its reason must say what cannot run, and no logic may have moved into it.
 - Search the source for `coverage(off)` and `cfg(coverage)`: there is neither.
 - `cargo test --workspace` on macOS passes, opening no window, when run by hand (CI does not check it). Every `ignore` in a test names its reason, and none applies on Linux unless the test needs something CI does not have.

@@ -27,3 +27,7 @@ strip = "debuginfo"
 # Keep sideload/debug builds fast enough to run the simulation at headset rates.
 [profile.dev]
 opt-level = 1
+
+# `test:coverage --nextest true`, from base-rs/bake-test#41, until a bake-test release has it.
+[patch.crates-io]
+bake-test = { git = "https://github.com/base-rs/bake-test", rev = "11d60adee6f9b5959841245d21129804eceb5829" }
