@@ -107,6 +107,7 @@ fn ogg_resealed(mut bytes: Vec<u8>) -> Vec<u8> {
 
 #[test]
 fn a_malformed_sound_ends_or_is_refused_and_never_takes_the_thread_with_it() {
+    crate::test_support::log_everything();
     let pages = ogg_pages(MONO);
     assert!(pages.len() >= 3, "{pages:?}");
     // At a rate no sound is at, refused: the rate is 12 bytes into the identification header, the first page's body.
@@ -203,6 +204,7 @@ fn a_bed_plays_in_both_ears_over_and_over_once_heard() {
 
 #[test]
 fn a_silent_slot_plays_nothing_and_leaves_the_thread_idle() {
+    crate::test_support::log_everything();
     for slot in [
         Slot::missing("wind"),
         Slot::new("wind", || None),
@@ -230,6 +232,7 @@ fn a_silent_slot_plays_nothing_and_leaves_the_thread_idle() {
 
 #[test]
 fn no_more_than_its_voices_play_and_calls_wait_for_one_to_be_free() {
+    crate::test_support::log_everything();
     let (mut feeder, mut bus) = pair(1);
     feeder.apply(Command::Gain(1.0), Duration::ZERO);
     let mut many = Ambience::new();

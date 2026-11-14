@@ -399,6 +399,7 @@ mod tests {
 
     #[test]
     fn loads_tomoris_and_a_servers_own() {
+        log::set_max_level(log::LevelFilter::Trace);
         let directory =
             std::env::temp_dir().join(format!("tomori-pronunciations-{}", std::process::id()));
         std::fs::create_dir_all(&directory).unwrap();

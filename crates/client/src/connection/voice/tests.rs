@@ -561,6 +561,7 @@ fn a_recording_for_one_connection_is_not_reopened_for_another() {
 
 #[test]
 fn a_refused_or_failed_microphone_is_reported() {
+    crate::test_support::log_everything();
     let client = client();
     let mut refused = scripted(Scripted {
         refuse: Some("No microphone permission.".into()),

@@ -559,6 +559,7 @@ mod ambience {
 
     #[test]
     fn an_ambience_whose_thread_cannot_start_is_silent() {
+        crate::test_support::log_everything();
         let (_sender, mut player, control) = player();
         crate::system::refuse("tomori-ambience");
         control.set_ambience(tone());

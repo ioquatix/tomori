@@ -672,6 +672,7 @@ mod tests {
 
     #[test]
     fn errors_are_capped_until_they_are_sent() {
+        crate::test_log::record();
         let outbox = Outbox::new();
         for index in 0..100 {
             outbox.message(ServerMessage::Error {
@@ -693,10 +694,12 @@ mod tests {
             wall: None,
         });
         assert_eq!(drain(&outbox).len(), 1);
+        assert!(!crate::test_log::logged("An error reply was dropped").is_empty());
     }
 
     #[test]
     fn an_unread_control_queue_closes_the_connection() {
+        crate::test_log::record();
         let outbox = Outbox::new();
         for _ in 0..CONTROL_LIMIT * 2 {
             outbox.message(ServerMessage::LEFT);
@@ -705,6 +708,7 @@ mod tests {
         let Popped::Closed = outbox.pop() else {
             unreachable!("expected Popped::Closed");
         };
+        assert!(!crate::test_log::logged("client is not reading control messages").is_empty());
     }
 
     #[test]

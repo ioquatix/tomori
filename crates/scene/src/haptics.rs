@@ -127,6 +127,7 @@ mod tests {
 
     #[test]
     fn a_failure_is_kept_until_vibration_works_again() {
+        crate::test_support::log_everything();
         let mut haptics = Haptics::default();
         let failing = Recorder {
             fail: Some("lost"),

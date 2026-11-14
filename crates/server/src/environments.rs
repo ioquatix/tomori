@@ -1430,6 +1430,7 @@ mod tests {
 
     #[test]
     fn an_environment_has_a_server_side_only_when_given_one() {
+        crate::test_log::record();
         let plain = Environment::new("observe", "Observe");
         let with = Environment::new("observe", "Observe").with_server_side(Idle);
         assert!(plain.server_side().is_none());
@@ -1580,6 +1581,7 @@ mod tests {
                 (None, None, None)
             );
         }
+        assert!(!crate::test_log::logged("is laid out as a flat wall's").is_empty());
     }
 
     #[test]
@@ -1693,6 +1695,7 @@ mod tests {
 
     #[test]
     fn the_home_anchor_gives_the_workers_room_and_with_workers_is_its_compatible_form() {
+        crate::test_log::record();
         use tomori_protocol::Pose;
         use tomori_protocol::cluster::{Anchor, Extent, HOME};
         let yard = Pose::at([0.0, 1.4, -5.0]).facing_towards([0.0, 1.6, 0.0]);
@@ -1812,10 +1815,12 @@ mod tests {
         assert_eq!(offered.anchors("far"), tomori_protocol::Anchors::new());
         let plain = Environment::new("roomy", "Roomy");
         assert_ne!(plain, plain.clone().with_anchor(room));
+        assert!(!crate::test_log::logged("'s anchor ").is_empty());
     }
 
     #[test]
     fn spawn_points_are_carried_into_the_space_and_bounded() {
+        crate::test_log::record();
         use tomori_protocol::Pose;
         use tomori_protocol::spawn::{self, Spawn};
         let gate = Spawn::new(Pose::at([0.0, 0.0, 6.0]).facing_towards([0.0, 0.0, 0.0]))
@@ -1866,6 +1871,7 @@ mod tests {
         assert!(offered.anchors(SKY).spawns.is_empty());
         let plain = Environment::new("farm", "Farm");
         assert_ne!(plain, plain.clone().with_spawn(camp));
+        assert!(!crate::test_log::logged("spawn point").is_empty());
     }
 
     #[test]
@@ -2001,6 +2007,7 @@ mod tests {
 
     #[test]
     fn a_follow_height_is_taken_from_1_to_10_m_and_otherwise_left_out() {
+        crate::test_log::record();
         for metres in [FOLLOW_HEIGHTS.0, 5.1, FOLLOW_HEIGHTS.1] {
             let observe = Environment::new("observe", "Observe").with_follow_height(metres);
             assert_eq!(observe.follow_height(), Some(metres));
@@ -2016,6 +2023,7 @@ mod tests {
         let offered = tomoris().with(floating);
         assert_eq!(offered.follow_height("observe"), Some(5.1));
         assert_eq!(offered.follow_height("nowhere"), None);
+        assert!(!crate::test_log::logged("follow height of").is_empty());
     }
 
     #[test]
@@ -2040,6 +2048,7 @@ mod tests {
     #[test]
     fn an_environment_names_its_status_wall_one_of_its_own_or_one_it_stands_or_else_the_default_stands()
      {
+        crate::test_log::record();
         use crate::stage::{Layout, Status};
         use tomori_protocol::{Grid, Pose};
         let board = EnvironmentWall::new(Pose::at([3.0, 1.4, -4.0])).with_grid(Grid::from((2, 1)));
@@ -2113,6 +2122,7 @@ mod tests {
         );
         // Not offered, it is the default.
         assert_eq!(offered.walls("gone").status, Status::Beneath);
+        assert!(!crate::test_log::logged("status wall is left out").is_empty());
     }
 
     #[test]

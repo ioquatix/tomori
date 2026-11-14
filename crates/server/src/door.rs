@@ -131,6 +131,7 @@ mod tests {
 
     #[test]
     fn a_token_that_cannot_be_revoked_is_said_not_to_be() {
+        crate::test_log::record();
         let (store, directory) = store("unrevoked");
         let (entry, _) = store.issue("Ada", Granted::Owner).unwrap();
         // The lock file each change opens cannot be opened where a directory has its name.
@@ -139,6 +140,7 @@ mod tests {
         assert!(!revoke(&store, &entry.id));
         assert_eq!(store.entries().len(), 1);
         let _ = std::fs::remove_dir_all(directory);
+        assert!(!crate::test_log::logged("Could not revoke token").is_empty());
     }
 
     #[test]

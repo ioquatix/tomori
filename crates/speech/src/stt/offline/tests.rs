@@ -337,6 +337,7 @@ fn an_utterance_longer_than_the_limit_fails_as_it_passes_it() {
 
 #[test]
 fn a_failed_segment_fails_the_utterance() {
+    log::set_max_level(log::LevelFilter::Trace);
     let (recorder, calls) = Recorder::new(|index, _| match index {
         1 => Err(Error::Engine("the decoder broke".to_owned())),
         _ => Ok("words".to_owned()),

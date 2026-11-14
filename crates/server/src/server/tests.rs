@@ -863,6 +863,7 @@ fn watching(server: Server) -> Server {
 
 #[test]
 fn cards_wait_until_due_or_watched_and_a_failing_timer_ends_their_reading() {
+    crate::test_log::record();
     let scheduler = Faulty {
         failing_timers: true,
         ..Faulty::new()
@@ -900,6 +901,7 @@ fn cards_wait_until_due_or_watched_and_a_failing_timer_ends_their_reading() {
     block_on(zip(server.refresh_cards(&Faulty::new(), &later), async {
         later.cancel()
     }));
+    assert!(!crate::test_log::logged("The cards timer failed").is_empty());
 }
 
 #[test]
@@ -965,6 +967,7 @@ fn timers_that_fail_end_the_sweep_the_pacing_the_counts_and_the_drain() {
 
 #[test]
 fn a_listener_that_does_not_close_cleanly_is_only_said() {
+    crate::test_log::record();
     let running = start_with(
         Faulty {
             failing_listener_close: true,
@@ -979,6 +982,7 @@ fn a_listener_that_does_not_close_cleanly_is_only_said() {
         .recv_timeout(Duration::from_secs(10))
         .unwrap();
     assert_eq!(result.unwrap().connections, 1);
+    assert!(!crate::test_log::logged("Closing the listener failed").is_empty());
 }
 
 #[test]
@@ -1275,6 +1279,7 @@ impl Supervision {
 
 #[test]
 fn a_space_that_cannot_start_releases_its_place_and_closes_what_it_started() {
+    crate::test_log::record();
     let supervision = Supervision::new(1);
     let live = Cancellation::new();
     // A backend that is not enabled starts nothing.
@@ -1309,6 +1314,7 @@ fn a_space_whose_place_was_taken_after_the_hub_let_it_through_starts_nothing() {
 
 #[test]
 fn a_kept_space_that_cannot_be_bound_again_says_why() {
+    crate::test_log::record();
     let reason = |supervision: &Supervision| supervision.kept_state().error;
     let live = Cancellation::new();
     let cancelled = Cancellation::new();
@@ -1402,6 +1408,7 @@ fn a_kept_space_bound_again_is_driven_until_its_session_closes() {
 
 #[test]
 fn a_session_driven_until_the_server_stops_is_closed_even_if_closing_fails() {
+    crate::test_log::record();
     let supervision = Supervision::new(1);
     supervision.backend.fail_closing();
     let backend = supervision.hub.backends.get("fake").unwrap();
@@ -1452,6 +1459,7 @@ fn sessions_are_listed_only_for_a_directory_and_backend_it_has() {
 
 #[test]
 fn a_check_that_takes_too_long_or_outlasts_the_server_refuses_the_directory() {
+    crate::test_log::record();
     let scheduler = Faulty::new();
     let (_sender, resolved) = async_channel::bounded(1);
     let live = Cancellation::new();
@@ -1478,6 +1486,7 @@ fn a_check_that_takes_too_long_or_outlasts_the_server_refuses_the_directory() {
         None
     );
     block_on(scheduler.inner.shutdown());
+    assert!(!crate::test_log::logged("checking it took longer than").is_empty());
 }
 
 #[test]
@@ -1566,6 +1575,7 @@ fn a_driven_session_follows_its_new_name_its_failure_and_instructions_with_nothi
 
 #[test]
 fn the_supervisor_stops_once_the_hub_shuts_down_and_forgets_only_for_backends_it_has() {
+    crate::test_log::record();
     let supervision = Supervision::new(1);
     block_on(forget_instructions(
         supervision.hub.clone(),
@@ -1652,6 +1662,7 @@ fn a_deleted_spaces_session_is_deleted_only_once_nothing_else_holds_it_and_it_is
 
 #[test]
 fn a_token_store_that_cannot_be_read_again_keeps_what_it_read() {
+    crate::test_log::record();
     let state = std::env::temp_dir().join(format!("tomori-server-reload-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&state);
     let store = Arc::new(tomori_security::TokenStore::open(&state).unwrap());
@@ -1661,6 +1672,7 @@ fn a_token_store_that_cannot_be_read_again_keeps_what_it_read() {
     server.revoke_withdrawn();
     assert_eq!(store.entries().len(), 1);
     let _ = std::fs::remove_dir_all(&state);
+    assert!(!crate::test_log::logged("Could not read the token store").is_empty());
 }
 
 #[test]
@@ -1738,6 +1750,7 @@ fn accept_failures_are_classified_by_their_effect_on_the_listener() {
 
 #[test]
 fn a_recurring_per_peer_accept_error_pauses_accepting() {
+    crate::test_log::record();
     let resets = (0..=ACCEPT_RETRIES)
         .map(|_| io::Error::from(io::ErrorKind::ConnectionReset))
         .collect::<Vec<_>>();
@@ -1757,6 +1770,7 @@ fn a_recurring_per_peer_accept_error_pauses_accepting() {
 
 #[test]
 fn serving_continues_after_transient_accept_errors() {
+    crate::test_log::record();
     #[cfg_attr(not(unix), allow(unused_mut))]
     let mut errors = vec![
         io::Error::from(io::ErrorKind::ConnectionAborted),

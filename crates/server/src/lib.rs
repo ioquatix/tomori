@@ -66,6 +66,8 @@ mod zones;
 
 #[cfg(feature = "fake")]
 pub mod fake;
+#[cfg(test)]
+mod test_log;
 #[cfg(feature = "fake")]
 pub mod test_support;
 

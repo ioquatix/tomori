@@ -640,6 +640,7 @@ fn spaces_are_marked_in_place_and_the_selection_starts_on_the_most_urgent() {
 
 #[test]
 fn the_remembered_server_is_not_connected_while_only_another_needs_attention() {
+    crate::test_support::log_everything();
     let start = Instant::now();
     let mut conversation = crate::test_support::conversation("Ada");
     let mut remembered = advertising("Desktop", "10.0.0.1:8765", 0, 0);
@@ -3004,6 +3005,7 @@ fn holding_x_while_a_question_is_shown_answers_it() {
 
 #[test]
 fn a_new_name_is_said_with_x_once_chosen_and_the_servers_name_is_shown() {
+    crate::test_support::log_everything();
     use crate::hand_menu::Choice as MenuChoice;
     use crate::recording::Phase;
     let mut conversation = joined(|state| {
@@ -3891,6 +3893,7 @@ fn another_error_while_rejoining_stays_in_the_space() {
 
 #[test]
 fn a_refused_join_from_the_lobby_leaves() {
+    crate::test_support::log_everything();
     let mut conversation = crate::test_support::conversation("Ada");
     conversation.connect(Choice::new("Studio", "10.0.0.1:8765", Source::Discovered));
     conversation.apply(connected());
@@ -4828,6 +4831,7 @@ fn taking_the_headset_off_turns_the_live_microphone_off_and_abandons_a_recording
 
 #[test]
 fn the_stick_clicks_mute_spoken_replies_and_play_the_latest_again() {
+    crate::test_support::log_everything();
     let mut conversation = joined(|state| state.speech = SpeechSetting::Brief);
     conversation.toggle_mute();
     assert_eq!(conversation.take_actions(), [Action::SetAgentMuted(true)]);
@@ -5666,6 +5670,7 @@ fn speech_shows_over_running_and_the_turn_waits_for_the_agent_to_be_free() {
 
 #[test]
 fn muted_speech_shows_as_speaking_muted_and_is_no_turn() {
+    crate::test_support::log_everything();
     use crate::pill::Speaking;
     let mut conversation = on_wrist(|space| space.activity = Activity::Idle);
     let mut feedback = feedback::Feedback::new(feedback::Settings::default());
@@ -5688,6 +5693,7 @@ fn muted_speech_shows_as_speaking_muted_and_is_no_turn() {
 
 #[test]
 fn speaking_before_a_reply_s_first_words_skips_it_as_it_comes_and_nothing_once_none_is_to_come() {
+    crate::test_support::log_everything();
     let mut conversation = on_wrist(|space| space.activity = Activity::Idle);
     let start = Instant::now();
     let ms = Duration::from_millis;
@@ -5730,6 +5736,7 @@ fn speaking_before_a_reply_s_first_words_skips_it_as_it_comes_and_nothing_once_n
 
 #[test]
 fn speaking_over_the_agent_skips_the_rest_of_what_it_says_until_it_says_something_else() {
+    crate::test_support::log_everything();
     use crate::pill::Speaking;
     let mut conversation = on_wrist(|space| space.activity = Activity::Idle);
     let mut feedback = feedback::Feedback::new(feedback::Settings::default());
@@ -7864,6 +7871,7 @@ mod events {
 
 #[test]
 fn as_its_connections_session_it_applies_what_the_connection_reports() {
+    crate::test_support::log_everything();
     // The server given at startup is connected to as though it were chosen.
     let mut conversation = crate::test_support::conversation("Ada");
     assert!(Session::is_browsing(&conversation));
@@ -8556,6 +8564,7 @@ fn a_ticks_or_unticks_the_checklist_item_pointed_at_for_everyone_after_the_list_
 
 #[test]
 fn a_tick_says_the_revision_it_saw_and_one_refused_shows_the_panel_as_the_server_sends_it_again() {
+    crate::test_support::log_everything();
     let agenda = |body: &str, revision: u64| {
         Event::Message(ServerMessage::Projection {
             projection: Box::new(

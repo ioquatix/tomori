@@ -845,6 +845,7 @@ mod tests {
 
     #[test]
     fn an_avatar_that_panics_is_dropped_for_the_swarm_and_never_made_again() {
+        crate::test_support::log_everything();
         let input = Input::new(Visual::default(), Anchor::AGENT, 0.01);
         for method in [
             "factory",

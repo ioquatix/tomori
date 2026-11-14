@@ -192,6 +192,7 @@ mod tests {
 
     #[test]
     fn images_beyond_what_is_held_are_forgotten_least_recently_shown_first_but_never_one_shown() {
+        crate::test_support::log_everything();
         let size = (HELD_BYTES / 2) as u32;
         let (a, b, c) = (image('a', size), image('b', size), image('c', size));
         let start = Instant::now();

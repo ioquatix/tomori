@@ -60,6 +60,7 @@ fn eventually(ready: impl Fn() -> bool) {
 
 #[test]
 fn the_side_shares_its_flock_describes_it_and_answers_a_notice() {
+    log::set_max_level(log::LevelFilter::Trace);
     let cancellation = Cancellation::new();
     let kept = Arc::new(Kept::default());
     let space = Space::with_cancellation("space-1", "Fleet", "/", cancellation.child())
@@ -554,6 +555,7 @@ fn the_side_keeps_the_beach_s_stones_taking_one_within_reach_and_saying_so_with_
 #[test]
 fn the_side_announces_in_turn_at_the_pace_the_server_takes_and_drops_the_oldest_beyond_what_may_wait()
  {
+    log::set_max_level(log::LevelFilter::Trace);
     let now = Instant::now();
     let mut pace = Pace::new(now);
     for event in 0..100 {
