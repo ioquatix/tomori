@@ -108,14 +108,16 @@ fn model_vertex(vertex: Vertex, @builtin(instance_index) instance: u32) -> Shade
     return out;
 }
 
-// The light `lamp` gives a point at `world` facing `normal`, as much of it as `weight` says.
-fn lamp_light(lamp: Lamp, weight: f32, world: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
-    let offset = lamp.position.xyz - world;
+// The light the `index`th lamp gives a point at `world` facing `normal`, as much of it as `weight` says, read from the
+// uniform where it is used rather than given whole.
+fn lamp_light(index: u32, weight: f32, world: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
+    let position = lighting.lamps[index].position;
+    let offset = position.xyz - world;
     let distance = length(offset);
-    let reach = max(lamp.position.w, 0.001);
+    let reach = max(position.w, 0.001);
     let falloff = clamp(1.0 - distance / reach, 0.0, 1.0);
     let towards = offset / max(distance, 0.0001);
-    return lamp.color.rgb * weight * falloff * falloff * (0.35 + 0.65 * max(dot(normal, towards), 0.0));
+    return lighting.lamps[index].color.rgb * weight * falloff * falloff * (0.35 + 0.65 * max(dot(normal, towards), 0.0));
 }
 
 fn shade(in: Shaded, facing: bool) -> vec4<f32> {
@@ -139,7 +141,7 @@ fn shade(in: Shaded, facing: bool) -> vec4<f32> {
     // Its own lamps, in the lamps' order, or every lamp.
     if all(in.lamps.xy == vec2<u32>(0xffffffffu)) {
         for (var index = 0u; index < min(lighting.count.x, 64u); index += 1u) {
-            light += lamp_light(lighting.lamps[index], 1.0, in.world, normal);
+            light += lamp_light(index, 1.0, in.world, normal);
         }
     } else if all(in.lamps.zw == vec2<u32>(0xffffffffu)) {
         // Each giving all its light.
@@ -147,13 +149,13 @@ fn shade(in: Shaded, facing: bool) -> vec4<f32> {
         while low != 0u {
             let index = firstTrailingBit(low);
             low &= low - 1u;
-            light += lamp_light(lighting.lamps[index], 1.0, in.world, normal);
+            light += lamp_light(index, 1.0, in.world, normal);
         }
         var high = in.lamps.y;
         while high != 0u {
             let index = firstTrailingBit(high);
             high &= high - 1u;
-            light += lamp_light(lighting.lamps[32u + index], 1.0, in.world, normal);
+            light += lamp_light(32u + index, 1.0, in.world, normal);
         }
     } else {
         // Some fading, each by its byte.
@@ -162,14 +164,14 @@ fn shade(in: Shaded, facing: bool) -> vec4<f32> {
         while low != 0u {
             let index = firstTrailingBit(low);
             low &= low - 1u;
-            light += lamp_light(lighting.lamps[index], weight(in.lamps, lit), in.world, normal);
+            light += lamp_light(index, weight(in.lamps, lit), in.world, normal);
             lit += 1u;
         }
         var high = in.lamps.y;
         while high != 0u {
             let index = firstTrailingBit(high);
             high &= high - 1u;
-            light += lamp_light(lighting.lamps[32u + index], weight(in.lamps, lit), in.world, normal);
+            light += lamp_light(32u + index, weight(in.lamps, lit), in.world, normal);
             lit += 1u;
         }
     }
