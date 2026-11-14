@@ -727,6 +727,7 @@ mod tests {
 
     #[test]
     fn knocks_are_admitted_or_declined_first_come_and_announced_in_the_title() {
+        crate::test_support::log_everything();
         let mut conversation = joined();
         let mut desktop = desktop(&mut conversation);
         let now = Instant::now();

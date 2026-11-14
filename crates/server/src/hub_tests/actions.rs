@@ -889,8 +889,8 @@ fn an_action_whose_wait_cannot_start_or_whose_space_has_gone_is_told_as_not_answ
     hub.shutdown();
 }
 
-/// A side that answers each action late, keeping whether each answer was taken.
-struct Late(Arc<Mutex<Vec<bool>>>);
+/// A side that answers each action late, keeping whether each answer was taken, and saying once it has waited for one.
+struct Late(Arc<Mutex<Vec<bool>>>, Arc<std::sync::atomic::AtomicBool>);
 
 impl tomori_environment::ServerSide for Late {
     fn run(&self, space: &tomori_environment::Space) -> tomori_environment::Result<()> {
@@ -902,6 +902,8 @@ impl tomori_environment::ServerSide for Late {
                 std::thread::sleep(Duration::from_millis(100));
                 let taken = space.answer(acted.ticket(), Outcome::done("Pecked."));
                 self.0.lock().unwrap().push(taken);
+            } else {
+                self.1.store(true, std::sync::atomic::Ordering::Relaxed);
             }
         }
         Ok(())
@@ -911,8 +913,13 @@ impl tomori_environment::ServerSide for Late {
 #[test]
 fn an_action_whose_wait_cannot_start_is_waited_for_no_longer() {
     let taken = Arc::new(Mutex::new(Vec::new()));
-    let yard = yard(Late(taken.clone()));
+    let waiting = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let yard = yard(Late(taken.clone(), waiting.clone()));
     let hub = &yard.hub;
+    // The side is running, and waiting for an action, before one is asked for.
+    eventually_in("the side waits", || {
+        waiting.load(std::sync::atomic::Ordering::Relaxed)
+    });
     speak(&yard);
     crate::system::refuse("tomori-act");
     let unanswered = said(&act(

@@ -13,7 +13,39 @@ permissions:
   contents: read
 
 jobs:
-  # Formatting, Clippy and the workspace tests on current stable Rust. Pull requests and pushes to main run the tests under the Base 100% source-region coverage gate. The merge queue runs them without coverage instrumentation, which takes most of this job's time: each pull request in it has already passed the gate on its own, and the queue checks that it still builds and passes merged with those ahead of it. Pushes keep the gate so that main's Rust cache, which pull requests restore, holds the instrumented build. The main branch ruleset requires test-result below and check from publish.yml. See the Tests section of readme.md and design/testing.md.
+  # Formatting and Clippy, in a job of their own so that they don't add to the test job's time.
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          components: clippy, rustfmt
+          # Its own cache, of checked rather than built dependencies.
+          cache-shared-key: lint-check
+      - name: Install the ALSA development files for the desktop client
+        run: sudo apt-get update && sudo apt-get install --yes --no-install-recommends libasound2-dev
+      - uses: actions/cache@v6
+        with:
+          path: .tools/sherpa-onnx
+          key: sherpa-onnx-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/fetch-sherpa-onnx.sh') }}
+      - name: Fetch the sherpa-onnx libraries
+        run: bash scripts/fetch-sherpa-onnx.sh
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Run Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      # An environment's server side uses tomori-assets without its gpu feature, so its core must build, lint cleanly and depend on no GPU crate without it. See design/assets.md.
+      - name: Check tomori-assets without the GPU
+        run: |
+          cargo clippy --package tomori-assets --no-default-features --all-targets --locked -- -D warnings
+          if cargo tree --package tomori-assets --no-default-features --edges normal --prefix none --locked | grep -E '^(wgpu|naga|ash|tomori-render) '; then
+            echo "::error file=crates/assets/Cargo.toml::tomori-assets depends on a GPU crate without its gpu feature."
+            exit 1
+          fi
+
+  # The workspace tests on current stable Rust. Pull requests and pushes to main run the tests under the Base 100% source-region coverage gate. The merge queue runs them without coverage instrumentation, which takes most of this job's time: each pull request in it has already passed the gate on its own, and the queue checks that it still builds and passes merged with those ahead of it. Pushes keep the gate so that main's Rust cache, which pull requests restore, holds the instrumented build. The main branch ruleset requires test-result below and check from publish.yml. See the Tests section of readme.md and design/testing.md.
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -23,7 +55,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
-          components: clippy, llvm-tools-preview, rustfmt
+          components: llvm-tools-preview
           # Invalidate caches containing the retired socketry-cargo-bake launcher.
           cache-shared-key: coverage-bake-launcher-v2
       # Mesa's software Vulkan driver, lavapipe, and the Vulkan loader, so that the offscreen rendering tests run without a GPU.
@@ -47,19 +79,12 @@ jobs:
         run: |
           bash scripts/fetch-asr-model.sh whisper tiny.en
           bash scripts/fetch-tts-model.sh
-      - name: Check formatting
-        run: cargo fmt --all -- --check
-      - name: Run Clippy
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      # An environment's server side uses tomori-assets without its gpu feature, so its core must build, lint cleanly and depend on no GPU crate without it. See design/assets.md.
-      - name: Check tomori-assets without the GPU
-        run: |
-          cargo clippy --package tomori-assets --no-default-features --all-targets --locked -- -D warnings
-          if cargo tree --package tomori-assets --no-default-features --edges normal --prefix none --locked | grep -E '^(wgpu|naga|ash|tomori-render) '; then
-            echo "::error file=crates/assets/Cargo.toml::tomori-assets depends on a GPU crate without its gpu feature."
-            exit 1
-          fi
-      # In the merge queue: the targets and the documentation tests that the coverage task runs, without instrumentation.
+      # Runs the test binaries in parallel, each test in a process of its own, and records each test's time, with or without coverage. See .config/nextest.toml.
+      - name: Install nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+      # In the merge queue: the targets and the documentation tests that the coverage task runs, without instrumentation. Nextest does not run documentation tests.
       - name: Run tests
         if: env.COVERAGE == 'false'
         env:
@@ -68,7 +93,7 @@ jobs:
           # Fail the speech model tests, rather than skipping them, if a model is missing.
           TOMORI_REQUIRE_MODELS: 1
         run: |
-          cargo test --workspace --all-targets --locked
+          cargo nextest run --workspace --all-targets --locked --profile ci
           cargo test --workspace --doc --locked
       # Rust's cache keeps both tools in ~/.cargo/bin, so that these reinstall nothing unless a newer version is released.
       - name: Install Bake launcher
@@ -77,14 +102,15 @@ jobs:
       - name: Install coverage tool
         if: env.COVERAGE == 'true'
         run: cargo install cargo-llvm-cov --locked
-      # The coverage task runs the tests itself, after the project's test:before task, which fetches the sherpa-onnx libraries, unchanged since the step above.
+      # The coverage task runs the tests itself, after the project's test:before task, which fetches the sherpa-onnx libraries, unchanged since the step above: the documentation tests with Cargo, then the other targets under `cargo llvm-cov nextest`.
       - name: Run tests and require complete source-region coverage
         if: env.COVERAGE == 'true'
         shell: bash
         env:
           TOMORI_REQUIRE_GPU: 1
           TOMORI_REQUIRE_MODELS: 1
-        run: cargo bake --locked test:coverage --all-targets true 2>&1 | tee coverage.log
+          NEXTEST_PROFILE: ci
+        run: cargo bake --locked test:coverage --all-targets true --nextest true 2>&1 | tee coverage.log
       # Bake reports a coverage failure as one line holding every uncovered region, often megabytes long, which the Actions log viewer doesn't show. This step extracts the counts, computes the percentage, and writes it to both the log and the job summary.
       - name: Summarize coverage
         if: always() && env.COVERAGE == 'true'
@@ -98,6 +124,32 @@ jobs:
           counts=$(grep -o -E '[0-9]+/[0-9]+' <<< "$result" | head -n 1)
           percentage=$(awk -F / '{ if ($2 > 0) printf "%.2f", 100 * $1 / $2; else print "100.00" }' <<< "$counts")
           echo "Source-region coverage: ${percentage}% (${result})." | tee -a "$GITHUB_STEP_SUMMARY"
+      # Nextest's JUnit report, under the target directory that ran the tests: each test's result and time.
+      - name: Summarize the slowest tests
+        if: always()
+        shell: bash
+        run: |
+          report=$(find target -path '*/nextest/ci/junit.xml' -print -quit)
+          if [ -z "$report" ]; then
+            exit 0
+          fi
+          cp "$report" junit.xml
+          python3 - junit.xml >> "$GITHUB_STEP_SUMMARY" <<'PYTHON'
+          import sys, xml.etree.ElementTree as tree
+          suites = tree.parse(sys.argv[1]).getroot()
+          cases = [(float(case.get("time", 0)), suite.get("name"), case.get("name")) for suite in suites.iter("testsuite") for case in suite.iter("testcase")]
+          cases.sort(reverse=True)
+          print(f"### Slowest of {len(cases)} tests, {sum(case[0] for case in cases):.0f} s in all\n")
+          print("| Time | Binary | Test |\n| ---: | --- | --- |")
+          for time, binary, name in cases[:25]:
+              print(f"| {time:.1f} s | `{binary}` | `{name}` |")
+          PYTHON
+      - uses: actions/upload-artifact@v7
+        if: always() && hashFiles('junit.xml') != ''
+        with:
+          name: junit
+          path: junit.xml
+          retention-days: 14
 
   # That every target builds on the minimum supported version, which is the workspace's `rust-version` in Cargo.toml. The tests run on stable above.
   minimum:
@@ -274,7 +326,7 @@ jobs:
 
   test-result:
     if: always()
-    needs: [test, minimum, android, android-release, releases]
+    needs: [lint, test, minimum, android, android-release, releases]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

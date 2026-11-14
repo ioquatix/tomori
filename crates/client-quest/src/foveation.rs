@@ -447,6 +447,7 @@ mod tests {
 
     #[test]
     fn a_level_is_asked_for_by_name_or_number() {
+        log::set_max_level(log::LevelFilter::Trace);
         let level = |value| Request::parse(Some(value)).level;
         assert_eq!(Request::parse(None).level, Level::High);
         assert_eq!(level(" "), Level::High);

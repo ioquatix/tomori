@@ -1702,6 +1702,7 @@ fn the_panels_drawn_as_titles_are_counted_for_the_frame_log() {
 /// The level of detail is read from a client's setting, `off` or `angle`, and said as it starts.
 #[test]
 fn the_level_of_detail_is_parsed_and_described() {
+    crate::test_support::log_everything();
     for (value, lod) in [
         (None, PanelLod::Angle),
         (Some("angle"), PanelLod::Angle),

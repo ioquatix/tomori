@@ -1178,6 +1178,7 @@ fn timers_are_named_replaced_bounded_and_cancelled() {
 
 #[test]
 fn timers_are_kept_and_restored_and_catch_up_after_a_restart() {
+    crate::test_log::record();
     let mut space = timers(
         Request {
             name: Some("status".into()),
@@ -1225,6 +1226,7 @@ fn timers_are_kept_and_restored_and_catch_up_after_a_restart() {
 
 #[test]
 fn a_record_this_server_cannot_read_leaves_out_only_what_it_cannot_read() {
+    crate::test_log::record();
     let mut space = Timers::default();
     let now = local("2026-11-11 09:17");
     space
@@ -1298,6 +1300,7 @@ fn a_record_this_server_cannot_read_leaves_out_only_what_it_cannot_read() {
         every_none.next_after(local("2026-11-11 09:17"), &london()),
         Some(local("2026-11-11 09:18"))
     );
+    assert!(!crate::test_log::logged("which this server cannot read").is_empty());
 }
 
 #[test]

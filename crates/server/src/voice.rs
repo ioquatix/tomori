@@ -723,8 +723,8 @@ mod enabled {
             }
         }
 
-        /// A synthesizer that says nothing once it is let go of.
-        struct Held(Receiver<()>);
+        /// A synthesizer that says it has begun, then says nothing once it is let go of.
+        struct Held(Sender<()>, Receiver<()>);
 
         impl Synthesizer for Held {
             fn synthesize(
@@ -732,7 +732,8 @@ mod enabled {
                 _: &str,
                 _: &mut dyn FnMut(AudioChunk),
             ) -> Result<(), tomori_speech::Error> {
-                let _ = self.0.recv();
+                let _ = self.0.send(());
+                let _ = self.1.recv();
                 Ok(())
             }
         }
@@ -881,7 +882,8 @@ mod enabled {
             let (hub, space) = space();
             // Synthesis waits, as for a long paragraph after its turn has ended.
             let (release, held) = mpsc::channel::<()>();
-            let mut voice = Voices::new(Held(held)).start(&hub, &space).unwrap();
+            let (begun, synthesizing) = mpsc::channel::<()>();
+            let mut voice = Voices::new(Held(begun, held)).start(&hub, &space).unwrap();
             assert!(!hub.speech_to_come(&space, Instant::now()));
             voice.observe(&Event::MessageStarted {
                 message: "m".into(),
@@ -895,6 +897,9 @@ mod enabled {
                 message: "m".into(),
             });
             assert!(hub.speech_to_come(&space, Instant::now()));
+            synthesizing
+                .recv_timeout(Duration::from_secs(5))
+                .expect("synthesis begins");
             // Synthesis that hangs ends the reply all the same, once nothing of its speech has moved for a minute.
             assert!(!hub.speech_to_come(&space, Instant::now() + crate::hub::SPEECH_STALLED));
             // Synthesis stopping leaves nothing to come.

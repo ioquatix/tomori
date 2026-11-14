@@ -1021,6 +1021,7 @@ mod tests {
 
     #[test]
     fn recenter_waits_until_runtime_change_time_and_preserves_simulation_coordinates() {
+        crate::test_support::log_everything();
         let mut anchor = SceneAnchor::default();
         let views = stereo(Vec3::new(2.0, 1.6, 1.0), Quat::from_rotation_y(1.0));
         let now = Instant::now();
@@ -1184,6 +1185,7 @@ mod tests {
 
     #[test]
     fn the_session_begins_ends_and_reports_focus() {
+        crate::test_support::log_everything();
         let mut conversation = joined();
         let mut feedback = felt();
         let start = Instant::now();
@@ -1240,6 +1242,7 @@ mod tests {
 
     #[test]
     fn the_microphone_is_asked_for_once_the_scene_is_shown_and_followed_without_waiting() {
+        crate::test_support::log_everything();
         use crate::conversation::MICROPHONE_REQUEST;
         use crate::microphone_request::{CHECK, RETURNED, SETTLE};
 
@@ -1379,6 +1382,7 @@ mod tests {
 
     #[test]
     fn a_click_of_the_left_stick_toggles_the_live_microphone_once() {
+        crate::test_support::log_everything();
         let mut conversation = joined();
         let mut feedback = felt();
         let start = Instant::now();

@@ -1,0 +1,13 @@
+# The Test workflow's profile, selected with NEXTEST_PROFILE=ci or --profile ci. See design/testing.md.
+[profile.ci]
+# Run every test and report every failure, rather than stopping at the first.
+fail-fast = false
+# Flag tests running for over a minute, as Cargo's test harness does.
+slow-timeout = { period = "60s" }
+# Write each test's result and time, which the workflow uploads and summarises.
+junit = { path = "junit.xml" }
+
+# tomori-speech's model tests take the longest under coverage, 10 to 30 s each, and its binary comes last in the default order, so that they finished the run alone. Started first, they run beside the rest.
+[[profile.ci.overrides]]
+filter = 'binary_id(tomori-speech)'
+priority = 100

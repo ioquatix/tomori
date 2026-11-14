@@ -2060,6 +2060,7 @@ impl crate::anchors::WorkerPlacement for Panics {
 
 #[test]
 fn a_placement_that_panics_is_never_called_again_and_its_workers_stand_on_the_arc() {
+    crate::test_support::log_everything();
     use std::sync::atomic::Ordering;
     // Arriving: two workers at once, then one more.
     let panics = std::sync::Arc::new(Panics::default());

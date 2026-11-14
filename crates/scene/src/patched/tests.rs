@@ -33,6 +33,7 @@ fn patch(before: &Projection, after: &Projection) -> ProjectionPatch {
 
 #[test]
 fn a_patch_applies_from_the_revision_held_and_a_gap_asks_once_for_the_projection_whole() {
+    crate::test_support::log_everything();
     let now = Instant::now();
     let mut held = Held::default();
     // Holding nothing, as before the projection whole arrives, a patch asks for it.

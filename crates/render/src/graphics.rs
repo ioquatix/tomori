@@ -3044,6 +3044,7 @@ mod tests {
 
     #[test]
     fn multisampling_is_asked_for_by_count_or_switch() {
+        log::set_max_level(log::LevelFilter::Trace);
         assert_eq!(requested_samples(None), SAMPLES);
         assert_eq!(requested_samples(Some("")), SAMPLES);
         for on in ["4", "on", " ON "] {

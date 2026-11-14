@@ -161,6 +161,7 @@ fn settle(
 
 #[test]
 fn textures_stay_within_their_budget_letting_go_of_those_not_shown_and_cutting_new_ones_down() {
+    log::set_max_level(log::LevelFilter::Trace);
     crate::test_gpu::with(|gpu| {
         let mut images = images(&gpu.device);
         let image = |name: &str, seed| (name.to_owned(), png(512, seed));

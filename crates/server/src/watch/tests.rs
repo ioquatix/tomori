@@ -392,6 +392,7 @@ fn stalls_are_paced_but_a_failure_is_told_at_once() {
 
 #[test]
 fn notes_are_capped_in_a_day_and_while_nobody_is_there() {
+    crate::test_log::record();
     let mut watch = Watch::default();
     let workers = [worker("ses_1", "One", WorkerState::Running)];
     // The worker stalls from `at`, after completing cleanly, which keeps its plain threshold: the notes told.
@@ -449,6 +450,7 @@ fn notes_are_capped_in_a_day_and_while_nobody_is_there() {
 
 #[test]
 fn a_sleep_or_a_jump_of_the_clock_is_not_time_without_progress() {
+    crate::test_log::record();
     let mut watch = Watch::default();
     let workers = [
         worker("ses_1", "One", WorkerState::Running),
