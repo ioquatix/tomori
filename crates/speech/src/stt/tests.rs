@@ -223,6 +223,7 @@ fn sends_partials_during_the_utterance_and_a_final_after_it() {
 
 #[test]
 fn an_utterance_that_cannot_start_fails() {
+    log::set_max_level(log::LevelFilter::Trace);
     let mut recognition = Recognition::spawn(Scripted::new(Script {
         refuse: true,
         ..Script::default()
@@ -261,6 +262,7 @@ fn a_decode_failure_fails_only_its_own_utterance() {
 
 #[test]
 fn a_finish_failure_fails_only_its_own_utterance() {
+    log::set_max_level(log::LevelFilter::Trace);
     let mut recognition = Recognition::spawn(Scripted::new(Script {
         lazy: true,
         ..Script::default()
@@ -345,6 +347,7 @@ fn finishing_takes_priority_over_partials() {
 
 #[test]
 fn an_utterance_that_falls_behind_fails() {
+    log::set_max_level(log::LevelFilter::Trace);
     let gate = Gate::closed();
     let mut recognition = Recognition::spawn(Scripted::new(Script {
         gate: Some(Arc::clone(&gate)),
@@ -427,6 +430,7 @@ fn resamples_to_sixteen_kilohertz() {
 
 #[test]
 fn a_panic_disables_recognition_and_fails_every_utterance() {
+    log::set_max_level(log::LevelFilter::Trace);
     let mut recognition = Recognition::spawn(Scripted::default());
     let (mut waiting, waiting_events) = collect(&mut recognition, 1);
     speak(&mut waiting, &["run"]);
@@ -556,6 +560,7 @@ fn an_engine_stopped_while_applying_what_waits_stops_and_ignores_audio_for_no_ut
 
 #[test]
 fn a_second_panic_is_reported_once() {
+    log::set_max_level(log::LevelFilter::Trace);
     let (mut engine, _sender) = engine_of(Scripted::default());
     engine.disable("first");
     engine.disable("second");

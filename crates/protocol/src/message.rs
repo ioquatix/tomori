@@ -2064,6 +2064,7 @@ mod tests {
 
     #[test]
     fn environment_versions_are_additions_older_peers_ignore() {
+        log::set_max_level(log::LevelFilter::Trace);
         let hello = |environments| ClientMessage::Hello {
             protocol: 2,
             participant: "p".into(),

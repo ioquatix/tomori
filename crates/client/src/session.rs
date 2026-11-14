@@ -679,6 +679,7 @@ mod tests {
 
     #[test]
     fn an_image_is_handed_on_whole_and_only_if_it_is_what_its_hash_says() {
+        crate::test_support::log_everything();
         use tomori_protocol::{IMAGE_CHUNK_BYTES, ImageChunk, hash_text};
         let png: Vec<u8> = (0..IMAGE_CHUNK_BYTES * 2 + 3)
             .map(|index| (index % 251) as u8)

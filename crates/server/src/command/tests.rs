@@ -566,6 +566,7 @@ impl Announce for Running {
 
 #[test]
 fn counts_are_announced_only_where_advertised_and_a_failure_is_said() {
+    crate::test_log::record();
     announce(None::<&Stopped>, Default::default());
     announce(Some(&Running), Default::default());
     announce(Some(&Stopped), Default::default());
@@ -580,6 +581,7 @@ fn counts_are_announced_only_where_advertised_and_a_failure_is_said() {
     )
     .expect("the responder starts");
     announce(Some(&advertised), Default::default());
+    assert!(!crate::test_log::logged("Bonjour: could not advertise the new counts").is_empty());
 }
 
 /// An error with a cause.

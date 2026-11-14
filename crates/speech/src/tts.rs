@@ -285,6 +285,7 @@ mod tests {
 
     #[test]
     fn a_failed_segment_is_reported_and_later_segments_continue() {
+        log::set_max_level(log::LevelFilter::Trace);
         let (mut speech, receiver, _) = spawn(Duration::ZERO);
         speech.speak("please fail now");
         speech.speak("recovered");

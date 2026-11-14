@@ -449,6 +449,7 @@ pub fn place(
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use crate::test_log::logged;
     use tomori_protocol::Label;
 
     /// Card `number` of `o/r`, of `kind`, opened at 1,000 seconds after the epoch.
@@ -568,44 +569,6 @@ pub(crate) mod tests {
         );
         assert_jittered(&refresh, start, WAIT_MOST);
         assert_eq!(Refresh::default().wait(start), Duration::ZERO);
-    }
-
-    /// Every log record of this process's tests, so that a test can find its own.
-    struct Recorder(std::sync::Mutex<Vec<(log::Level, String)>>);
-
-    impl log::Log for Recorder {
-        fn enabled(&self, _: &log::Metadata<'_>) -> bool {
-            true
-        }
-
-        fn log(&self, record: &log::Record<'_>) {
-            self.0
-                .lock()
-                .unwrap()
-                .push((record.level(), record.args().to_string()));
-        }
-
-        fn flush(&self) {}
-    }
-
-    static LOG: Recorder = Recorder(std::sync::Mutex::new(Vec::new()));
-
-    /// The records logged so far that mention `about`, recording from the first call on.
-    fn logged(about: &str) -> Vec<(log::Level, String)> {
-        static RECORDING: std::sync::Once = std::sync::Once::new();
-        RECORDING.call_once(|| {
-            log::set_logger(&LOG).expect("only these tests log to a recorder");
-            log::set_max_level(log::LevelFilter::Info);
-        });
-        log::Log::flush(&LOG);
-        assert!(log::Log::enabled(&LOG, &log::Metadata::builder().build()));
-        LOG.0
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|(_, line)| line.contains(about))
-            .cloned()
-            .collect()
     }
 
     #[test]

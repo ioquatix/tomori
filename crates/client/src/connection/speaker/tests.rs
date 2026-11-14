@@ -76,6 +76,7 @@ impl Playback for Communicating {
 
 #[test]
 fn an_open_speaker_is_opened_again_on_gaining_focus_where_the_platform_asks() {
+    crate::test_support::log_everything();
     let fake = FakeSpeaker {
         reopens: true,
         ..FakeSpeaker::default()
@@ -145,6 +146,7 @@ fn the_speaker_opens_on_its_own_thread_and_closes_when_the_client_goes_away() {
 
 #[test]
 fn a_failed_speaker_is_reported_once_and_opened_again_later() {
+    crate::test_support::log_everything();
     let mut client = client();
     let fake = FakeSpeaker::default();
     let mut speaker = Speaker::new(Box::new(fake.clone()));

@@ -405,6 +405,7 @@ fn transparency_is_laid_over_white() {
 
 #[test]
 fn the_store_keeps_images_by_hash_and_sweeps_those_no_panel_shows() {
+    crate::test_log::record();
     let folder = folder("store");
     let source = folder.join("source");
     fs::create_dir(&source).unwrap();

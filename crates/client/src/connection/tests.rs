@@ -599,6 +599,7 @@ fn asking_for_the_microphone_ahead_of_time_asks_the_platform_once() {
 
 #[test]
 fn without_a_connection_nothing_is_sent_and_the_participant_is_told() {
+    crate::test_support::log_everything();
     let mut session = Script::listening();
     let mut connection = connection(&mut session, Scripted::default(), Nowhere);
     connection.feedback().set_haptics(true);

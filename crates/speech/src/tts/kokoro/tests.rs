@@ -315,6 +315,7 @@ fn the_model_is_given_the_phonemes_it_knows() {
 
 #[test]
 fn a_model_that_panics_disables_synthesis() {
+    log::set_max_level(log::LevelFilter::Trace);
     let mut synthesizer = faked(|_| panic!("the model broke"));
     let Err(Error::Stopped(_)) = spoken(&mut synthesizer, "Hello.") else {
         unreachable!("a panic stops synthesis");
